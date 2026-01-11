@@ -1,0 +1,65 @@
+﻿<!-- Title -->
+<div style="font-size:22px; line-height:28px; font-weight:700; color:#111827; margin:0; padding:0;">
+    Verify your email
+</div>
+
+<div style="height:10px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Greeting -->
+<div style="font-size:15px; line-height:22px; color:#111827;">
+    Hello <strong>{{DisplayName}}</strong>,
+</div>
+
+<div style="height:12px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Copy -->
+<div style="font-size:15px; line-height:22px; color:#374151;">
+    Please confirm your email address to complete your {{ProductName}} account setup.
+</div>
+
+<div style="height:18px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Bulletproof Button (Outlook VML + HTML fallback) -->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0;">
+    <tr>
+        <td align="left" style="padding:0;">
+            <!--[if mso]>
+              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word"
+                href="{{{VerificationUrl}}}"
+                style="height:44px; v-text-anchor:middle; width:190px;"
+                arcsize="12%" stroke="f" fillcolor="#7a0c14">
+                <w:anchorlock/>
+                <center style="color:#ffffff; font-family:Arial, Helvetica, sans-serif; font-size:15px; font-weight:700;">
+                  Verify Email
+                </center>
+              </v:roundrect>
+            <![endif]-->
+            <!--[if !mso]><!-- -->
+            <a href="{{{VerificationUrl}}}"
+               style="display:inline-block; background-color:#7a0c14; color:#ffffff; font-family:Arial, Helvetica, sans-serif;
+                font-size:15px; font-weight:700; line-height:44px; text-align:center; width:190px;
+                border-radius:6px; text-decoration:none;">
+                Verify Email
+            </a>
+            <!--<![endif]-->
+        </td>
+    </tr>
+</table>
+
+<div style="height:16px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Fine print -->
+<div style="font-size:13px; line-height:18px; color:#6b7280;">
+    This link expires in 24 hours. If you did not create an account, you can ignore this email.
+</div>
+
+<div style="height:14px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Fallback link -->
+<div style="font-size:13px; line-height:18px; color:#374151;">
+    Having trouble? Copy and paste this link:
+</div>
+
+<div style="font-size:12.5px; line-height:18px; color:#111827; word-break:break-all;">
+    <a href="{{{VerificationUrl}}}" style="color:#1d4ed8; text-decoration:underline;">{{{VerificationUrl}}}</a>
+</div>

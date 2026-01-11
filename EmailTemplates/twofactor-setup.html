@@ -1,0 +1,136 @@
+﻿<!-- Title -->
+<div style="font-size:22px; line-height:28px; font-weight:700; color:#111827; margin:0; padding:0;">
+    Enable Two-Factor Authentication (2FA)
+</div>
+
+<div style="height:10px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Greeting -->
+<div style="font-size:15px; line-height:22px; color:#111827;">
+    Hello <strong>{{DisplayName}}</strong>,
+</div>
+
+<div style="height:12px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Intro -->
+<div style="font-size:15px; line-height:22px; color:#374151;">
+    Scan this QR code with <strong>Google Authenticator</strong> or any TOTP app to finish setting up 2FA for your {{ProductName}} account.
+</div>
+
+<div style="height:18px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- QR Card (Outlook/Gmail safe) -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0;">
+    <tr>
+        <td align="center" style="padding:0;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+                   style="width:100%; max-width:520px; background-color:#f9fafb; border:1px solid #e5e7eb; border-radius:12px;">
+                <tr>
+                    <td align="center" style="padding:18px 16px;">
+                        <div style="font-family:Arial, Helvetica, sans-serif; font-size:13px; line-height:18px; color:#6b7280;">
+                            Scan this QR code
+                        </div>
+
+                        <div style="height:10px; font-size:0; line-height:0;">&nbsp;</div>
+
+                        <!-- Safe CID image container -->
+                        <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                            <tr>
+                                <td align="center" style="background-color:#ffffff; border:1px solid #e5e7eb; border-radius:10px; padding:12px;">
+                                    <img src="cid:{{QrCid}}" width="220" height="220" alt="2FA QR Code"
+                                         style="display:block; width:220px; height:220px; border:0; outline:none; text-decoration:none;" />
+                                </td>
+                            </tr>
+                        </table>
+
+                        <div style="height:12px; font-size:0; line-height:0;">&nbsp;</div>
+
+                        <div style="font-family:Arial, Helvetica, sans-serif; font-size:13px; line-height:18px; color:#6b7280;">
+                            Can’t scan? Use the manual setup key below.
+                        </div>
+                    </td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+</table>
+
+<div style="height:18px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Manual Secret -->
+<div style="font-size:14px; line-height:20px; color:#111827; font-weight:700;">
+    Manual setup key (Secret)
+</div>
+
+<div style="height:8px; font-size:0; line-height:0;">&nbsp;</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+        <td style="background-color:#ffffff; border:1px solid #e5e7eb; border-radius:10px; padding:12px;">
+            <div style="font-family:Arial, Helvetica, sans-serif; font-size:14px; line-height:20px; color:#111827;">
+                <span style="font-weight:700; letter-spacing:0.6px;">{{SecretKey}}</span>
+            </div>
+            <div style="font-family:Arial, Helvetica, sans-serif; font-size:12.5px; line-height:18px; color:#6b7280; padding-top:6px;">
+                Enter this key in your authenticator app if you can’t scan the QR code.
+            </div>
+        </td>
+    </tr>
+</table>
+
+<div style="height:18px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Setup Token -->
+<div style="font-size:14px; line-height:20px; color:#111827; font-weight:700;">
+    Setup Token (one-time)
+</div>
+
+<div style="height:8px; font-size:0; line-height:0;">&nbsp;</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+        <td style="background-color:#ffffff; border:1px solid #e5e7eb; border-radius:10px; padding:12px;">
+            <div style="font-family:Arial, Helvetica, sans-serif; font-size:12.5px; line-height:18px; color:#374151;">
+                Expires: <strong>{{SetupTokenExpiryUtc}}</strong>
+            </div>
+
+            <div style="height:10px; font-size:0; line-height:0;">&nbsp;</div>
+
+            <!-- Token box: avoid <pre>, use wrap-friendly styles -->
+            <div style="font-family:Arial, Helvetica, sans-serif; font-size:13px; line-height:18px; color:#111827;
+                  word-break:break-all; overflow-wrap:anywhere;">
+                <strong>{{SetupToken}}</strong>
+            </div>
+
+            <div style="font-family:Arial, Helvetica, sans-serif; font-size:12.5px; line-height:18px; color:#6b7280; padding-top:8px;">
+                Use this token when submitting your 2FA setup verification request.
+            </div>
+        </td>
+    </tr>
+</table>
+
+<div style="height:18px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- How to finish -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0;">
+    <tr>
+        <td style="background-color:#fff7ed; border:1px solid #fed7aa; border-radius:12px; padding:14px;">
+            <div style="font-family:Arial, Helvetica, sans-serif; font-size:13.5px; line-height:19px; color:#7c2d12;">
+                <strong>Next step:</strong> Open your authenticator app, get the 6-digit code, then submit it to complete setup.
+            </div>
+
+            <div style="height:10px; font-size:0; line-height:0;">&nbsp;</div>
+
+            <div style="font-family:Arial, Helvetica, sans-serif; font-size:12.5px; line-height:18px; color:#7c2d12;">
+                Endpoint:
+                <span style="font-weight:700;">POST /api/security/verify-2fa-setup</span>
+            </div>
+        </td>
+    </tr>
+</table>
+
+<div style="height:14px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Safety note -->
+<div style="font-size:13px; line-height:18px; color:#6b7280;">
+    If you didn’t request this, you can ignore this email. For security, do not share your secret or setup token.
+</div>
