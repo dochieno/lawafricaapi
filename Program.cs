@@ -259,24 +259,23 @@ builder.Services.AddSwaggerGen(c =>
         [new OpenApiSecuritySchemeReference("bearer", document)] = new List<string>()
     });
 });
-
 var app = builder.Build();
 
 // --------------------------------------------------
 // Middleware
 // --------------------------------------------------
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
 
-//app.UseHttpsRedirection();
-
-if (!app.Environment.IsDevelopment())
+// ✅ Enable Swagger in BOTH Dev and Production (Render is Production)
+app.UseSwagger();
+app.UseSwaggerUI(c =>
 {
-    app.UseHttpsRedirection();
-}
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "LawAfrica.API v1");
+    c.RoutePrefix = "swagger"; // keeps it at /swagger
+});
+
+// ✅ Render terminates HTTPS at the proxy; don't force redirect here.
+// If you really want HTTPS redirect later, we’ll configure forwarded headers first.
+// app.UseHttpsRedirection();
 
 app.UseCors("ViteDev");
 
@@ -307,3 +306,4 @@ if (!string.IsNullOrEmpty(port))
 }
 
 app.Run();
+
