@@ -296,6 +296,9 @@ app.UseAuthorization();
 
 app.MapControllers();
 
+app.MapGet("/", () => Results.Ok(new { status = "ok", service = "LawAfrica.API" }));
+app.MapGet("/health", () => Results.Ok("ok"));
+
 var port = Environment.GetEnvironmentVariable("PORT");
 
 if (!string.IsNullOrEmpty(port))
