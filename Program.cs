@@ -3,6 +3,7 @@ using LawAfrica.API.Authorization.Handlers;
 using LawAfrica.API.Authorization.Policies;
 using LawAfrica.API.Authorization.Requirements;
 using LawAfrica.API.Data;
+using LawAfrica.API.Data.Seed;
 using LawAfrica.API.Models;
 using LawAfrica.API.Services;
 using LawAfrica.API.Services.Documents;
@@ -304,6 +305,13 @@ if (!string.IsNullOrEmpty(port))
 {
     app.Urls.Add($"http://0.0.0.0:{port}");
 }
+
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+    await AdminUserSeeder.SeedAsync(db);
+}
+
 
 app.Run();
 
