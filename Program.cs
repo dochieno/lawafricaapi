@@ -17,6 +17,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
+using System;
 using System.Text;
 using System.Text.Json.Serialization;
 
@@ -304,6 +305,13 @@ if (!string.IsNullOrEmpty(port))
 {
     app.Urls.Add($"http://0.0.0.0:{port}");
 }
+
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+    db.Database.Migrate();
+}
+
 
 
 app.Run();
