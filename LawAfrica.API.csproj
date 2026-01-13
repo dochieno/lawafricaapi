@@ -23,6 +23,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Folder Include="Data\Migrations\" />
     <Folder Include="Migrations\" />
     <Folder Include="Storage\LegalDocuments\" />
     <Folder Include="Storage\Covers\" />
@@ -34,5 +35,9 @@
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Migrations_OldV1\**\*.cs" />
+  </ItemGroup>
+
 
 </Project>

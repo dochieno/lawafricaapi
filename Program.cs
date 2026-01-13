@@ -306,18 +306,6 @@ if (!string.IsNullOrEmpty(port))
     app.Urls.Add($"http://0.0.0.0:{port}");
 }
 
-try
-{
-    using var scope = app.Services.CreateScope();
-    var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-    db.Database.Migrate();
-}
-catch (Exception ex)
-{
-    app.Logger.LogError(ex, "Database migration failed on startup.");
-    // DO NOT crash the app
-}
-
 
 app.Run();
 
