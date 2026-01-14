@@ -263,7 +263,8 @@ namespace LawAfrica.API.Controllers
         public async Task<IActionResult> Download(
             int id,
             [FromServices] IAuthorizationService authorizationService,
-            [FromServices] DocumentEntitlementService entitlementService)
+            [FromServices] DocumentEntitlementService entitlementService,
+            [FromServices] FileStorageService storage)
         {
             var doc = await _db.LegalDocuments.FindAsync(id);
             if (doc == null || string.IsNullOrWhiteSpace(doc.FilePath))
@@ -295,7 +296,7 @@ namespace LawAfrica.API.Controllers
 
             var accessLevel = decision.AccessLevel;
 
-            var physicalPath = Path.Combine(Directory.GetCurrentDirectory(), doc.FilePath);
+            var physicalPath = storage.ResolvePhysicalPathFromDbPath(doc.FilePath);
             if (!System.IO.File.Exists(physicalPath))
                 return NotFound("File missing on server.");
 
@@ -342,7 +343,7 @@ namespace LawAfrica.API.Controllers
 
                 var clean = relativePath.Replace("\\", "/");
                 clean = clean.Replace("Storage/", "", StringComparison.OrdinalIgnoreCase).TrimStart('/');
-                var coverUrl = $"{Request.Scheme}://{Request.Host}/storage/{clean}".ToLowerInvariant();
+                var coverUrl = $"{Request.Scheme}://{Request.Host}/storage/{clean}";
 
                 return Ok(new
                 {
@@ -470,7 +471,7 @@ namespace LawAfrica.API.Controllers
         }
 
         [HttpGet("{id:int}/availability")]
-        public async Task<IActionResult> GetAvailability(int id)
+        public async Task<IActionResult> GetAvailability(int id, [FromServices] FileStorageService storage)
         {
             var doc = await _db.LegalDocuments
                 .AsNoTracking()
@@ -491,7 +492,8 @@ namespace LawAfrica.API.Controllers
                 });
             }
 
-            var physicalPath = Path.Combine(Directory.GetCurrentDirectory(), doc.FilePath);
+            //var physicalPath = Path.Combine(Directory.GetCurrentDirectory(), doc.FilePath);
+            var physicalPath = storage.ResolvePhysicalPathFromDbPath(doc.FilePath);
 
             if (!System.IO.File.Exists(physicalPath))
             {
