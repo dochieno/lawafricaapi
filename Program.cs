@@ -258,6 +258,10 @@ app.UseSwaggerUI(c =>
     c.RoutePrefix = "swagger";
 });
 
+// ✅ ADD THIS: required for correct endpoint routing + CORS behavior
+app.UseRouting();
+
+// ✅ Keep CORS after routing (so it applies to controller endpoints properly)
 app.UseCors("ViteDev");
 
 var storageRoot = Path.Combine(Directory.GetCurrentDirectory(), "Storage");
