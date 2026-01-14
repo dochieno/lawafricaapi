@@ -51,7 +51,7 @@ builder.Services.AddControllers()
     });
 
 // --------------------------------------------------
-// ✅ Options Binding (FIXED)
+// Options Binding
 // --------------------------------------------------
 builder.Services.Configure<EmailSettings>(
     builder.Configuration.GetSection("EmailSettings"));
@@ -106,57 +106,45 @@ builder.Services.AddScoped<DocumentEntitlementService>();
 builder.Services.AddScoped<FileStorageService>();
 builder.Services.AddScoped<ReadingProgressService>();
 builder.Services.AddScoped<IDocumentIndexingService, PdfDocumentIndexingService>();
-
-// ✅ Seat guard (already correct)
 builder.Services.AddScoped<InstitutionSeatGuard>();
 
-//AdminService
+// Usage / Admin
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<LawAfrica.API.Services.Usage.IUsageEventWriter, LawAfrica.API.Services.Usage.UsageEventWriter>();
 builder.Services.AddScoped<LawAfrica.API.Services.Usage.UsageEventLogger>();
 
-//Paystack
+// Paystack
 builder.Services.Configure<PaystackOptions>(builder.Configuration.GetSection("Paystack"));
-
-// Typed HttpClient for Paystack
 builder.Services.AddHttpClient<PaystackService>();
 builder.Services.AddScoped<PaymentReconciliationService>();
 
-// --------------------------------------------------
-// HttpContext
-// --------------------------------------------------
-builder.Services.AddHttpContextAccessor();
-
-//Email Service
+// Email templates
 builder.Services.AddSingleton<IEmailTemplateStore, FileEmailTemplateStore>();
 builder.Services.AddSingleton<IEmailTemplateRenderer, SimpleTokenEmailTemplateRenderer>();
 builder.Services.AddScoped<EmailComposer>();
 
 // --------------------------------------------------
-// 🔐 AUTHORIZATION (SINGLE BLOCK ONLY)
+// Authorization
 // --------------------------------------------------
 builder.Services.AddAuthorization(options =>
 {
-    options.AddPolicy("RequireAdmin", policy =>
-        policy.RequireRole("Admin"));
+    options.AddPolicy("RequireAdmin", policy => policy.RequireRole("Admin"));
+    options.AddPolicy("RequireUser", policy => policy.RequireRole("User", "Admin"));
 
-    options.AddPolicy("RequireUser", policy =>
-        policy.RequireRole("User", "Admin"));
+    options.AddPolicy(PolicyNames.ApprovedUserOnly,
+        policy => policy.Requirements.Add(new ApprovedUserRequirement()));
 
-    options.AddPolicy(PolicyNames.ApprovedUserOnly, policy =>
-        policy.Requirements.Add(new ApprovedUserRequirement()));
+    options.AddPolicy(PolicyNames.IsInstitutionAdmin,
+        policy => policy.Requirements.Add(new InstitutionAdminRequirement()));
 
-    options.AddPolicy(PolicyNames.IsInstitutionAdmin, policy =>
-        policy.Requirements.Add(new InstitutionAdminRequirement()));
+    options.AddPolicy(PolicyNames.CanApproveInstitutionUsers,
+        policy => policy.Requirements.Add(new CanApproveInstitutionUsersRequirement()));
 
-    options.AddPolicy(PolicyNames.CanApproveInstitutionUsers, policy =>
-        policy.Requirements.Add(new CanApproveInstitutionUsersRequirement()));
+    options.AddPolicy(PolicyNames.CanAccessLegalDocuments,
+        policy => policy.Requirements.Add(new CanAccessLegalDocumentRequirement()));
 
-    options.AddPolicy(PolicyNames.CanAccessLegalDocuments, policy =>
-        policy.Requirements.Add(new CanAccessLegalDocumentRequirement()));
-
-    options.AddPolicy(PolicyNames.IsGlobalAdmin, policy =>
-        policy.Requirements.Add(new GlobalAdminRequirement()));
+    options.AddPolicy(PolicyNames.IsGlobalAdmin,
+        policy => policy.Requirements.Add(new GlobalAdminRequirement()));
 
     options.AddPolicy("Permissions.Users.Create",
         p => p.Requirements.Add(new PermissionRequirement("users.create")));
@@ -171,9 +159,7 @@ builder.Services.AddAuthorization(options =>
         p => p.Requirements.Add(new PermissionRequirement("payments.reconcile")));
 });
 
-// --------------------------------------------------
-// Authorization Handlers
-// --------------------------------------------------
+// Handlers
 builder.Services.AddScoped<IAuthorizationHandler, ApprovedUserHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, InstitutionAdminHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, CanApproveInstitutionUsersHandler>();
@@ -205,7 +191,6 @@ builder.Services
     {
         options.RequireHttpsMetadata = false;
         options.SaveToken = true;
-
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -219,17 +204,16 @@ builder.Services
     });
 
 // --------------------------------------------------
-// CORS
+// ✅ CORS (FIXED)
 // --------------------------------------------------
-// ✅ ONLY CHANGE HERE: Added Vercel origins while keeping policy name intact.
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("ViteDev", policy =>
     {
         policy.WithOrigins(
-                "http://localhost:5173",                      // local dev
-                "https://lawafricadigitalhub.vercel.app",     // Vercel prod
-                "https://www.lawafricadigitalhub.vercel.app"  // optional www
+                "http://localhost:5173",
+                "https://lawafricadigitalhub.vercel.app",
+                "https://www.lawafricadigitalhub.vercel.app"
               )
               .AllowAnyHeader()
               .AllowAnyMethod();
@@ -267,22 +251,15 @@ var app = builder.Build();
 // --------------------------------------------------
 // Middleware
 // --------------------------------------------------
-
-// ✅ Enable Swagger in BOTH Dev and Production (Render is Production)
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
     c.SwaggerEndpoint("/swagger/v1/swagger.json", "LawAfrica.API v1");
-    c.RoutePrefix = "swagger"; // keeps it at /swagger
+    c.RoutePrefix = "swagger";
 });
 
-// ✅ Render terminates HTTPS at the proxy; don't force redirect here.
-// app.UseHttpsRedirection();
-
-// ✅ FIX: Use the policy name you actually registered above ("ViteDev")
 app.UseCors("ViteDev");
 
-// Static file storage
 var storageRoot = Path.Combine(Directory.GetCurrentDirectory(), "Storage");
 Directory.CreateDirectory(storageRoot);
 
@@ -292,7 +269,6 @@ app.UseStaticFiles(new StaticFileOptions
     RequestPath = "/storage"
 });
 
-// 🔐 MUST BE IN THIS ORDER
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -302,7 +278,6 @@ app.MapGet("/", () => Results.Ok(new { status = "ok", service = "LawAfrica.API" 
 app.MapGet("/health", () => Results.Ok("ok"));
 
 var port = Environment.GetEnvironmentVariable("PORT");
-
 if (!string.IsNullOrEmpty(port))
 {
     app.Urls.Add($"http://0.0.0.0:{port}");
@@ -317,7 +292,6 @@ try
 catch (Exception ex)
 {
     app.Logger.LogError(ex, "Database migration failed on startup.");
-    // DO NOT crash the app
 }
 
 app.Run();
