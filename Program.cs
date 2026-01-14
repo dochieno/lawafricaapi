@@ -221,16 +221,15 @@ builder.Services
 // --------------------------------------------------
 // CORS
 // --------------------------------------------------
-// ✅ ONLY CHANGE HERE:
-// Added Vercel origins while keeping policy name and everything else intact.
+// ✅ ONLY CHANGE HERE: Added Vercel origins while keeping policy name intact.
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("ViteDev", policy =>
     {
         policy.WithOrigins(
-                "http://localhost:5173",                     // local dev
-                "https://lawafricadigitalhub.vercel.app",    // Vercel prod
-                "https://www.lawafricadigitalhub.vercel.app" // (optional) www
+                "http://localhost:5173",                      // local dev
+                "https://lawafricadigitalhub.vercel.app",     // Vercel prod
+                "https://www.lawafricadigitalhub.vercel.app"  // optional www
               )
               .AllowAnyHeader()
               .AllowAnyMethod();
@@ -278,10 +277,10 @@ app.UseSwaggerUI(c =>
 });
 
 // ✅ Render terminates HTTPS at the proxy; don't force redirect here.
-// If you really want HTTPS redirect later, we’ll configure forwarded headers first.
 // app.UseHttpsRedirection();
 
-app.UseCors("FrontendPolicy");
+// ✅ FIX: Use the policy name you actually registered above ("ViteDev")
+app.UseCors("ViteDev");
 
 // Static file storage
 var storageRoot = Path.Combine(Directory.GetCurrentDirectory(), "Storage");
