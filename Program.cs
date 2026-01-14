@@ -1,6 +1,7 @@
 ﻿// Program.cs (FULL FILE)
 // ✅ Minimal change: do NOT require EmailSettings.Host when using Microsoft Graph.
-// ✅ Keeps your existing using statements and the rest of your logic unchanged.
+// ✅ Adds persistent disk support via STORAGE_ROOT env var on Render.
+// ✅ Keeps existing logic unchanged.
 
 using LawAfrica.API;
 using LawAfrica.API.Authorization.Handlers;
@@ -281,12 +282,25 @@ app.UseExceptionHandler(errorApp =>
 });
 
 // --------------------------------------------------
-// ✅ STORAGE STATIC FILES (MOVED UP to avoid /storage being captured by routing)
+// ✅ STORAGE STATIC FILES (PERSISTENT DISK READY)
+// - Uses STORAGE_ROOT if provided (Render Disk)
+// - Falls back to ./Storage for local dev
+// - Registered BEFORE routing so /storage isn't captured by routing / CORS maps
 // --------------------------------------------------
-var storageRoot = Path.Combine(Directory.GetCurrentDirectory(), "Storage");
+var storageRoot = Environment.GetEnvironmentVariable("STORAGE_ROOT");
+
+if (string.IsNullOrWhiteSpace(storageRoot))
+{
+    storageRoot = Path.Combine(Directory.GetCurrentDirectory(), "Storage");
+}
+
+// Normalize + ensure exists
 Directory.CreateDirectory(storageRoot);
 
-// If you ever use wwwroot, keep the default static files too (harmless otherwise)
+// Optional: log path so you can confirm on Render logs
+app.Logger.LogInformation("Storage root: {StorageRoot}", storageRoot);
+
+// Default wwwroot (harmless if no wwwroot)
 app.UseStaticFiles();
 
 app.UseStaticFiles(new StaticFileOptions
