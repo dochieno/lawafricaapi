@@ -233,8 +233,7 @@ builder.Services.AddCors(options =>
                 "https://www.lawafricadigitalhub.vercel.app" // (optional) www
               )
               .AllowAnyHeader()
-              .AllowAnyMethod()
-              .AllowCredentials();
+              .AllowAnyMethod();
     });
 });
 
@@ -282,7 +281,7 @@ app.UseSwaggerUI(c =>
 // If you really want HTTPS redirect later, we’ll configure forwarded headers first.
 // app.UseHttpsRedirection();
 
-app.UseCors("ViteDev");
+app.UseCors("FrontendPolicy");
 
 // Static file storage
 var storageRoot = Path.Combine(Directory.GetCurrentDirectory(), "Storage");
