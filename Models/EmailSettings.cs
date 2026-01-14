@@ -9,5 +9,10 @@
         public string Password { get; set; } = string.Empty;
         public string FromName { get; set; } = string.Empty;
         public string FromEmail { get; set; } = string.Empty;
+        public string GraphTenantId { get; set; } = "";
+        public string GraphClientId { get; set; } = "";
+        public string GraphClientSecret { get; set; } = "";
+        public string Provider { get; set; } = "Graph";
+
     }
 }
