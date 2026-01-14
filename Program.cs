@@ -249,6 +249,27 @@ builder.Services.AddSwaggerGen(c =>
 var app = builder.Build();
 
 // --------------------------------------------------
+// ✅ Global exception handler (logs real 500 causes on Render)
+// --------------------------------------------------
+app.UseExceptionHandler(errorApp =>
+{
+    errorApp.Run(async context =>
+    {
+        var feature = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>();
+        var ex = feature?.Error;
+
+        if (ex != null)
+        {
+            app.Logger.LogError(ex, "Unhandled exception: {Message}", ex.Message);
+        }
+
+        context.Response.StatusCode = 500;
+        context.Response.ContentType = "application/json";
+        await context.Response.WriteAsync("{\"error\":\"Internal server error\"}");
+    });
+});
+
+// --------------------------------------------------
 // Middleware
 // --------------------------------------------------
 app.UseSwagger();
@@ -258,11 +279,15 @@ app.UseSwaggerUI(c =>
     c.RoutePrefix = "swagger";
 });
 
-// ✅ ADD THIS: required for correct endpoint routing + CORS behavior
+// ✅ Routing is required for correct endpoint routing + CORS behavior
 app.UseRouting();
 
-// ✅ Keep CORS after routing (so it applies to controller endpoints properly)
+// ✅ CORS after routing so it applies to controller endpoints properly
 app.UseCors("ViteDev");
+
+// ✅ Handle ALL preflight OPTIONS requests (fixes CORS “blocked” for some endpoints)
+app.MapMethods("{*path}", new[] { "OPTIONS" }, () => Results.Ok())
+   .RequireCors("ViteDev");
 
 var storageRoot = Path.Combine(Directory.GetCurrentDirectory(), "Storage");
 Directory.CreateDirectory(storageRoot);
@@ -276,7 +301,8 @@ app.UseStaticFiles(new StaticFileOptions
 app.UseAuthentication();
 app.UseAuthorization();
 
-app.MapControllers();
+// ✅ Ensure controllers always get the CORS policy too
+app.MapControllers().RequireCors("ViteDev");
 
 app.MapGet("/", () => Results.Ok(new { status = "ok", service = "LawAfrica.API" }));
 app.MapGet("/health", () => Results.Ok("ok"));
