@@ -19,11 +19,13 @@ namespace LawAfrica.API.Controllers
     public class LegalDocumentsController : ControllerBase
     {
         private readonly ApplicationDbContext _db;
+        private readonly ILogger<LegalDocumentsController> _logger;
         private const int DEFAULT_PREVIEW_MAX_PAGES = 20;
 
-        public LegalDocumentsController(ApplicationDbContext db)
+        public LegalDocumentsController(ApplicationDbContext db, ILogger<LegalDocumentsController> logger)
         {
             _db = db;
+            _logger = logger;
         }
 
         [HttpGet]
@@ -112,7 +114,6 @@ namespace LawAfrica.API.Controllers
             if (!countryExists)
                 return BadRequest("Invalid countryId.");
 
-            // ✅ Normalize only string fields (enums/ints/bools/dates stay as-is)
             var title = (request.Title ?? "").Trim();
             var description = (request.Description ?? "").Trim();
             var author = (request.Author ?? "").Trim();
@@ -131,7 +132,6 @@ namespace LawAfrica.API.Controllers
                 Publisher = publisher,
                 Edition = edition,
 
-                // ✅ enum - assign directly
                 Category = request.Category,
 
                 CountryId = request.CountryId,
@@ -160,21 +160,16 @@ namespace LawAfrica.API.Controllers
             });
         }
 
-
-
         [Authorize(Roles = "Admin")]
         [HttpPut("{id}")]
         public async Task<IActionResult> Update(int id, [FromBody] LegalDocumentUpdateRequest request)
         {
-            var doc = await _db.LegalDocuments
-                .FirstOrDefaultAsync(d => d.Id == id);
+            var doc = await _db.LegalDocuments.FirstOrDefaultAsync(d => d.Id == id);
 
             if (doc == null)
                 return NotFound("Legal document not found.");
 
-            var countryExists = await _db.Countries
-                .AnyAsync(c => c.Id == request.CountryId);
-
+            var countryExists = await _db.Countries.AnyAsync(c => c.Id == request.CountryId);
             if (!countryExists)
                 return BadRequest("Invalid countryId.");
 
@@ -206,43 +201,63 @@ namespace LawAfrica.API.Controllers
             });
         }
 
+        // ✅ Upload Ebook (SAFE): accepts form keys "File" or "file" and avoids null => 500
         [Authorize(Roles = "Admin")]
         [HttpPost("{id}/upload")]
+        [RequestSizeLimit(200_000_000)]
+        [RequestFormLimits(MultipartBodyLengthLimit = 200_000_000)]
         public async Task<IActionResult> UploadEbook(
             int id,
-            [FromForm] UploadLegalDocumentFileRequest request,
+            [FromForm] UploadLegalDocumentFileRequest? request,
+            [FromForm] IFormFile? file,
+            [FromForm(Name = "File")] IFormFile? File,
             [FromServices] FileStorageService storage)
         {
-            var doc = await _db.LegalDocuments.FindAsync(id);
-            if (doc == null)
-                return NotFound("Document not found.");
-
-            var ext = Path.GetExtension(request.File.FileName).ToLowerInvariant();
-            if (ext != ".pdf" && ext != ".epub")
-                return BadRequest("Only PDF or EPUB files are allowed.");
-
-            var fileType = ext.Replace(".", "");
-
-            var (path, size) = await storage.SaveLegalDocumentAsync(request.File, fileType);
-
-            doc.FilePath = path;
-            doc.FileType = fileType;
-            doc.FileSizeBytes = size;
-            doc.UpdatedAt = DateTime.UtcNow;
-
-            await _db.SaveChangesAsync();
-
-            return Ok(new
+            try
             {
-                message = "Ebook uploaded successfully",
-                doc.Id,
-                doc.FileType,
-                doc.FileSizeBytes,
-                doc.FilePath
-            });
+                var doc = await _db.LegalDocuments.FindAsync(id);
+                if (doc == null)
+                    return NotFound("Document not found.");
+
+                var f = request?.File ?? file ?? File;
+                if (f == null || f.Length == 0)
+                    return BadRequest(new
+                    {
+                        message = "No ebook file received. Use multipart/form-data with key 'File' (recommended) or 'file'."
+                    });
+
+                var ext = Path.GetExtension(f.FileName).ToLowerInvariant();
+                if (ext != ".pdf" && ext != ".epub")
+                    return BadRequest("Only PDF or EPUB files are allowed.");
+
+                var fileType = ext.Replace(".", "");
+
+                var (path, size) = await storage.SaveLegalDocumentAsync(f, fileType);
+
+                doc.FilePath = path;
+                doc.FileType = fileType;
+                doc.FileSizeBytes = size;
+                doc.UpdatedAt = DateTime.UtcNow;
+
+                await _db.SaveChangesAsync();
+
+                return Ok(new
+                {
+                    message = "Ebook uploaded successfully",
+                    Id = doc.Id,
+                    FileType = doc.FileType,
+                    FileSizeBytes = doc.FileSizeBytes,
+                    FilePath = doc.FilePath
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "UploadEbook failed for LegalDocumentId={Id}", id);
+                return StatusCode(500, new { message = "Ebook upload failed on server. Check server logs for details." });
+            }
         }
 
-        // ✅ Download Endpoint with Access Rules (UPDATED to seat-limit block too)
+        // ✅ Download Endpoint with Access Rules (unchanged)
         [Authorize]
         [HttpGet("{id}/download")]
         public async Task<IActionResult> Download(
@@ -254,17 +269,13 @@ namespace LawAfrica.API.Controllers
             if (doc == null || string.IsNullOrWhiteSpace(doc.FilePath))
                 return NotFound("Document not found or file missing.");
 
-            var authResult = await authorizationService
-                .AuthorizeAsync(User, doc, PolicyNames.CanAccessLegalDocuments);
-
+            var authResult = await authorizationService.AuthorizeAsync(User, doc, PolicyNames.CanAccessLegalDocuments);
             if (!authResult.Succeeded)
                 return Forbid();
 
             var userId = User.GetUserId();
-
             var decision = await entitlementService.GetEntitlementDecisionAsync(userId, doc);
 
-            // ✅ Hard block when institution is locked OR seats exceeded
             if (!decision.IsAllowed &&
                 (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
                  decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded))
@@ -284,11 +295,7 @@ namespace LawAfrica.API.Controllers
 
             var accessLevel = decision.AccessLevel;
 
-            var physicalPath = Path.Combine(
-                Directory.GetCurrentDirectory(),
-                doc.FilePath
-            );
-
+            var physicalPath = Path.Combine(Directory.GetCurrentDirectory(), doc.FilePath);
             if (!System.IO.File.Exists(physicalPath))
                 return NotFound("File missing on server.");
 
@@ -299,53 +306,57 @@ namespace LawAfrica.API.Controllers
                 _ => "application/octet-stream"
             };
 
-            Response.Headers.Append(
-                "Content-Disposition",
-                $"inline; filename=\"{Path.GetFileName(physicalPath)}\""
-            );
+            Response.Headers.Append("Content-Disposition", $"inline; filename=\"{Path.GetFileName(physicalPath)}\"");
+            Response.Headers.Append("X-Document-Access", accessLevel == DocumentAccessLevel.FullAccess ? "Full" : "Preview");
 
-            Response.Headers.Append(
-                "X-Document-Access",
-                accessLevel == DocumentAccessLevel.FullAccess ? "Full" : "Preview"
-            );
-
-            return PhysicalFile(
-                physicalPath,
-                contentType,
-                enableRangeProcessing: true
-            );
+            return PhysicalFile(physicalPath, contentType, enableRangeProcessing: true);
         }
 
+        // ✅ Upload Cover (SAFE): accepts form keys "file" or "File"
         [Authorize(Roles = "Admin")]
         [HttpPost("{id}/cover")]
+        [RequestSizeLimit(50_000_000)]
+        [RequestFormLimits(MultipartBodyLengthLimit = 50_000_000)]
         public async Task<IActionResult> UploadCover(
             int id,
-            IFormFile file,
+            [FromForm] IFormFile? file,
+            [FromForm(Name = "File")] IFormFile? File,
             [FromServices] FileStorageService storage)
         {
-            if (file == null || file.Length == 0)
-                return BadRequest("Cover file is required.");
-
-            var doc = await _db.LegalDocuments.FindAsync(id);
-            if (doc == null)
-                return NotFound("Document not found.");
-
-            var (relativePath, size) = await storage.SaveCoverAsync(file);
-
-            doc.CoverImagePath = relativePath;
-            doc.UpdatedAt = DateTime.UtcNow;
-
-            await _db.SaveChangesAsync();
-
-            var coverUrl = $"{Request.Scheme}://{Request.Host}/storage/{relativePath.Replace("Storage/", "").ToLower()}";
-
-            return Ok(new
+            try
             {
-                message = "Cover uploaded successfully.",
-                doc.CoverImagePath,
-                coverUrl,
-                size
-            });
+                var f = file ?? File;
+                if (f == null || f.Length == 0)
+                    return BadRequest("Cover file is required.");
+
+                var doc = await _db.LegalDocuments.FindAsync(id);
+                if (doc == null)
+                    return NotFound("Document not found.");
+
+                var (relativePath, size) = await storage.SaveCoverAsync(f);
+
+                doc.CoverImagePath = relativePath;
+                doc.UpdatedAt = DateTime.UtcNow;
+
+                await _db.SaveChangesAsync();
+
+                var clean = relativePath.Replace("\\", "/");
+                clean = clean.Replace("Storage/", "", StringComparison.OrdinalIgnoreCase).TrimStart('/');
+                var coverUrl = $"{Request.Scheme}://{Request.Host}/storage/{clean}".ToLowerInvariant();
+
+                return Ok(new
+                {
+                    message = "Cover uploaded successfully.",
+                    CoverImagePath = doc.CoverImagePath,
+                    coverUrl,
+                    size
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "UploadCover failed for LegalDocumentId={Id}", id);
+                return StatusCode(500, new { message = "Cover upload failed on server. Check server logs for details." });
+            }
         }
 
         [HttpGet("{id:int}/toc")]
@@ -361,16 +372,12 @@ namespace LawAfrica.API.Controllers
                 return NotFound();
 
             var tocItems = TocParser.ParseOrEmpty(doc.TableOfContentsJson);
-
             return Ok(new { items = tocItems });
         }
 
-        // ✅ Reader access rules (UPDATED: block seat exceeded too)
         [HttpGet("{id}/access")]
         [Authorize]
-        public async Task<IActionResult> GetAccess(
-            int id,
-            [FromServices] DocumentEntitlementService entitlementService)
+        public async Task<IActionResult> GetAccess(int id, [FromServices] DocumentEntitlementService entitlementService)
         {
             var userId = User.GetUserId();
 
@@ -390,9 +397,6 @@ namespace LawAfrica.API.Controllers
             if (doc == null)
                 return NotFound("Document not found.");
 
-            // --------------------------------------------------
-            // Free documents → always full access
-            // --------------------------------------------------
             if (!doc.IsPremium)
             {
                 return Ok(new DocumentAccessDto
@@ -402,28 +406,19 @@ namespace LawAfrica.API.Controllers
                     HasFullAccess = true,
                     PreviewMaxPages = int.MaxValue,
                     Message = "Free document. Full access granted.",
-
                     IsBlocked = false,
                     BlockMessage = null,
                     BlockReason = null,
-
                     CanPurchaseIndividually = true,
                     PurchaseDisabledReason = null
                 });
             }
 
-            // --------------------------------------------------
-            // Central entitlement decision
-            // --------------------------------------------------
             var decision = await entitlementService.GetEntitlementDecisionAsync(userId, doc);
 
-            // ✅ SMALL IMPROVEMENT (single source of truth)
             bool canPurchaseIndividually = decision.CanPurchaseIndividually;
             string? purchaseDisabledReason = decision.PurchaseDisabledReason;
 
-            // --------------------------------------------------
-            // Hard block: institution inactive OR seat limit exceeded
-            // --------------------------------------------------
             if (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
                 decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded)
             {
@@ -431,25 +426,17 @@ namespace LawAfrica.API.Controllers
                 {
                     DocumentId = id,
                     IsPremium = true,
-
                     HasFullAccess = false,
                     PreviewMaxPages = 0,
-
                     Message = decision.Message ?? "Access blocked.",
-
                     IsBlocked = true,
                     BlockReason = decision.DenyReason.ToString(),
-                    BlockMessage = decision.Message
-                        ?? "Access blocked. Please contact your administrator.",
-
+                    BlockMessage = decision.Message ?? "Access blocked. Please contact your administrator.",
                     CanPurchaseIndividually = canPurchaseIndividually,
                     PurchaseDisabledReason = purchaseDisabledReason
                 });
             }
 
-            // --------------------------------------------------
-            // Full access
-            // --------------------------------------------------
             if (decision.AccessLevel == DocumentAccessLevel.FullAccess)
             {
                 return Ok(new DocumentAccessDto
@@ -459,19 +446,14 @@ namespace LawAfrica.API.Controllers
                     HasFullAccess = true,
                     PreviewMaxPages = int.MaxValue,
                     Message = "Premium document. Full access granted.",
-
                     IsBlocked = false,
                     BlockMessage = null,
                     BlockReason = null,
-
                     CanPurchaseIndividually = true,
                     PurchaseDisabledReason = null
                 });
             }
 
-            // --------------------------------------------------
-            // Preview access
-            // --------------------------------------------------
             return Ok(new DocumentAccessDto
             {
                 DocumentId = id,
@@ -479,16 +461,13 @@ namespace LawAfrica.API.Controllers
                 HasFullAccess = false,
                 PreviewMaxPages = DEFAULT_PREVIEW_MAX_PAGES,
                 Message = $"Preview mode: first {DEFAULT_PREVIEW_MAX_PAGES} pages available.",
-
                 IsBlocked = false,
                 BlockMessage = null,
                 BlockReason = null,
-
                 CanPurchaseIndividually = canPurchaseIndividually,
                 PurchaseDisabledReason = purchaseDisabledReason
             });
         }
-
 
         [HttpGet("{id:int}/availability")]
         public async Task<IActionResult> GetAvailability(int id)
@@ -512,10 +491,7 @@ namespace LawAfrica.API.Controllers
                 });
             }
 
-            var physicalPath = Path.Combine(
-                Directory.GetCurrentDirectory(),
-                doc.FilePath
-            );
+            var physicalPath = Path.Combine(Directory.GetCurrentDirectory(), doc.FilePath);
 
             if (!System.IO.File.Exists(physicalPath))
             {
@@ -551,11 +527,9 @@ namespace LawAfrica.API.Controllers
                     d.IsPremium,
                     d.PageCount,
                     d.CreatedAt,
-
                     d.AllowPublicPurchase,
                     d.PublicCurrency,
                     d.PublicPrice,
-
                     d.CoverImagePath
                 })
                 .ToListAsync();
@@ -563,12 +537,9 @@ namespace LawAfrica.API.Controllers
             return Ok(docs);
         }
 
-        // ✅ Public offer (UPDATED: treat seat exceeded like institution blocked for offer gating)
         [Authorize]
         [HttpGet("{id:int}/public-offer")]
-        public async Task<IActionResult> GetPublicOffer(
-            int id,
-            [FromServices] DocumentEntitlementService entitlementService)
+        public async Task<IActionResult> GetPublicOffer(int id, [FromServices] DocumentEntitlementService entitlementService)
         {
             var userId = User.GetUserId();
 
@@ -583,7 +554,6 @@ namespace LawAfrica.API.Controllers
 
             var isPublicIndividual = user.UserType == UserType.Public && user.InstitutionId == null;
             var isAdmin = user.UserType == UserType.Admin;
-
             bool isInstitutionUser = user.InstitutionId != null;
 
             if (!isPublicIndividual && !isAdmin && !isInstitutionUser)
@@ -696,12 +666,9 @@ namespace LawAfrica.API.Controllers
             });
         }
 
-        // ✅ Entitlement endpoint (UPDATED isBlocked logic)
         [Authorize]
         [HttpGet("{id:int}/entitlement")]
-        public async Task<IActionResult> GetEntitlement(
-            int id,
-            [FromServices] DocumentEntitlementService entitlementService)
+        public async Task<IActionResult> GetEntitlement(int id, [FromServices] DocumentEntitlementService entitlementService)
         {
             var userId = User.GetUserId();
 
@@ -733,9 +700,7 @@ namespace LawAfrica.API.Controllers
             string accessSource;
             if (!doc.IsPremium) accessSource = "Free";
             else if (hasFullAccess)
-            {
                 accessSource = (user.InstitutionId != null) ? "Institution" : "Purchase";
-            }
             else accessSource = "Preview";
 
             var isBlocked =
@@ -760,9 +725,7 @@ namespace LawAfrica.API.Controllers
                 denyReason = decision.DenyReason.ToString(),
                 message = isBlocked
                     ? (decision.Message ?? "Access blocked. Please contact your administrator.")
-                    : (hasFullAccess
-                        ? "Access granted."
-                        : $"Preview mode: first {DEFAULT_PREVIEW_MAX_PAGES} pages available.")
+                    : (hasFullAccess ? "Access granted." : $"Preview mode: first {DEFAULT_PREVIEW_MAX_PAGES} pages available.")
             });
         }
     }
