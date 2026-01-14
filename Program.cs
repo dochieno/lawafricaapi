@@ -281,6 +281,21 @@ app.UseExceptionHandler(errorApp =>
 });
 
 // --------------------------------------------------
+// ✅ STORAGE STATIC FILES (MOVED UP to avoid /storage being captured by routing)
+// --------------------------------------------------
+var storageRoot = Path.Combine(Directory.GetCurrentDirectory(), "Storage");
+Directory.CreateDirectory(storageRoot);
+
+// If you ever use wwwroot, keep the default static files too (harmless otherwise)
+app.UseStaticFiles();
+
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(storageRoot),
+    RequestPath = "/storage"
+});
+
+// --------------------------------------------------
 // Middleware
 // --------------------------------------------------
 app.UseSwagger();
@@ -299,15 +314,6 @@ app.UseCors("ViteDev");
 // ✅ Handle ALL preflight OPTIONS requests (fixes CORS “blocked” for some endpoints)
 app.MapMethods("{*path}", new[] { "OPTIONS" }, () => Results.Ok())
    .RequireCors("ViteDev");
-
-var storageRoot = Path.Combine(Directory.GetCurrentDirectory(), "Storage");
-Directory.CreateDirectory(storageRoot);
-
-app.UseStaticFiles(new StaticFileOptions
-{
-    FileProvider = new PhysicalFileProvider(storageRoot),
-    RequestPath = "/storage"
-});
 
 app.UseAuthentication();
 app.UseAuthorization();
