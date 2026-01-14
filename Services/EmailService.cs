@@ -1,7 +1,6 @@
 ﻿// Services/EmailService.cs
 // Microsoft Graph (app-only) email sender.
 // Drop-in replacement for your SMTP EmailService: same public methods/signatures.
-// NOTE: Using statements kept from your original file + only added required ones.
 
 using LawAfrica.API.Models;
 using MailKit.Net.Smtp;
@@ -36,22 +35,28 @@ namespace LawAfrica.API.Services
 
             var accessToken = await GetGraphAccessTokenAsync();
 
-            var payload = new
+            var payload = new Dictionary<string, object?>
             {
-                message = new
+                ["message"] = new Dictionary<string, object?>
                 {
-                    subject = subject,
-                    body = new
+                    ["subject"] = subject,
+                    ["body"] = new Dictionary<string, object?>
                     {
-                        contentType = "HTML",
-                        content = htmlMessage
+                        ["contentType"] = "HTML",
+                        ["content"] = htmlMessage
                     },
-                    toRecipients = new[]
+                    ["toRecipients"] = new object[]
                     {
-                        new { emailAddress = new { address = toEmail } }
+                        new Dictionary<string, object?>
+                        {
+                            ["emailAddress"] = new Dictionary<string, object?>
+                            {
+                                ["address"] = toEmail
+                            }
+                        }
                     }
                 },
-                saveToSentItems = true
+                ["saveToSentItems"] = true
             };
 
             await SendMailViaGraphAsync(accessToken, fromUser, payload);
@@ -73,36 +78,40 @@ namespace LawAfrica.API.Services
 
             var accessToken = await GetGraphAccessTokenAsync();
 
-            // Inline image as attachment with CID
-            var attachment = new
+            // ✅ IMPORTANT: Graph requires "@odata.type" (exact key) for attachments.
+            var attachment = new Dictionary<string, object?>
             {
-                // IMPORTANT: Graph uses "@odata.type"
-                // We must write it exactly like this to work.
-                @odata = "#microsoft.graph.fileAttachment",
-                name = "qrcode.png",
-                contentType = "image/png",
-                contentBytes = Convert.ToBase64String(imageBytes ?? Array.Empty<byte>()),
-                isInline = true,
-                contentId = contentId
+                ["@odata.type"] = "#microsoft.graph.fileAttachment",
+                ["name"] = "qrcode.png",
+                ["contentType"] = "image/png",
+                ["contentBytes"] = Convert.ToBase64String(imageBytes ?? Array.Empty<byte>()),
+                ["isInline"] = true,
+                ["contentId"] = contentId
             };
 
-            var payload = new
+            var payload = new Dictionary<string, object?>
             {
-                message = new
+                ["message"] = new Dictionary<string, object?>
                 {
-                    subject = subject,
-                    body = new
+                    ["subject"] = subject,
+                    ["body"] = new Dictionary<string, object?>
                     {
-                        contentType = "HTML",
-                        content = htmlBody
+                        ["contentType"] = "HTML",
+                        ["content"] = htmlBody
                     },
-                    toRecipients = new[]
+                    ["toRecipients"] = new object[]
                     {
-                        new { emailAddress = new { address = toEmail } }
+                        new Dictionary<string, object?>
+                        {
+                            ["emailAddress"] = new Dictionary<string, object?>
+                            {
+                                ["address"] = toEmail
+                            }
+                        }
                     },
-                    attachments = new object[] { attachment }
+                    ["attachments"] = new object[] { attachment }
                 },
-                saveToSentItems = true
+                ["saveToSentItems"] = true
             };
 
             await SendMailViaGraphAsync(accessToken, fromUser, payload);
@@ -157,7 +166,6 @@ namespace LawAfrica.API.Services
         private async Task SendMailViaGraphAsync(string accessToken, string fromUser, object payload)
         {
             var http = _httpClientFactory.CreateClient();
-
             var url = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(fromUser)}/sendMail";
 
             var body = JsonSerializer.Serialize(payload);
@@ -169,7 +177,6 @@ namespace LawAfrica.API.Services
             using var resp = await http.SendAsync(req);
             var respBody = await resp.Content.ReadAsStringAsync();
 
-            // Graph sendMail typically returns 202 Accepted on success
             if ((int)resp.StatusCode < 200 || (int)resp.StatusCode >= 300)
                 throw new InvalidOperationException($"Graph sendMail failed: {(int)resp.StatusCode}. {respBody}");
         }
