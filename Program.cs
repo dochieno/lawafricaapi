@@ -1,6 +1,7 @@
 ﻿// Program.cs (FULL FILE)
 // ✅ Minimal change: do NOT require EmailSettings.Host when using Microsoft Graph.
 // ✅ Adds persistent disk support via STORAGE_ROOT env var on Render.
+// ✅ Adds deterministic GET /storage/** endpoint to eliminate 405 for cover images on Render.
 // ✅ Keeps existing logic unchanged.
 
 using LawAfrica.API;
@@ -18,6 +19,7 @@ using LawAfrica.API.Services.Subscriptions;
 using LawAfrica.API.Settings;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
@@ -282,10 +284,10 @@ app.UseExceptionHandler(errorApp =>
 });
 
 // --------------------------------------------------
-// ✅ STORAGE STATIC FILES (PERSISTENT DISK READY)
-// - Uses STORAGE_ROOT if provided (Render Disk)
+// ✅ STORAGE (PERSISTENT DISK READY) + deterministic GET /storage/**
+// - Uses STORAGE_ROOT if provided (Render Disk mount recommended: /var/data/Storage)
 // - Falls back to ./Storage for local dev
-// - Registered BEFORE routing so /storage isn't captured by routing / CORS maps
+// - Registers BEFORE routing so /storage isn't captured by routing / CORS maps
 // --------------------------------------------------
 var storageRoot = Environment.GetEnvironmentVariable("STORAGE_ROOT");
 
@@ -303,10 +305,35 @@ app.Logger.LogInformation("Storage root: {StorageRoot}", storageRoot);
 // Default wwwroot (harmless if no wwwroot)
 app.UseStaticFiles();
 
+// Static mapping (keep)
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(storageRoot),
     RequestPath = "/storage"
+});
+
+// ✅ Hard guarantee: GET /storage/** always serves files (prevents 405 "Method Not Allowed")
+var contentTypes = new FileExtensionContentTypeProvider();
+app.MapGet("/storage/{**filePath}", (string filePath) =>
+{
+    if (string.IsNullOrWhiteSpace(filePath))
+        return Results.NotFound();
+
+    var clean = filePath.Replace('\\', '/').TrimStart('/');
+
+    // basic traversal protection
+    if (clean.Contains(".."))
+        return Results.BadRequest("Invalid path.");
+
+    var fullPath = Path.Combine(storageRoot, clean);
+
+    if (!System.IO.File.Exists(fullPath))
+        return Results.NotFound();
+
+    if (!contentTypes.TryGetContentType(fullPath, out var contentType))
+        contentType = "application/octet-stream";
+
+    return Results.File(fullPath, contentType);
 });
 
 // --------------------------------------------------
