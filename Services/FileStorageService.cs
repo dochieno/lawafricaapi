@@ -14,10 +14,6 @@ namespace LawAfrica.API.Services
         private readonly string _legalDocsPhysicalPath;
         private readonly string _coversPhysicalPath;
 
-        // Folder names (used both for physical subfolders and DB relative paths)
-        private readonly string _legalDocsFolder;
-        private readonly string _coversFolder;
-
         // Virtual root (what you store in DB + serve via /storage)
         // Example stored value: "Storage/Covers/abc.png"
         private readonly string _virtualRoot;
@@ -26,39 +22,28 @@ namespace LawAfrica.API.Services
         {
             _logger = logger;
 
-            // ✅ Virtual root used in DB paths (frontend maps to /storage/...)
+            // Virtual root for DB paths (keep default "Storage" to match your frontend + /storage mapping)
             _virtualRoot = (config["Storage:VirtualRoot"] ?? "Storage").Trim().Trim('/', '\\');
 
-            // ✅ IMPORTANT: Use Render Disk root when available
-            // If STORAGE_ROOT is set (e.g., /var/data/Storage), we store files there.
-            // Otherwise fall back to app folder (local dev).
-            var diskRoot = (Environment.GetEnvironmentVariable("STORAGE_ROOT") ?? "").Trim();
+            // Disk root override (Render persistent disk)
+            // IMPORTANT: this must match Program.cs mapping for /storage
+            var diskRoot = Environment.GetEnvironmentVariable("STORAGE_ROOT");
 
-            // Physical root folder name (relative to app root) - used only when STORAGE_ROOT is NOT set
+            // Physical root folder name (relative to app root) - used only if STORAGE_ROOT not set
             var rootFolder = (config["Storage:RootPath"] ?? "Storage").Trim().Trim('/', '\\');
 
-            // Physical subfolders (KEEP CASE CONSISTENT: Linux is case-sensitive)
-            _legalDocsFolder = (config["Storage:LegalDocuments"] ?? "LegalDocuments").Trim().Trim('/', '\\');
-            _coversFolder = (config["Storage:Covers"] ?? "Covers").Trim().Trim('/', '\\');
+            // Physical subfolders
+            var legalDocsFolder = (config["Storage:LegalDocuments"] ?? "LegalDocuments").Trim().Trim('/', '\\');
+            var coversFolder = (config["Storage:Covers"] ?? "Covers").Trim().Trim('/', '\\');
 
-            // ✅ Decide physical root
-            // - If STORAGE_ROOT is absolute, use it directly
-            // - Else use ContentRootPath + rootFolder
-            if (!string.IsNullOrWhiteSpace(diskRoot))
-            {
-                // If someone sets STORAGE_ROOT to "/var/data" instead of "/var/data/Storage",
-                // we’ll respect it as-is and store subfolders under it.
-                _rootPhysicalPath = diskRoot;
-            }
-            else
-            {
-                // local/dev default: <app>/Storage
-                _rootPhysicalPath = Path.Combine(env.ContentRootPath, rootFolder);
-            }
+            // ✅ If STORAGE_ROOT exists, use it as the physical root directly (Render Disk mount)
+            // ✅ Else fallback to local ./Storage under ContentRootPath
+            _rootPhysicalPath = !string.IsNullOrWhiteSpace(diskRoot)
+                ? diskRoot
+                : Path.Combine(env.ContentRootPath, rootFolder);
 
-            // Build physical subfolder paths
-            _legalDocsPhysicalPath = Path.Combine(_rootPhysicalPath, _legalDocsFolder);
-            _coversPhysicalPath = Path.Combine(_rootPhysicalPath, _coversFolder);
+            _legalDocsPhysicalPath = Path.Combine(_rootPhysicalPath, legalDocsFolder);
+            _coversPhysicalPath = Path.Combine(_rootPhysicalPath, coversFolder);
 
             try
             {
@@ -72,17 +57,17 @@ namespace LawAfrica.API.Services
                     _legalDocsPhysicalPath,
                     _coversPhysicalPath,
                     _virtualRoot,
-                    string.IsNullOrWhiteSpace(diskRoot) ? "(not set)" : diskRoot
+                    diskRoot ?? "(null)"
                 );
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to create storage directories. Root={Root}", _rootPhysicalPath);
-                throw; // real failure (disk permissions etc.)
+                throw;
             }
         }
 
-        // Used for static files mapping (if you ever want to wire Program.cs to this)
+        // Used for static files mapping or debugging
         public string RootPhysicalPath => _rootPhysicalPath;
 
         // Save ebook files
@@ -105,9 +90,12 @@ namespace LawAfrica.API.Services
                 await file.CopyToAsync(stream);
             }
 
-            // ✅ Store DB path under VirtualRoot + SAME folder name we used physically
-            // so frontend can resolve /storage/<folder>/<file>
-            var relativePath = $"{_virtualRoot}/{_legalDocsFolder}/{fileName}".Replace("\\", "/");
+            // DB path (frontend strips "Storage/" and uses /storage)
+            var relativePath = $"{_virtualRoot}/LegalDocuments/{fileName}".Replace("\\", "/");
+
+            _logger.LogInformation("Saved legal document: {File} -> {PhysicalPath} (DB={DbPath})",
+                file.FileName, physicalPath, relativePath);
+
             return (relativePath, file.Length);
         }
 
@@ -129,7 +117,11 @@ namespace LawAfrica.API.Services
                 await file.CopyToAsync(stream);
             }
 
-            var relativePath = $"{_virtualRoot}/{_coversFolder}/{fileName}".Replace("\\", "/");
+            var relativePath = $"{_virtualRoot}/Covers/{fileName}".Replace("\\", "/");
+
+            _logger.LogInformation("Saved cover: {File} -> {PhysicalPath} (DB={DbPath})",
+                file.FileName, physicalPath, relativePath);
+
             return (relativePath, file.Length);
         }
     }
