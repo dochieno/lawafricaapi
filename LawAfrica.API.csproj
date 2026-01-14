@@ -35,11 +35,17 @@
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
+
   <ItemGroup>
     <Compile Remove="Migrations_OldV1\**\*.cs" />
   </ItemGroup>
-  <Content Include="EmailTemplates/**/*.html">
-    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-  </Content>
+
+  <!-- ✅ Email templates included in build + publish (Render) -->
+  <ItemGroup>
+    <Content Include="EmailTemplates\**\*.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
