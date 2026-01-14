@@ -1,4 +1,8 @@
-﻿using LawAfrica.API;
+﻿// Program.cs (FULL FILE)
+// ✅ Minimal change: do NOT require EmailSettings.Host when using Microsoft Graph.
+// ✅ Keeps your existing using statements and the rest of your logic unchanged.
+
+using LawAfrica.API;
 using LawAfrica.API.Authorization.Handlers;
 using LawAfrica.API.Authorization.Policies;
 using LawAfrica.API.Authorization.Requirements;
@@ -60,8 +64,15 @@ var emailSettings = builder.Configuration.GetSection("EmailSettings").Get<EmailS
 if (emailSettings == null)
     throw new InvalidOperationException("EmailSettings section is missing.");
 
-if (string.IsNullOrWhiteSpace(emailSettings.Host))
-    throw new InvalidOperationException("EmailSettings:Host is missing or empty.");
+// ✅ UPDATED VALIDATION (Graph-aware)
+var hasGraph =
+    !string.IsNullOrWhiteSpace(emailSettings.GraphTenantId) &&
+    !string.IsNullOrWhiteSpace(emailSettings.GraphClientId) &&
+    !string.IsNullOrWhiteSpace(emailSettings.GraphClientSecret);
+
+// If Graph vars are NOT set, we assume SMTP mode and require Host.
+if (!hasGraph && string.IsNullOrWhiteSpace(emailSettings.Host))
+    throw new InvalidOperationException("EmailSettings:Host is missing or empty (SMTP mode). For Graph, set GraphTenantId/GraphClientId/GraphClientSecret.");
 
 // --------------------------------------------------
 // Core Services
