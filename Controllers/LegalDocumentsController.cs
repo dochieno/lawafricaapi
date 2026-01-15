@@ -205,6 +205,7 @@ namespace LawAfrica.API.Controllers
         // ✅ Upload Ebook (SAFE): accepts form keys "File" or "file" and avoids null => 500
         [Authorize(Roles = "Admin")]
         [HttpPost("{id}/upload")]
+        [Consumes("multipart/form-data")]
         [RequestSizeLimit(200_000_000)]
         [RequestFormLimits(MultipartBodyLengthLimit = 200_000_000)]
         public async Task<IActionResult> UploadEbook(
@@ -326,8 +327,9 @@ namespace LawAfrica.API.Controllers
         // ✅ Upload Cover (SAFE): accepts form keys "file" or "File"
         [Authorize(Roles = "Admin")]
         [HttpPost("{id}/cover")]
-        [RequestSizeLimit(50_000_000)]
-        [RequestFormLimits(MultipartBodyLengthLimit = 50_000_000)]
+        [Consumes("multipart/form-data")]
+        [RequestSizeLimit(50_000_000)]       
+        [RequestFormLimits(MultipartBodyLengthLimit = 50_000_000)]        
         public async Task<IActionResult> UploadCover(
             int id,
             [FromForm] IFormFile? file,

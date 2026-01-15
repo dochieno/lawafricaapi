@@ -23,7 +23,7 @@ using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
-using Microsoft.OpenApi;
+using Microsoft.OpenApi.Models;
 using System;
 using System.Text;
 using System.Text.Json.Serialization;
@@ -250,9 +250,20 @@ builder.Services.AddSwaggerGen(c =>
         Description = "JWT Authorization header using the Bearer scheme."
     });
 
-    c.AddSecurityRequirement(document => new OpenApiSecurityRequirement
+    // ✅ FIX: AddSecurityRequirement expects an OpenApiSecurityRequirement object (not a lambda)
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
-        [new OpenApiSecuritySchemeReference("bearer", document)] = new List<string>()
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "bearer"
+                }
+            },
+            new List<string>()
+        }
     });
 });
 

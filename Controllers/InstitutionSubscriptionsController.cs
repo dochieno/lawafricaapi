@@ -35,57 +35,79 @@ namespace LawAfrica.API.Controllers
             return int.TryParse(raw, out var id) ? id : null;
         }
 
+        private IActionResult RequireUserId(out int userId)
+        {
+            userId = 0;
+            var id = GetUserId();
+            if (!id.HasValue)
+            {
+                return Unauthorized(new
+                {
+                    message = "Your session is missing a user id claim. Please log out and log in again."
+                });
+            }
+
+            userId = id.Value;
+            return null!;
+        }
+
         /// <summary>
         /// List all institution product subscriptions.
-        /// ✅ Includes pending request summary for UX ("Suspend pending", etc.)
+        /// ✅ Includes pending request summary for UX.
         /// </summary>
         [HttpGet]
         public async Task<IActionResult> GetAll()
         {
-            // pending request for each subscription (at most 1 pending at a time by your service rules)
-            var pendingQuery = _db.InstitutionSubscriptionActionRequests
-                .AsNoTracking()
-                .Where(r => r.Status == SubscriptionActionRequestStatus.Pending);
+            try
+            {
+                var pendingQuery = _db.InstitutionSubscriptionActionRequests
+                    .AsNoTracking()
+                    .Where(r => r.Status == SubscriptionActionRequestStatus.Pending);
 
-            var rows = await _db.InstitutionProductSubscriptions
-                .AsNoTracking()
-                .Include(s => s.Institution)
-                .Include(s => s.ContentProduct)
-                .OrderByDescending(s => s.Id)
-                .Select(s => new
-                {
-                    Sub = s,
-                    Pending = pendingQuery
-                        .Where(r => r.SubscriptionId == s.Id)
-                        .OrderByDescending(r => r.CreatedAt)
-                        .Select(r => new
-                        {
-                            r.Id,
-                            r.RequestType,
-                            r.CreatedAt,
-                            r.RequestedByUserId
-                        })
-                        .FirstOrDefault()
-                })
-                .Select(x => new InstitutionSubscriptionDto
-                {
-                    Id = x.Sub.Id,
-                    InstitutionId = x.Sub.InstitutionId,
-                    InstitutionName = x.Sub.Institution.Name,
-                    ContentProductId = x.Sub.ContentProductId,
-                    ContentProductName = x.Sub.ContentProduct.Name,
-                    Status = x.Sub.Status,
-                    StartDate = x.Sub.StartDate,
-                    EndDate = x.Sub.EndDate,
+                var rows = await _db.InstitutionProductSubscriptions
+                    .AsNoTracking()
+                    .Include(s => s.Institution)
+                    .Include(s => s.ContentProduct)
+                    .OrderByDescending(s => s.Id)
+                    .Select(s => new
+                    {
+                        Sub = s,
+                        Pending = pendingQuery
+                            .Where(r => r.SubscriptionId == s.Id)
+                            .OrderByDescending(r => r.CreatedAt)
+                            .Select(r => new
+                            {
+                                r.Id,
+                                r.RequestType,
+                                r.CreatedAt,
+                                r.RequestedByUserId
+                            })
+                            .FirstOrDefault()
+                    })
+                    .Select(x => new InstitutionSubscriptionDto
+                    {
+                        Id = x.Sub.Id,
+                        InstitutionId = x.Sub.InstitutionId,
+                        InstitutionName = x.Sub.Institution.Name,
+                        ContentProductId = x.Sub.ContentProductId,
+                        ContentProductName = x.Sub.ContentProduct.Name,
+                        Status = x.Sub.Status,
+                        StartDate = x.Sub.StartDate,
+                        EndDate = x.Sub.EndDate,
 
-                    PendingRequestId = x.Pending != null ? x.Pending.Id : null,
-                    PendingRequestType = x.Pending != null ? x.Pending.RequestType : null,
-                    PendingRequestedAt = x.Pending != null ? x.Pending.CreatedAt : null,
-                    PendingRequestedByUserId = x.Pending != null ? x.Pending.RequestedByUserId : null
-                })
-                .ToListAsync();
+                        PendingRequestId = x.Pending != null ? x.Pending.Id : null,
+                        PendingRequestType = x.Pending != null ? x.Pending.RequestType : null,
+                        PendingRequestedAt = x.Pending != null ? x.Pending.CreatedAt : null,
+                        PendingRequestedByUserId = x.Pending != null ? x.Pending.RequestedByUserId : null
+                    })
+                    .ToListAsync();
 
-            return Ok(rows);
+                return Ok(rows);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Failed to load subscriptions.", detail = ex.Message });
+            }
         }
 
         /// <summary>
@@ -95,50 +117,57 @@ namespace LawAfrica.API.Controllers
         [HttpGet("{id:int}")]
         public async Task<IActionResult> GetById([FromRoute] int id)
         {
-            var pendingQuery = _db.InstitutionSubscriptionActionRequests
-                .AsNoTracking()
-                .Where(r => r.Status == SubscriptionActionRequestStatus.Pending);
+            try
+            {
+                var pendingQuery = _db.InstitutionSubscriptionActionRequests
+                    .AsNoTracking()
+                    .Where(r => r.Status == SubscriptionActionRequestStatus.Pending);
 
-            var row = await _db.InstitutionProductSubscriptions
-                .AsNoTracking()
-                .Include(x => x.Institution)
-                .Include(x => x.ContentProduct)
-                .Where(x => x.Id == id)
-                .Select(x => new
-                {
-                    Sub = x,
-                    Pending = pendingQuery
-                        .Where(r => r.SubscriptionId == x.Id)
-                        .OrderByDescending(r => r.CreatedAt)
-                        .Select(r => new
-                        {
-                            r.Id,
-                            r.RequestType,
-                            r.CreatedAt,
-                            r.RequestedByUserId
-                        })
-                        .FirstOrDefault()
-                })
-                .Select(x => new InstitutionSubscriptionDto
-                {
-                    Id = x.Sub.Id,
-                    InstitutionId = x.Sub.InstitutionId,
-                    InstitutionName = x.Sub.Institution.Name,
-                    ContentProductId = x.Sub.ContentProductId,
-                    ContentProductName = x.Sub.ContentProduct.Name,
-                    Status = x.Sub.Status,
-                    StartDate = x.Sub.StartDate,
-                    EndDate = x.Sub.EndDate,
+                var row = await _db.InstitutionProductSubscriptions
+                    .AsNoTracking()
+                    .Include(x => x.Institution)
+                    .Include(x => x.ContentProduct)
+                    .Where(x => x.Id == id)
+                    .Select(x => new
+                    {
+                        Sub = x,
+                        Pending = pendingQuery
+                            .Where(r => r.SubscriptionId == x.Id)
+                            .OrderByDescending(r => r.CreatedAt)
+                            .Select(r => new
+                            {
+                                r.Id,
+                                r.RequestType,
+                                r.CreatedAt,
+                                r.RequestedByUserId
+                            })
+                            .FirstOrDefault()
+                    })
+                    .Select(x => new InstitutionSubscriptionDto
+                    {
+                        Id = x.Sub.Id,
+                        InstitutionId = x.Sub.InstitutionId,
+                        InstitutionName = x.Sub.Institution.Name,
+                        ContentProductId = x.Sub.ContentProductId,
+                        ContentProductName = x.Sub.ContentProduct.Name,
+                        Status = x.Sub.Status,
+                        StartDate = x.Sub.StartDate,
+                        EndDate = x.Sub.EndDate,
 
-                    PendingRequestId = x.Pending != null ? x.Pending.Id : null,
-                    PendingRequestType = x.Pending != null ? x.Pending.RequestType : null,
-                    PendingRequestedAt = x.Pending != null ? x.Pending.CreatedAt : null,
-                    PendingRequestedByUserId = x.Pending != null ? x.Pending.RequestedByUserId : null
-                })
-                .FirstOrDefaultAsync();
+                        PendingRequestId = x.Pending != null ? x.Pending.Id : null,
+                        PendingRequestType = x.Pending != null ? x.Pending.RequestType : null,
+                        PendingRequestedAt = x.Pending != null ? x.Pending.CreatedAt : null,
+                        PendingRequestedByUserId = x.Pending != null ? x.Pending.RequestedByUserId : null
+                    })
+                    .FirstOrDefaultAsync();
 
-            if (row == null) return NotFound("Subscription not found.");
-            return Ok(row);
+                if (row == null) return NotFound(new { message = "Subscription not found." });
+                return Ok(row);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Failed to load subscription.", detail = ex.Message });
+            }
         }
 
         /// <summary>
@@ -147,102 +176,118 @@ namespace LawAfrica.API.Controllers
         [HttpGet("{id:int}/audit")]
         public async Task<IActionResult> GetAudit([FromRoute] int id)
         {
-            var exists = await _db.InstitutionProductSubscriptions.AnyAsync(x => x.Id == id);
-            if (!exists) return NotFound("Subscription not found.");
+            try
+            {
+                var exists = await _db.InstitutionProductSubscriptions.AnyAsync(x => x.Id == id);
+                if (!exists) return NotFound(new { message = "Subscription not found." });
 
-            var rows = await _db.InstitutionSubscriptionAudits
-                .AsNoTracking()
-                .Where(a => a.SubscriptionId == id)
-                .OrderByDescending(a => a.CreatedAt)
-                .Select(a => new InstitutionSubscriptionAuditDto
-                {
-                    Id = a.Id,
-                    SubscriptionId = a.SubscriptionId,
-                    Action = a.Action,
-                    PerformedByUserId = a.PerformedByUserId,
-                    OldStartDate = a.OldStartDate,
-                    OldEndDate = a.OldEndDate,
-                    OldStatus = a.OldStatus,
-                    NewStartDate = a.NewStartDate,
-                    NewEndDate = a.NewEndDate,
-                    NewStatus = a.NewStatus,
-                    Notes = a.Notes,
-                    CreatedAt = a.CreatedAt
-                })
-                .ToListAsync();
+                var rows = await _db.InstitutionSubscriptionAudits
+                    .AsNoTracking()
+                    .Where(a => a.SubscriptionId == id)
+                    .OrderByDescending(a => a.CreatedAt)
+                    .Select(a => new InstitutionSubscriptionAuditDto
+                    {
+                        Id = a.Id,
+                        SubscriptionId = a.SubscriptionId,
+                        Action = a.Action,
+                        PerformedByUserId = a.PerformedByUserId,
+                        OldStartDate = a.OldStartDate,
+                        OldEndDate = a.OldEndDate,
+                        OldStatus = a.OldStatus,
+                        NewStartDate = a.NewStartDate,
+                        NewEndDate = a.NewEndDate,
+                        NewStatus = a.NewStatus,
+                        Notes = a.Notes,
+                        CreatedAt = a.CreatedAt
+                    })
+                    .ToListAsync();
 
-            return Ok(rows);
+                return Ok(rows);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Failed to load audit history.", detail = ex.Message });
+            }
         }
 
         /// <summary>
-        /// ✅ NEW: Request history for a subscription (Admin can view logs).
-        /// This is NOT the review endpoint; it's only for visibility/UX.
+        /// ✅ Request history for a subscription (Admin can view logs).
         /// </summary>
         [HttpGet("{id:int}/requests")]
         public async Task<IActionResult> GetRequestsForSubscription([FromRoute] int id)
         {
-            var exists = await _db.InstitutionProductSubscriptions.AnyAsync(x => x.Id == id);
-            if (!exists) return NotFound(new { message = "Subscription not found." });
+            try
+            {
+                var exists = await _db.InstitutionProductSubscriptions.AnyAsync(x => x.Id == id);
+                if (!exists) return NotFound(new { message = "Subscription not found." });
 
-            var users = _db.Users.AsNoTracking();
+                var users = _db.Users.AsNoTracking();
 
-            var rows = await _db.InstitutionSubscriptionActionRequests
-                .AsNoTracking()
-                .Include(r => r.Subscription)
-                    .ThenInclude(s => s.Institution)
-                .Include(r => r.Subscription)
-                    .ThenInclude(s => s.ContentProduct)
-                .Where(r => r.SubscriptionId == id)
-                .OrderByDescending(r => r.CreatedAt)
-                .Select(r => new SubscriptionActionRequestListDto
-                {
-                    Id = r.Id,
-                    SubscriptionId = r.SubscriptionId,
+                var rows = await _db.InstitutionSubscriptionActionRequests
+                    .AsNoTracking()
+                    .Include(r => r.Subscription).ThenInclude(s => s.Institution)
+                    .Include(r => r.Subscription).ThenInclude(s => s.ContentProduct)
+                    .Where(r => r.SubscriptionId == id)
+                    .OrderByDescending(r => r.CreatedAt)
+                    .Select(r => new SubscriptionActionRequestListDto
+                    {
+                        Id = r.Id,
+                        SubscriptionId = r.SubscriptionId,
 
-                    InstitutionId = r.Subscription.InstitutionId,
-                    InstitutionName = r.Subscription.Institution.Name,
+                        InstitutionId = r.Subscription.InstitutionId,
+                        InstitutionName = r.Subscription.Institution.Name,
 
-                    ContentProductId = r.Subscription.ContentProductId,
-                    ContentProductName = r.Subscription.ContentProduct.Name,
+                        ContentProductId = r.Subscription.ContentProductId,
+                        ContentProductName = r.Subscription.ContentProduct.Name,
 
-                    RequestType = r.RequestType,
-                    Status = r.Status,
+                        RequestType = r.RequestType,
+                        Status = r.Status,
 
-                    RequestedByUserId = r.RequestedByUserId,
-                    RequestedByUsername = users
-                        .Where(u => u.Id == r.RequestedByUserId)
-                        .Select(u => u.Username)
-                        .FirstOrDefault() ?? "",
+                        RequestedByUserId = r.RequestedByUserId,
+                        RequestedByUsername = users
+                            .Where(u => u.Id == r.RequestedByUserId)
+                            .Select(u => u.Username)
+                            .FirstOrDefault() ?? "",
 
-                    RequestNotes = r.RequestNotes,
+                        RequestNotes = r.RequestNotes,
 
-                    ReviewedByUserId = r.ReviewedByUserId,
-                    ReviewedByUsername = r.ReviewedByUserId.HasValue
-                        ? (users.Where(u => u.Id == r.ReviewedByUserId.Value).Select(u => u.Username).FirstOrDefault() ?? "")
-                        : null,
+                        ReviewedByUserId = r.ReviewedByUserId,
+                        ReviewedByUsername = r.ReviewedByUserId.HasValue
+                            ? (users.Where(u => u.Id == r.ReviewedByUserId.Value)
+                                .Select(u => u.Username).FirstOrDefault() ?? "")
+                            : null,
 
-                    ReviewNotes = r.ReviewNotes,
-                    ReviewedAt = r.ReviewedAt,
+                        ReviewNotes = r.ReviewNotes,
+                        ReviewedAt = r.ReviewedAt,
 
-                    CreatedAt = r.CreatedAt
-                })
-                .ToListAsync();
+                        CreatedAt = r.CreatedAt
+                    })
+                    .ToListAsync();
 
-            return Ok(rows);
+                return Ok(rows);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Failed to load requests.", detail = ex.Message });
+            }
         }
 
         [HttpPost]
         public async Task<IActionResult> CreateSubscription([FromBody] CreateInstitutionSubscriptionRequest request)
         {
-            if (request == null) return BadRequest("Request body is required.");
-            if (request.InstitutionId <= 0) return BadRequest("InstitutionId must be > 0.");
-            if (request.ContentProductId <= 0) return BadRequest("ContentProductId must be > 0.");
-            if (request.DurationInMonths <= 0) return BadRequest("DurationInMonths must be > 0.");
+            if (request == null) return BadRequest(new { message = "Request body is required." });
+            if (request.InstitutionId <= 0) return BadRequest(new { message = "InstitutionId must be > 0." });
+            if (request.ContentProductId <= 0) return BadRequest(new { message = "ContentProductId must be > 0." });
+            if (request.DurationInMonths <= 0) return BadRequest(new { message = "DurationInMonths must be > 0." });
+
+            var require = RequireUserId(out var userId);
+            if (require != null) return require;
 
             DateTime? startDate = null;
             if (request.StartDate.HasValue)
             {
                 var dt = request.StartDate.Value;
+
                 if (dt.Kind == DateTimeKind.Unspecified)
                     dt = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
                 else if (dt.Kind == DateTimeKind.Local)
@@ -251,92 +296,132 @@ namespace LawAfrica.API.Controllers
                 startDate = dt;
             }
 
-            var sub = await _subscriptionService.CreateOrExtendSubscriptionAsync(
-                request.InstitutionId,
-                request.ContentProductId,
-                request.DurationInMonths,
-                startDate,
-                GetUserId()
-            );
-
-            return Ok(new
+            try
             {
-                message = sub.Status == SubscriptionStatus.Pending
-                    ? "Institution subscription scheduled (Pending)."
-                    : "Institution subscription saved.",
-                subscriptionId = sub.Id,
-                sub.StartDate,
-                sub.EndDate,
-                sub.Status
-            });
+                var sub = await _subscriptionService.CreateOrExtendSubscriptionAsync(
+                    request.InstitutionId,
+                    request.ContentProductId,
+                    request.DurationInMonths,
+                    startDate,
+                    userId
+                );
+
+                return Ok(new
+                {
+                    message = sub.Status == SubscriptionStatus.Pending
+                        ? "Institution subscription scheduled (Pending)."
+                        : "Institution subscription saved.",
+                    subscriptionId = sub.Id,
+                    sub.StartDate,
+                    sub.EndDate,
+                    sub.Status
+                });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (DbUpdateException ex)
+            {
+                return Conflict(new { message = "Database error while saving subscription.", detail = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Internal server error while saving subscription.", detail = ex.Message });
+            }
         }
 
         [HttpPost("{id:int}/renew")]
         public async Task<IActionResult> Renew([FromRoute] int id, [FromBody] RenewInstitutionSubscriptionRequest request)
         {
-            if (request == null) return BadRequest("Request body is required.");
-            if (request.DurationInMonths <= 0) return BadRequest("DurationInMonths must be > 0.");
+            if (request == null) return BadRequest(new { message = "Request body is required." });
+            if (request.DurationInMonths <= 0) return BadRequest(new { message = "DurationInMonths must be > 0." });
 
-            var existing = await _db.InstitutionProductSubscriptions
-                .AsNoTracking()
-                .FirstOrDefaultAsync(x => x.Id == id);
+            var require = RequireUserId(out var userId);
+            if (require != null) return require;
 
-            if (existing == null) return NotFound("Subscription not found.");
-
-            if (existing.Status == SubscriptionStatus.Suspended)
+            try
             {
-                return Conflict(new
+                var existing = await _db.InstitutionProductSubscriptions
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.Id == id);
+
+                if (existing == null) return NotFound(new { message = "Subscription not found." });
+
+                if (existing.Status == SubscriptionStatus.Suspended)
                 {
-                    message = "Cannot renew a suspended subscription. Unsuspend it first.",
-                    subscriptionId = existing.Id,
-                    existing.Status,
-                    existing.StartDate,
-                    existing.EndDate
+                    return Conflict(new
+                    {
+                        message = "Cannot renew a suspended subscription. Unsuspend it first.",
+                        subscriptionId = existing.Id,
+                        existing.Status,
+                        existing.StartDate,
+                        existing.EndDate
+                    });
+                }
+
+                DateTime? startDate = null;
+                if (request.StartDate.HasValue)
+                {
+                    var dt = request.StartDate.Value;
+
+                    if (dt.Kind == DateTimeKind.Unspecified)
+                        dt = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+                    else if (dt.Kind == DateTimeKind.Local)
+                        dt = dt.ToUniversalTime();
+
+                    startDate = dt;
+                }
+
+                var sub = await _subscriptionService.RenewSubscriptionAsync(
+                    id,
+                    request.DurationInMonths,
+                    startDate,
+                    userId
+                );
+
+                return Ok(new
+                {
+                    message = "Subscription renewed.",
+                    subscriptionId = sub.Id,
+                    sub.StartDate,
+                    sub.EndDate,
+                    sub.Status
                 });
             }
-
-            DateTime? startDate = null;
-            if (request.StartDate.HasValue)
+            catch (InvalidOperationException ex)
             {
-                var dt = request.StartDate.Value;
-
-                if (dt.Kind == DateTimeKind.Unspecified)
-                    dt = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
-                else if (dt.Kind == DateTimeKind.Local)
-                    dt = dt.ToUniversalTime();
-
-                startDate = dt;
+                return BadRequest(new { message = ex.Message });
             }
-
-            var sub = await _subscriptionService.RenewSubscriptionAsync(
-                id,
-                request.DurationInMonths,
-                startDate,
-                GetUserId()
-            );
-
-            return Ok(new
+            catch (DbUpdateException ex)
             {
-                message = "Subscription renewed.",
-                subscriptionId = sub.Id,
-                sub.StartDate,
-                sub.EndDate,
-                sub.Status
-            });
+                return Conflict(new { message = "Database error while renewing subscription.", detail = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Internal server error while renewing subscription.", detail = ex.Message });
+            }
         }
 
         [Authorize(Policy = PolicyNames.IsGlobalAdmin)]
         [HttpPost("{id:int}/suspend")]
         public async Task<IActionResult> Suspend([FromRoute] int id)
         {
+            var require = RequireUserId(out var userId);
+            if (require != null) return require;
+
             try
             {
-                var sub = await _subscriptionService.SuspendAsync(id, GetUserId());
+                var sub = await _subscriptionService.SuspendAsync(id, userId);
                 return Ok(new { message = "Subscription suspended.", sub.Id, sub.Status, sub.StartDate, sub.EndDate });
             }
             catch (InvalidOperationException ex)
             {
-                return NotFound(ex.Message);
+                return NotFound(new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Failed to suspend subscription.", detail = ex.Message });
             }
         }
 
@@ -344,48 +429,71 @@ namespace LawAfrica.API.Controllers
         [HttpPost("{id:int}/unsuspend")]
         public async Task<IActionResult> Unsuspend([FromRoute] int id)
         {
+            var require = RequireUserId(out var userId);
+            if (require != null) return require;
+
             try
             {
-                var sub = await _subscriptionService.UnsuspendAsync(id, GetUserId());
+                var sub = await _subscriptionService.UnsuspendAsync(id, userId);
                 return Ok(new { message = "Subscription updated.", sub.Id, sub.Status, sub.StartDate, sub.EndDate });
             }
             catch (InvalidOperationException ex)
             {
-                return NotFound(ex.Message);
+                return NotFound(new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Failed to unsuspend subscription.", detail = ex.Message });
             }
         }
 
         [HttpPost("{id:int}/request-suspend")]
         public async Task<IActionResult> RequestSuspend([FromRoute] int id, [FromBody] SubscriptionActionRequestDto dto)
         {
-            var userId = GetUserId();
-            if (!userId.HasValue) return Unauthorized();
+            var require = RequireUserId(out var userId);
+            if (require != null) return require;
 
             try
             {
-                var req = await _subscriptionService.RequestSuspendAsync(id, userId.Value, dto?.Notes);
+                var req = await _subscriptionService.RequestSuspendAsync(id, userId, dto?.Notes);
                 return Ok(new { message = "Suspend request submitted for approval.", requestId = req.Id });
             }
             catch (InvalidOperationException ex)
             {
                 return BadRequest(new { message = ex.Message });
             }
+            catch (DbUpdateException ex)
+            {
+                return Conflict(new { message = "Database error while submitting request.", detail = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Internal server error while submitting request.", detail = ex.Message });
+            }
         }
 
         [HttpPost("{id:int}/request-unsuspend")]
         public async Task<IActionResult> RequestUnsuspend([FromRoute] int id, [FromBody] SubscriptionActionRequestDto dto)
         {
-            var userId = GetUserId();
-            if (!userId.HasValue) return Unauthorized();
+            var require = RequireUserId(out var userId);
+            if (require != null) return require;
 
             try
             {
-                var req = await _subscriptionService.RequestUnsuspendAsync(id, userId.Value, dto?.Notes);
+                var req = await _subscriptionService.RequestUnsuspendAsync(id, userId, dto?.Notes);
                 return Ok(new { message = "Unsuspend request submitted for approval.", requestId = req.Id });
             }
             catch (InvalidOperationException ex)
             {
                 return BadRequest(new { message = ex.Message });
+            }
+            catch (DbUpdateException ex)
+            {
+                return Conflict(new { message = "Database error while submitting request.", detail = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Internal server error while submitting request.", detail = ex.Message });
             }
         }
 
@@ -393,14 +501,16 @@ namespace LawAfrica.API.Controllers
         [HttpPost("requests/{requestId:int}/review")]
         public async Task<IActionResult> ReviewRequest([FromRoute] int requestId, [FromBody] ReviewSubscriptionActionRequestDto dto)
         {
-            var userId = GetUserId();
-            if (!userId.HasValue) return Unauthorized();
+            if (dto == null) return BadRequest(new { message = "Request body is required." });
+
+            var require = RequireUserId(out var userId);
+            if (require != null) return require;
 
             try
             {
                 var req = await _subscriptionService.ApproveRequestAsync(
                     requestId,
-                    userId.Value,
+                    userId,
                     dto.Approve,
                     dto.Notes
                 );
@@ -416,292 +526,322 @@ namespace LawAfrica.API.Controllers
             {
                 return BadRequest(new { message = ex.Message });
             }
+            catch (DbUpdateException ex)
+            {
+                return Conflict(new { message = "Database error while reviewing request.", detail = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Internal server error while reviewing request.", detail = ex.Message });
+            }
         }
 
-        // ✅ Your existing GlobalAdmin-only list endpoint stays as-is:
+        // ✅ GlobalAdmin-only list endpoint
         [Authorize(Policy = PolicyNames.IsGlobalAdmin)]
         [HttpGet("requests")]
         public async Task<IActionResult> GetRequests([FromQuery] string? status = "pending", [FromQuery] string? q = null)
         {
-            var statusNorm = (status ?? "pending").Trim().ToLowerInvariant();
-            var qNorm = (q ?? "").Trim().ToLowerInvariant();
-
-            var query = _db.InstitutionSubscriptionActionRequests
-                .AsNoTracking()
-                .Include(r => r.Subscription)
-                    .ThenInclude(s => s.Institution)
-                .Include(r => r.Subscription)
-                    .ThenInclude(s => s.ContentProduct)
-                .OrderByDescending(r => r.Id)
-                .AsQueryable();
-
-            if (statusNorm != "all")
+            try
             {
-                if (statusNorm == "pending")
-                    query = query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending);
-                else if (statusNorm == "approved")
-                    query = query.Where(r => r.Status == SubscriptionActionRequestStatus.Approved);
-                else if (statusNorm == "rejected")
-                    query = query.Where(r => r.Status == SubscriptionActionRequestStatus.Rejected);
-                else
-                    query = query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending);
-            }
+                var statusNorm = (status ?? "pending").Trim().ToLowerInvariant();
+                var qNorm = (q ?? "").Trim().ToLowerInvariant();
 
-            var users = _db.Users.AsNoTracking();
+                var query = _db.InstitutionSubscriptionActionRequests
+                    .AsNoTracking()
+                    .Include(r => r.Subscription).ThenInclude(s => s.Institution)
+                    .Include(r => r.Subscription).ThenInclude(s => s.ContentProduct)
+                    .OrderByDescending(r => r.Id)
+                    .AsQueryable();
 
-            var rows = await query
-                .Select(r => new SubscriptionActionRequestListDto
+                if (statusNorm != "all")
                 {
-                    Id = r.Id,
-                    SubscriptionId = r.SubscriptionId,
+                    query = statusNorm switch
+                    {
+                        "pending" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending),
+                        "approved" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Approved),
+                        "rejected" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Rejected),
+                        _ => query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending),
+                    };
+                }
 
-                    InstitutionId = r.Subscription.InstitutionId,
-                    InstitutionName = r.Subscription.Institution.Name,
+                var users = _db.Users.AsNoTracking();
 
-                    ContentProductId = r.Subscription.ContentProductId,
-                    ContentProductName = r.Subscription.ContentProduct.Name,
+                var rows = await query
+                    .Select(r => new SubscriptionActionRequestListDto
+                    {
+                        Id = r.Id,
+                        SubscriptionId = r.SubscriptionId,
 
-                    RequestType = r.RequestType,
-                    Status = r.Status,
+                        InstitutionId = r.Subscription.InstitutionId,
+                        InstitutionName = r.Subscription.Institution.Name,
 
-                    RequestedByUserId = r.RequestedByUserId,
-                    RequestedByUsername = users
-                        .Where(u => u.Id == r.RequestedByUserId)
-                        .Select(u => u.Username)
-                        .FirstOrDefault() ?? "",
+                        ContentProductId = r.Subscription.ContentProductId,
+                        ContentProductName = r.Subscription.ContentProduct.Name,
 
-                    RequestNotes = r.RequestNotes,
+                        RequestType = r.RequestType,
+                        Status = r.Status,
 
-                    ReviewedByUserId = r.ReviewedByUserId,
-                    ReviewedByUsername = r.ReviewedByUserId.HasValue
-                        ? (users.Where(u => u.Id == r.ReviewedByUserId.Value).Select(u => u.Username).FirstOrDefault() ?? "")
-                        : null,
+                        RequestedByUserId = r.RequestedByUserId,
+                        RequestedByUsername = users
+                            .Where(u => u.Id == r.RequestedByUserId)
+                            .Select(u => u.Username)
+                            .FirstOrDefault() ?? "",
 
-                    ReviewNotes = r.ReviewNotes,
-                    ReviewedAt = r.ReviewedAt,
+                        RequestNotes = r.RequestNotes,
 
-                    CreatedAt = r.CreatedAt
-                })
-                .ToListAsync();
+                        ReviewedByUserId = r.ReviewedByUserId,
+                        ReviewedByUsername = r.ReviewedByUserId.HasValue
+                            ? (users.Where(u => u.Id == r.ReviewedByUserId.Value)
+                                .Select(u => u.Username).FirstOrDefault() ?? "")
+                            : null,
 
-            if (!string.IsNullOrWhiteSpace(qNorm))
-            {
-                rows = rows.Where(x =>
-                    (x.InstitutionName ?? "").ToLowerInvariant().Contains(qNorm) ||
-                    (x.ContentProductName ?? "").ToLowerInvariant().Contains(qNorm) ||
-                    (x.RequestedByUsername ?? "").ToLowerInvariant().Contains(qNorm) ||
-                    (x.RequestNotes ?? "").ToLowerInvariant().Contains(qNorm) ||
-                    x.Id.ToString().Contains(qNorm) ||
-                    x.SubscriptionId.ToString().Contains(qNorm)
-                ).ToList();
+                        ReviewNotes = r.ReviewNotes,
+                        ReviewedAt = r.ReviewedAt,
+
+                        CreatedAt = r.CreatedAt
+                    })
+                    .ToListAsync();
+
+                if (!string.IsNullOrWhiteSpace(qNorm))
+                {
+                    rows = rows.Where(x =>
+                        (x.InstitutionName ?? "").ToLowerInvariant().Contains(qNorm) ||
+                        (x.ContentProductName ?? "").ToLowerInvariant().Contains(qNorm) ||
+                        (x.RequestedByUsername ?? "").ToLowerInvariant().Contains(qNorm) ||
+                        (x.RequestNotes ?? "").ToLowerInvariant().Contains(qNorm) ||
+                        x.Id.ToString().Contains(qNorm) ||
+                        x.SubscriptionId.ToString().Contains(qNorm)
+                    ).ToList();
+                }
+
+                return Ok(rows);
             }
-
-            return Ok(rows);
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Failed to load requests.", detail = ex.Message });
+            }
         }
 
         [Authorize(Policy = PolicyNames.IsGlobalAdmin)]
         [HttpGet("requests/{requestId:int}")]
         public async Task<IActionResult> GetRequestById([FromRoute] int requestId)
         {
-            var users = _db.Users.AsNoTracking();
+            try
+            {
+                var users = _db.Users.AsNoTracking();
 
-            var row = await _db.InstitutionSubscriptionActionRequests
-                .AsNoTracking()
-                .Include(r => r.Subscription)
-                    .ThenInclude(s => s.Institution)
-                .Include(r => r.Subscription)
-                    .ThenInclude(s => s.ContentProduct)
-                .Where(r => r.Id == requestId)
-                .Select(r => new SubscriptionActionRequestListDto
-                {
-                    Id = r.Id,
-                    SubscriptionId = r.SubscriptionId,
+                var row = await _db.InstitutionSubscriptionActionRequests
+                    .AsNoTracking()
+                    .Include(r => r.Subscription).ThenInclude(s => s.Institution)
+                    .Include(r => r.Subscription).ThenInclude(s => s.ContentProduct)
+                    .Where(r => r.Id == requestId)
+                    .Select(r => new SubscriptionActionRequestListDto
+                    {
+                        Id = r.Id,
+                        SubscriptionId = r.SubscriptionId,
 
-                    InstitutionId = r.Subscription.InstitutionId,
-                    InstitutionName = r.Subscription.Institution.Name,
+                        InstitutionId = r.Subscription.InstitutionId,
+                        InstitutionName = r.Subscription.Institution.Name,
 
-                    ContentProductId = r.Subscription.ContentProductId,
-                    ContentProductName = r.Subscription.ContentProduct.Name,
+                        ContentProductId = r.Subscription.ContentProductId,
+                        ContentProductName = r.Subscription.ContentProduct.Name,
 
-                    RequestType = r.RequestType,
-                    Status = r.Status,
+                        RequestType = r.RequestType,
+                        Status = r.Status,
 
-                    RequestedByUserId = r.RequestedByUserId,
-                    RequestedByUsername = users
-                        .Where(u => u.Id == r.RequestedByUserId)
-                        .Select(u => u.Username)
-                        .FirstOrDefault() ?? "",
+                        RequestedByUserId = r.RequestedByUserId,
+                        RequestedByUsername = users
+                            .Where(u => u.Id == r.RequestedByUserId)
+                            .Select(u => u.Username)
+                            .FirstOrDefault() ?? "",
 
-                    RequestNotes = r.RequestNotes,
+                        RequestNotes = r.RequestNotes,
 
-                    ReviewedByUserId = r.ReviewedByUserId,
-                    ReviewedByUsername = r.ReviewedByUserId.HasValue
-                        ? (users.Where(u => u.Id == r.ReviewedByUserId.Value).Select(u => u.Username).FirstOrDefault() ?? "")
-                        : null,
+                        ReviewedByUserId = r.ReviewedByUserId,
+                        ReviewedByUsername = r.ReviewedByUserId.HasValue
+                            ? (users.Where(u => u.Id == r.ReviewedByUserId.Value)
+                                .Select(u => u.Username).FirstOrDefault() ?? "")
+                            : null,
 
-                    ReviewNotes = r.ReviewNotes,
-                    ReviewedAt = r.ReviewedAt,
+                        ReviewNotes = r.ReviewNotes,
+                        ReviewedAt = r.ReviewedAt,
 
-                    CreatedAt = r.CreatedAt
-                })
-                .FirstOrDefaultAsync();
+                        CreatedAt = r.CreatedAt
+                    })
+                    .FirstOrDefaultAsync();
 
-            if (row == null) return NotFound(new { message = "Request not found." });
-            return Ok(row);
+                if (row == null) return NotFound(new { message = "Request not found." });
+                return Ok(row);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Failed to load request.", detail = ex.Message });
+            }
         }
 
-        //Add
         // ✅ List MY requests (Admin can see what they submitted; pending by default)
         [HttpGet("requests/mine")]
         public async Task<IActionResult> GetMyRequests(
             [FromQuery] string? status = "pending",
             [FromQuery] string? q = null)
         {
-            var userId = GetUserId();
-            if (!userId.HasValue) return Unauthorized();
+            var require = RequireUserId(out var userId);
+            if (require != null) return require;
 
-            var statusNorm = (status ?? "pending").Trim().ToLowerInvariant();
-            var qNorm = (q ?? "").Trim().ToLowerInvariant();
-
-            var query = _db.InstitutionSubscriptionActionRequests
-                .AsNoTracking()
-                .Include(r => r.Subscription).ThenInclude(s => s.Institution)
-                .Include(r => r.Subscription).ThenInclude(s => s.ContentProduct)
-                .Where(r => r.RequestedByUserId == userId.Value)
-                .OrderByDescending(r => r.Id)
-                .AsQueryable();
-
-            if (statusNorm != "all")
+            try
             {
-                query = statusNorm switch
+                var statusNorm = (status ?? "pending").Trim().ToLowerInvariant();
+                var qNorm = (q ?? "").Trim().ToLowerInvariant();
+
+                var query = _db.InstitutionSubscriptionActionRequests
+                    .AsNoTracking()
+                    .Include(r => r.Subscription).ThenInclude(s => s.Institution)
+                    .Include(r => r.Subscription).ThenInclude(s => s.ContentProduct)
+                    .Where(r => r.RequestedByUserId == userId)
+                    .OrderByDescending(r => r.Id)
+                    .AsQueryable();
+
+                if (statusNorm != "all")
                 {
-                    "pending" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending),
-                    "approved" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Approved),
-                    "rejected" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Rejected),
-                    _ => query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending),
-                };
+                    query = statusNorm switch
+                    {
+                        "pending" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending),
+                        "approved" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Approved),
+                        "rejected" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Rejected),
+                        _ => query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending),
+                    };
+                }
+
+                var users = _db.Users.AsNoTracking();
+
+                var rows = await query
+                    .Select(r => new SubscriptionActionRequestListDto
+                    {
+                        Id = r.Id,
+                        SubscriptionId = r.SubscriptionId,
+
+                        InstitutionId = r.Subscription.InstitutionId,
+                        InstitutionName = r.Subscription.Institution.Name,
+
+                        ContentProductId = r.Subscription.ContentProductId,
+                        ContentProductName = r.Subscription.ContentProduct.Name,
+
+                        RequestType = r.RequestType,
+                        Status = r.Status,
+
+                        RequestedByUserId = r.RequestedByUserId,
+                        RequestedByUsername = users
+                            .Where(u => u.Id == r.RequestedByUserId)
+                            .Select(u => u.Username)
+                            .FirstOrDefault() ?? "",
+
+                        RequestNotes = r.RequestNotes,
+
+                        ReviewedByUserId = r.ReviewedByUserId,
+                        ReviewedByUsername = r.ReviewedByUserId.HasValue
+                            ? (users.Where(u => u.Id == r.ReviewedByUserId.Value)
+                                .Select(u => u.Username).FirstOrDefault() ?? "")
+                            : null,
+
+                        ReviewNotes = r.ReviewNotes,
+                        ReviewedAt = r.ReviewedAt,
+                        CreatedAt = r.CreatedAt
+                    })
+                    .ToListAsync();
+
+                if (!string.IsNullOrWhiteSpace(qNorm))
+                {
+                    rows = rows.Where(x =>
+                        (x.InstitutionName ?? "").ToLowerInvariant().Contains(qNorm) ||
+                        (x.ContentProductName ?? "").ToLowerInvariant().Contains(qNorm) ||
+                        (x.RequestNotes ?? "").ToLowerInvariant().Contains(qNorm) ||
+                        x.Id.ToString().Contains(qNorm) ||
+                        x.SubscriptionId.ToString().Contains(qNorm)
+                    ).ToList();
+                }
+
+                return Ok(rows);
             }
-
-            var users = _db.Users.AsNoTracking();
-
-            var rows = await query
-                .Select(r => new SubscriptionActionRequestListDto
-                {
-                    Id = r.Id,
-                    SubscriptionId = r.SubscriptionId,
-
-                    InstitutionId = r.Subscription.InstitutionId,
-                    InstitutionName = r.Subscription.Institution.Name,
-
-                    ContentProductId = r.Subscription.ContentProductId,
-                    ContentProductName = r.Subscription.ContentProduct.Name,
-
-                    RequestType = r.RequestType,
-                    Status = r.Status,
-
-                    RequestedByUserId = r.RequestedByUserId,
-                    RequestedByUsername = users
-                        .Where(u => u.Id == r.RequestedByUserId)
-                        .Select(u => u.Username)
-                        .FirstOrDefault() ?? "",
-
-                    RequestNotes = r.RequestNotes,
-
-                    ReviewedByUserId = r.ReviewedByUserId,
-                    ReviewedByUsername = r.ReviewedByUserId.HasValue
-                        ? (users.Where(u => u.Id == r.ReviewedByUserId.Value).Select(u => u.Username).FirstOrDefault() ?? "")
-                        : null,
-
-                    ReviewNotes = r.ReviewNotes,
-                    ReviewedAt = r.ReviewedAt,
-                    CreatedAt = r.CreatedAt
-                })
-                .ToListAsync();
-
-            if (!string.IsNullOrWhiteSpace(qNorm))
+            catch (Exception ex)
             {
-                rows = rows.Where(x =>
-                    (x.InstitutionName ?? "").ToLowerInvariant().Contains(qNorm) ||
-                    (x.ContentProductName ?? "").ToLowerInvariant().Contains(qNorm) ||
-                    (x.RequestNotes ?? "").ToLowerInvariant().Contains(qNorm) ||
-                    x.Id.ToString().Contains(qNorm) ||
-                    x.SubscriptionId.ToString().Contains(qNorm)
-                ).ToList();
+                return StatusCode(500, new { message = "Failed to load your requests.", detail = ex.Message });
             }
-
-            return Ok(rows);
         }
 
-        // ✅ Admin can view THEIR OWN requests (pending by default)
         // GET: /api/institutions/subscriptions/requests/my?status=pending|approved|rejected|all
         [HttpGet("requests/my")]
-        public async Task<IActionResult> GetMyRequests([FromQuery] string? status = "pending")
+        public async Task<IActionResult> GetMyRequestsSimple([FromQuery] string? status = "pending")
         {
-            var userId = GetUserId();
-            if (!userId.HasValue) return Unauthorized();
+            var require = RequireUserId(out var userId);
+            if (require != null) return require;
 
-            var statusNorm = (status ?? "pending").Trim().ToLowerInvariant();
-
-            var query = _db.InstitutionSubscriptionActionRequests
-                .AsNoTracking()
-                .Include(r => r.Subscription).ThenInclude(s => s.Institution)
-                .Include(r => r.Subscription).ThenInclude(s => s.ContentProduct)
-                .Where(r => r.RequestedByUserId == userId.Value)
-                .OrderByDescending(r => r.Id)
-                .AsQueryable();
-
-            if (statusNorm != "all")
+            try
             {
-                if (statusNorm == "pending")
-                    query = query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending);
-                else if (statusNorm == "approved")
-                    query = query.Where(r => r.Status == SubscriptionActionRequestStatus.Approved);
-                else if (statusNorm == "rejected")
-                    query = query.Where(r => r.Status == SubscriptionActionRequestStatus.Rejected);
-                else
-                    query = query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending);
-            }
+                var statusNorm = (status ?? "pending").Trim().ToLowerInvariant();
 
-            var users = _db.Users.AsNoTracking();
+                var query = _db.InstitutionSubscriptionActionRequests
+                    .AsNoTracking()
+                    .Include(r => r.Subscription).ThenInclude(s => s.Institution)
+                    .Include(r => r.Subscription).ThenInclude(s => s.ContentProduct)
+                    .Where(r => r.RequestedByUserId == userId)
+                    .OrderByDescending(r => r.Id)
+                    .AsQueryable();
 
-            var rows = await query
-                .Select(r => new SubscriptionActionRequestListDto
+                if (statusNorm != "all")
                 {
-                    Id = r.Id,
-                    SubscriptionId = r.SubscriptionId,
+                    query = statusNorm switch
+                    {
+                        "pending" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending),
+                        "approved" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Approved),
+                        "rejected" => query.Where(r => r.Status == SubscriptionActionRequestStatus.Rejected),
+                        _ => query.Where(r => r.Status == SubscriptionActionRequestStatus.Pending),
+                    };
+                }
 
-                    InstitutionId = r.Subscription.InstitutionId,
-                    InstitutionName = r.Subscription.Institution.Name,
+                var users = _db.Users.AsNoTracking();
 
-                    ContentProductId = r.Subscription.ContentProductId,
-                    ContentProductName = r.Subscription.ContentProduct.Name,
+                var rows = await query
+                    .Select(r => new SubscriptionActionRequestListDto
+                    {
+                        Id = r.Id,
+                        SubscriptionId = r.SubscriptionId,
 
-                    RequestType = r.RequestType,
-                    Status = r.Status,
+                        InstitutionId = r.Subscription.InstitutionId,
+                        InstitutionName = r.Subscription.Institution.Name,
 
-                    RequestedByUserId = r.RequestedByUserId,
-                    RequestedByUsername = users
-                        .Where(u => u.Id == r.RequestedByUserId)
-                        .Select(u => u.Username)
-                        .FirstOrDefault() ?? "",
+                        ContentProductId = r.Subscription.ContentProductId,
+                        ContentProductName = r.Subscription.ContentProduct.Name,
 
-                    RequestNotes = r.RequestNotes,
+                        RequestType = r.RequestType,
+                        Status = r.Status,
 
-                    ReviewedByUserId = r.ReviewedByUserId,
-                    ReviewedByUsername = r.ReviewedByUserId.HasValue
-                        ? (users.Where(u => u.Id == r.ReviewedByUserId.Value).Select(u => u.Username).FirstOrDefault() ?? "")
-                        : null,
+                        RequestedByUserId = r.RequestedByUserId,
+                        RequestedByUsername = users
+                            .Where(u => u.Id == r.RequestedByUserId)
+                            .Select(u => u.Username)
+                            .FirstOrDefault() ?? "",
 
-                    ReviewNotes = r.ReviewNotes,
-                    ReviewedAt = r.ReviewedAt,
+                        RequestNotes = r.RequestNotes,
 
-                    CreatedAt = r.CreatedAt
-                })
-                .ToListAsync();
+                        ReviewedByUserId = r.ReviewedByUserId,
+                        ReviewedByUsername = r.ReviewedByUserId.HasValue
+                            ? (users.Where(u => u.Id == r.ReviewedByUserId.Value)
+                                .Select(u => u.Username).FirstOrDefault() ?? "")
+                            : null,
 
-            return Ok(rows);
+                        ReviewNotes = r.ReviewNotes,
+                        ReviewedAt = r.ReviewedAt,
+
+                        CreatedAt = r.CreatedAt
+                    })
+                    .ToListAsync();
+
+                return Ok(rows);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Failed to load your requests.", detail = ex.Message });
+            }
         }
-
-
     }
 }
