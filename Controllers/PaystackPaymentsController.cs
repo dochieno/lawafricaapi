@@ -31,6 +31,25 @@ namespace LawAfrica.API.Controllers
             _logger = logger;
         }
 
+        // ✅ If you ever decide to route callback through API first (optional).
+        // Paystack can redirect to:
+        //   https://lawafricaapi.onrender.com/api/payments/paystack/return?reference=...&trxref=...
+        // Then we redirect to frontend:
+        //   https://lawafricadigitalhub.vercel.app/payments/paystack/return?reference=...&trxref=...
+        [AllowAnonymous]
+        [HttpGet("return")]
+        public IActionResult ReturnToFrontend([FromQuery] string? reference, [FromQuery] string? trxref)
+        {
+            // Prefer reference, fallback trxref
+            var r = (reference ?? trxref ?? "").Trim();
+
+            var frontendReturn = "https://lawafricadigitalhub.vercel.app/payments/paystack/return";
+            if (string.IsNullOrWhiteSpace(r))
+                return Redirect(frontendReturn);
+
+            return Redirect($"{frontendReturn}?reference={Uri.EscapeDataString(r)}");
+        }
+
         /// <summary>
         /// Creates a PaymentIntent + initializes Paystack transaction, returns authorization_url to redirect user.
         /// </summary>
@@ -55,10 +74,8 @@ namespace LawAfrica.API.Controllers
                         Status = StatusCodes.Status401Unauthorized
                     });
                 }
-                // User is authenticated here
-                // userId = User.GetUserId(); commented this to remove non nullable warning.
-                userId = HttpContext.User.GetUserId();
 
+                userId = HttpContext.User.GetUserId();
             }
 
             // ✅ Paystack requires email
@@ -72,7 +89,6 @@ namespace LawAfrica.API.Controllers
                     .FirstOrDefaultAsync(ct);
 
                 // 2) If DB email missing, allow fallback to request.Email (sent by frontend)
-                //    This fixes cases where token/user context has email but DB row is empty.
                 if (string.IsNullOrWhiteSpace(email))
                 {
                     email = request.Email?.Trim();
@@ -143,7 +159,8 @@ namespace LawAfrica.API.Controllers
             await _db.SaveChangesAsync(ct);
 
             // 2) Create a reference we control (matching + idempotency)
-            var reference = $"LA-{intent.Id}-{Guid.NewGuid():N}".Substring(0, $"LA-{intent.Id}-".Length + 6);
+            var reference = $"LA-{intent.Id}-{Guid.NewGuid():N}"
+                .Substring(0, $"LA-{intent.Id}-".Length + 6);
 
             intent.ProviderReference = reference;
             intent.ProviderTransactionId = null;
@@ -154,7 +171,12 @@ namespace LawAfrica.API.Controllers
             // 3) Call Paystack initialize
             try
             {
-                var callbackUrl = string.IsNullOrWhiteSpace(_opts.CallbackUrl) ? null : _opts.CallbackUrl.Trim();
+                // ✅ Callback should be FRONTEND return, not webhook.
+                // If not set in env, we fall back to your production frontend return.
+                var fallbackFrontendReturn = "https://lawafricadigitalhub.vercel.app/payments/paystack/return";
+                var callbackUrl = string.IsNullOrWhiteSpace(_opts.CallbackUrl)
+                    ? fallbackFrontendReturn
+                    : _opts.CallbackUrl.Trim();
 
                 var init = await _paystack.InitializeTransactionAsync(
                     email: email!,
@@ -237,7 +259,6 @@ namespace LawAfrica.API.Controllers
             });
         }
 
-
         [Authorize]
         [HttpPost("return-visit")]
         public async Task<IActionResult> LogReturnVisit(
@@ -251,7 +272,6 @@ namespace LawAfrica.API.Controllers
             if (string.IsNullOrWhiteSpace(reference))
                 return BadRequest("Reference is required.");
 
-            // ✅ HttpContext.User is guaranteed non-null in ASP.NET Core
             var userId = HttpContext.User.GetUserId();
 
             var intent = await _db.PaymentIntents
@@ -280,7 +300,6 @@ namespace LawAfrica.API.Controllers
             await _db.SaveChangesAsync(ct);
             return Ok(new { ok = true });
         }
-
 
         private static string SafeTrim(string? value, int max)
         {
