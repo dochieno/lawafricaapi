@@ -257,12 +257,11 @@ namespace LawAfrica.API.Controllers
             }
         }
 
-        // ✅ Download Endpoint with Access Rules (unchanged)
+        // ✅ Download Endpoint (SINGLE SOURCE OF TRUTH = DocumentEntitlementService)
         [Authorize]
         [HttpGet("{id}/download")]
         public async Task<IActionResult> Download(
             int id,
-            [FromServices] IAuthorizationService authorizationService,
             [FromServices] DocumentEntitlementService entitlementService,
             [FromServices] FileStorageService storage)
         {
@@ -270,13 +269,12 @@ namespace LawAfrica.API.Controllers
             if (doc == null || string.IsNullOrWhiteSpace(doc.FilePath))
                 return NotFound("Document not found or file missing.");
 
-            var authResult = await authorizationService.AuthorizeAsync(User, doc, PolicyNames.CanAccessLegalDocuments);
-            if (!authResult.Succeeded)
-                return Forbid();
-
             var userId = User.GetUserId();
+
+            // ✅ SINGLE SOURCE OF TRUTH
             var decision = await entitlementService.GetEntitlementDecisionAsync(userId, doc);
 
+            // ✅ Hard blocks: institution inactive or seat exceeded
             if (!decision.IsAllowed &&
                 (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
                  decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded))
@@ -294,7 +292,17 @@ namespace LawAfrica.API.Controllers
                 });
             }
 
-            var accessLevel = decision.AccessLevel;
+            // ✅ Not entitled: return 403 (frontend can show purchase flow / preview messaging)
+            // NOTE: react-pdf still needs the file for PreviewOnly.
+            // Your current system implements preview by limiting pages in the UI (DEFAULT_PREVIEW_MAX_PAGES),
+            // so we allow PreviewOnly to load the file.
+            //
+            // If you ever want server-side preview (first N pages only), that would require additional processing.
+            if (decision.DenyReason == DocumentEntitlementDenyReason.NotEntitled)
+            {
+                // Allow PreviewOnly to read the file (UI will limit pages).
+                // If you want NotEntitled to be blocked entirely, change this to a 403 return.
+            }
 
             var physicalPath = storage.ResolvePhysicalPathFromDbPath(doc.FilePath);
             if (!System.IO.File.Exists(physicalPath))
@@ -308,7 +316,8 @@ namespace LawAfrica.API.Controllers
             };
 
             Response.Headers.Append("Content-Disposition", $"inline; filename=\"{Path.GetFileName(physicalPath)}\"");
-            Response.Headers.Append("X-Document-Access", accessLevel == DocumentAccessLevel.FullAccess ? "Full" : "Preview");
+            Response.Headers.Append("X-Document-Access",
+                decision.AccessLevel == DocumentAccessLevel.FullAccess ? "Full" : "Preview");
 
             return PhysicalFile(physicalPath, contentType, enableRangeProcessing: true);
         }
@@ -455,6 +464,7 @@ namespace LawAfrica.API.Controllers
                 });
             }
 
+            // Preview-only
             return Ok(new DocumentAccessDto
             {
                 DocumentId = id,
@@ -492,7 +502,6 @@ namespace LawAfrica.API.Controllers
                 });
             }
 
-            //var physicalPath = Path.Combine(Directory.GetCurrentDirectory(), doc.FilePath);
             var physicalPath = storage.ResolvePhysicalPathFromDbPath(doc.FilePath);
 
             if (!System.IO.File.Exists(physicalPath))

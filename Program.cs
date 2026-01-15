@@ -154,9 +154,6 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy(PolicyNames.CanApproveInstitutionUsers,
         policy => policy.Requirements.Add(new CanApproveInstitutionUsersRequirement()));
 
-    options.AddPolicy(PolicyNames.CanAccessLegalDocuments,
-        policy => policy.Requirements.Add(new CanAccessLegalDocumentRequirement()));
-
     options.AddPolicy(PolicyNames.IsGlobalAdmin,
         policy => policy.Requirements.Add(new GlobalAdminRequirement()));
 
@@ -177,7 +174,6 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddScoped<IAuthorizationHandler, ApprovedUserHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, InstitutionAdminHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, CanApproveInstitutionUsersHandler>();
-builder.Services.AddScoped<IAuthorizationHandler, CanAccessLegalDocumentHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, GlobalAdminHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
 

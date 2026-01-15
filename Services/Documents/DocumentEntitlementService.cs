@@ -8,6 +8,20 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LawAfrica.API.Services.Documents
 {
+    /// <summary>
+    /// SINGLE SOURCE OF TRUTH for document entitlement.
+    ///
+    /// This service decides whether a user has:
+    /// - FullAccess (read all pages)
+    /// - PreviewOnly (limited pages in UI)
+    ///
+    /// It also encodes "hard block" cases using DenyReason, e.g.:
+    /// - InstitutionSubscriptionInactive
+    /// - InstitutionSeatLimitExceeded
+    ///
+    /// Controllers and authorization handlers should rely on THIS service
+    /// to avoid "works locally but fails in production" mismatches.
+    /// </summary>
     public class DocumentEntitlementService
     {
         private readonly ApplicationDbContext _db;
@@ -24,25 +38,39 @@ namespace LawAfrica.API.Services.Documents
             _usage = usage;
         }
 
-        // Existing API - kept
+        /// <summary>
+        /// Lightweight wrapper that returns only AccessLevel.
+        ///
+        /// IMPORTANT: This still calls GetEntitlementDecisionAsync, but it is intended
+        /// for high-frequency scenarios (lists, previews, library checks).
+        ///
+        /// NOTE: Decision logging is currently done inside GetEntitlementDecisionAsync
+        /// via LogAndReturnAsync. If you truly want this to be fully "pure",
+        /// you'd separate "decision" from "logging". But for now we keep your design.
+        /// </summary>
         public async Task<DocumentAccessLevel> GetAccessLevelAsync(int userId, LegalDocument document)
         {
-            // Keep this method "pure": it may be called frequently (e.g., lists, previews, library checks).
-            // Logging should happen only on intentional "ReaderOpen" or explicit entitlement checks.
             var decision = await GetEntitlementDecisionAsync(userId, document);
             return decision.AccessLevel;
         }
 
-        // (Helpers kept; not used in LINQ to avoid translation errors)
+        // Helpers retained (and explicitly not used inside LINQ) to avoid EF translation issues.
         private static bool CountsAsStudent(InstitutionMemberType t) => t == InstitutionMemberType.Student;
 
-        // Staff bucket includes Staff + InstitutionAdmin (per your previous seat logic)
+        // Staff bucket includes Staff + InstitutionAdmin (per your seat logic).
         private static bool CountsAsStaff(InstitutionMemberType t)
             => t == InstitutionMemberType.Staff || t == InstitutionMemberType.InstitutionAdmin;
 
         /// <summary>
-        /// Logs a usage event for document access, but throttles to avoid floods.
-        /// Use this ONLY from the "document opened" path (surface = "ReaderOpen").
+        /// Usage analytics logger with throttling.
+        ///
+        /// PURPOSE:
+        /// - Record that a user attempted to access/open a document.
+        /// - Avoid spamming usage logs due to repeated calls (e.g. scrolling, page loads).
+        ///
+        /// Throttle window default: 60 seconds (configurable via parameter).
+        ///
+        /// "surface" default is "ReaderOpen" meaning: a reader load/open.
         /// </summary>
         private async Task<DocumentEntitlementDecision> LogAndReturnAsync(
             int userId,
@@ -55,13 +83,10 @@ namespace LawAfrica.API.Services.Documents
         {
             var allowed = decision.AccessLevel == DocumentAccessLevel.FullAccess;
 
-            // ✅ Null-safe deny reason
-            var reason = allowed
-                ? "ALLOWED"
-                : decision.DenyReason.ToString();
+            // If allowed => reason is ALLOWED; otherwise use deny reason.
+            var reason = allowed ? "ALLOWED" : decision.DenyReason.ToString();
 
-            // ✅ Throttle: skip logging if we've already logged the same event recently
-            // This prevents floods caused by repeated calls during scrolling/page loads.
+            // Throttle: if same user opened same doc on same surface recently, skip logging.
             var nowUtc = DateTime.UtcNow;
             var windowStart = nowUtc.AddSeconds(-Math.Max(5, throttleWindowSeconds));
 
@@ -88,20 +113,24 @@ namespace LawAfrica.API.Services.Documents
             return decision;
         }
 
-
-
         /// <summary>
         /// Seat enforcement at ACCESS TIME ONLY.
-        /// RULE YOU REQUESTED:
-        /// - MaxSeats = 0  => block access (no seats allowed)
-        /// - MaxSeats = N  => allow up to N, block when used > N
         ///
-        /// Seats are counted using memberships:
-        /// - Approved AND IsActive == true
+        /// RULE:
+        /// - MaxSeats = 0  => effectively no seats allowed (used > 0 will exceed)
+        /// - MaxSeats = N  => allow up to N; exceed when used > N
+        ///
+        /// Seat usage counts memberships that are:
+        /// - Approved
+        /// - IsActive == true
+        ///
+        /// Student seats are counted by MemberType == Student
+        /// Staff seats are counted by MemberType == Staff OR InstitutionAdmin
         /// </summary>
         private async Task<(bool exceeded, int usedStudents, int maxStudents, int usedStaff, int maxStaff)>
             IsSeatLimitExceededAsync(int institutionId, CancellationToken ct = default)
         {
+            // Read limits from the institution record.
             var inst = await _db.Institutions
                 .AsNoTracking()
                 .Where(i => i.Id == institutionId)
@@ -115,6 +144,7 @@ namespace LawAfrica.API.Services.Documents
             if (inst == null)
                 return (false, 0, 0, 0, 0);
 
+            // "Consuming" seats means membership is active + approved.
             var consuming = _db.InstitutionMemberships
                 .AsNoTracking()
                 .Where(m =>
@@ -122,7 +152,7 @@ namespace LawAfrica.API.Services.Documents
                     m.IsActive &&
                     m.Status == MembershipStatus.Approved);
 
-            // ✅ EF-translatable counts
+            // EF-safe counts
             var usedStudents = await consuming.CountAsync(
                 m => m.MemberType == InstitutionMemberType.Student, ct);
 
@@ -130,8 +160,7 @@ namespace LawAfrica.API.Services.Documents
                 m => m.MemberType == InstitutionMemberType.Staff ||
                      m.MemberType == InstitutionMemberType.InstitutionAdmin, ct);
 
-            // ✅ Requested enforcement:
-            // 0 means "no seats allowed", N means allow up to N, block when used > N
+            // Exceeded only if usage strictly greater than max.
             bool exceededStudents = usedStudents > inst.MaxStudentSeats;
             bool exceededStaff = usedStaff > inst.MaxStaffSeats;
 
@@ -140,15 +169,29 @@ namespace LawAfrica.API.Services.Documents
             return (exceeded, usedStudents, inst.MaxStudentSeats, usedStaff, inst.MaxStaffSeats);
         }
 
-        // Additive API - kept
+        /// <summary>
+        /// CORE ENTITLEMENT DECISION ENGINE.
+        ///
+        /// Outputs a DocumentEntitlementDecision:
+        /// - AccessLevel: FullAccess or PreviewOnly
+        /// - DenyReason: None / InstitutionSubscriptionInactive / InstitutionSeatLimitExceeded / NotEntitled
+        /// - Message: user-facing string used by UI
+        /// - CanPurchaseIndividually + PurchaseDisabledReason: purchase gating rules
+        ///
+        /// IMPORTANT:
+        /// - This method is used by /access and also indirectly by /download.
+        /// - Keeping ALL rules here prevents inconsistencies between endpoints.
+        /// </summary>
         public async Task<DocumentEntitlementDecision> GetEntitlementDecisionAsync(int userId, LegalDocument document)
         {
             var now = DateTime.UtcNow;
 
-            // Track institutionId when we learn it (for usage analytics)
+            // For analytics (usage events). Not always available (e.g. user not found).
             int? institutionIdForUsage = null;
 
-            // 1) Free doc => Full
+            // ------------------------------------------------------
+            // 1) Free document => always FullAccess
+            // ------------------------------------------------------
             if (!document.IsPremium)
             {
                 var d = new DocumentEntitlementDecision
@@ -161,7 +204,11 @@ namespace LawAfrica.API.Services.Documents
                 return await LogAndReturnAsync(userId, institutionIdForUsage, document.Id, d);
             }
 
-            // 2) Load user
+            // ------------------------------------------------------
+            // 2) Load user context (UserType + InstitutionId)
+            //    If user is missing => treat as NotEntitled and allow PreviewOnly
+            //    (your current behavior).
+            // ------------------------------------------------------
             var user = await _db.Users
                 .AsNoTracking()
                 .Where(u => u.Id == userId)
@@ -184,7 +231,9 @@ namespace LawAfrica.API.Services.Documents
 
             institutionIdForUsage = user.InstitutionId;
 
-            // 3) Admin => Full
+            // ------------------------------------------------------
+            // 3) Global platform admin => FullAccess
+            // ------------------------------------------------------
             if (user.UserType == UserType.Admin)
             {
                 var d = new DocumentEntitlementDecision
@@ -197,7 +246,9 @@ namespace LawAfrica.API.Services.Documents
                 return await LogAndReturnAsync(userId, institutionIdForUsage, document.Id, d);
             }
 
-            // 4) Direct purchase => Full
+            // ------------------------------------------------------
+            // 4) Direct purchase of this specific LegalDocument => FullAccess
+            // ------------------------------------------------------
             var boughtThisDocument = await _db.UserLegalDocumentPurchases
                 .AsNoTracking()
                 .AnyAsync(p => p.UserId == userId && p.LegalDocumentId == document.Id);
@@ -214,7 +265,12 @@ namespace LawAfrica.API.Services.Documents
                 return await LogAndReturnAsync(userId, institutionIdForUsage, document.Id, d);
             }
 
-            // 5) Determine product(s) covering this doc
+            // ------------------------------------------------------
+            // 5) Determine all ContentProduct(s) that include this document
+            //    via join table ContentProductLegalDocuments
+            //
+            //    Also include document.ContentProductId (legacy/optional direct ref)
+            // ------------------------------------------------------
             var productIds = await _db.ContentProductLegalDocuments
                 .AsNoTracking()
                 .Where(x => x.LegalDocumentId == document.Id)
@@ -225,6 +281,7 @@ namespace LawAfrica.API.Services.Documents
             if (document.ContentProductId.HasValue && !productIds.Contains(document.ContentProductId.Value))
                 productIds.Add(document.ContentProductId.Value);
 
+            // If document is not assigned to any product => treat as NotEntitled (preview only).
             if (productIds.Count == 0)
             {
                 var d = new DocumentEntitlementDecision
@@ -241,12 +298,22 @@ namespace LawAfrica.API.Services.Documents
 
             SubscriptionAccessDecision? institutionDecision = null;
 
+            // Purchase gating defaults (may be overridden for institution accounts)
             bool canPurchaseIndividually = true;
             string? purchaseDisabledReason = null;
+
+            // Track institution state
             bool institutionIsActive = true;
 
+            // ------------------------------------------------------
+            // 6) Institution-linked user path:
+            //    Apply hard blocks and institution subscription coverage checks.
+            // ------------------------------------------------------
             if (user.InstitutionId.HasValue)
             {
+                // Read institution flags:
+                // - IsActive: institution account active?
+                // - AllowIndividualPurchasesWhenInstitutionInactive: can users buy individually when blocked?
                 var inst = await _db.Institutions
                     .AsNoTracking()
                     .Where(i => i.Id == user.InstitutionId.Value)
@@ -259,7 +326,7 @@ namespace LawAfrica.API.Services.Documents
 
                 institutionIsActive = inst?.IsActive ?? true;
 
-                // Reuse this flag for BOTH inactive + seat-exceeded block states
+                // If institution disallows individual purchase in blocked states => disable purchase
                 if (!(inst?.AllowIndividualPurchasesWhenInstitutionInactive ?? false))
                 {
                     canPurchaseIndividually = false;
@@ -267,7 +334,8 @@ namespace LawAfrica.API.Services.Documents
                         "Purchases are disabled for institution accounts. Please contact your administrator.";
                 }
 
-                // Institution inactive => hard lock
+                // 6a) Institution inactive => hard lock
+                // (your UI treats this as blocked; /download also denies with headers)
                 if (!institutionIsActive)
                 {
                     var d = new DocumentEntitlementDecision
@@ -275,7 +343,6 @@ namespace LawAfrica.API.Services.Documents
                         AccessLevel = DocumentAccessLevel.PreviewOnly,
                         DenyReason = DocumentEntitlementDenyReason.InstitutionSubscriptionInactive,
                         Message = "Your institution is inactive. Please contact your administrator.",
-
                         CanPurchaseIndividually = canPurchaseIndividually,
                         PurchaseDisabledReason = purchaseDisabledReason
                     };
@@ -283,7 +350,7 @@ namespace LawAfrica.API.Services.Documents
                     return await LogAndReturnAsync(userId, institutionIdForUsage, document.Id, d);
                 }
 
-                // ✅ Seat limit enforcement ONLY at access time
+                // 6b) Seat limit enforcement at access time
                 var seat = await IsSeatLimitExceededAsync(user.InstitutionId.Value, ct: default);
                 if (seat.exceeded)
                 {
@@ -294,7 +361,6 @@ namespace LawAfrica.API.Services.Documents
                         Message =
                             $"Institution seat limit exceeded. Please contact your administrator. " +
                             $"Students: {seat.usedStudents}/{seat.maxStudents}, Staff: {seat.usedStaff}/{seat.maxStaff}.",
-
                         CanPurchaseIndividually = canPurchaseIndividually,
                         PurchaseDisabledReason = purchaseDisabledReason
                     };
@@ -302,6 +368,9 @@ namespace LawAfrica.API.Services.Documents
                     return await LogAndReturnAsync(userId, institutionIdForUsage, document.Id, d);
                 }
 
+                // 6c) Institution subscription coverage:
+                // Evaluate whether institution has an active subscription that covers ANY product
+                // containing this document.
                 institutionDecision = await _subscriptionGuard.EvaluateInstitutionCoverageAsync(
                     institutionId: user.InstitutionId.Value,
                     productIds: productIds,
@@ -309,6 +378,7 @@ namespace LawAfrica.API.Services.Documents
                     graceDays: 0
                 );
 
+                // If guard says institution is locked (expired/suspended) => hard lock
                 if (institutionDecision.IsInstitutionLock)
                 {
                     var d = new DocumentEntitlementDecision
@@ -317,7 +387,6 @@ namespace LawAfrica.API.Services.Documents
                         DenyReason = DocumentEntitlementDenyReason.InstitutionSubscriptionInactive,
                         Message = institutionDecision.Message
                             ?? "Institution subscription expired. Please contact your administrator.",
-
                         CanPurchaseIndividually = canPurchaseIndividually,
                         PurchaseDisabledReason = purchaseDisabledReason
                     };
@@ -326,7 +395,10 @@ namespace LawAfrica.API.Services.Documents
                 }
             }
 
-            // 4b) Library grants
+            // ------------------------------------------------------
+            // 7) Library grants (manual/administrative grants)
+            //    If user has a library record granting access => FullAccess
+            // ------------------------------------------------------
             var hasLibraryGrant = await _db.UserLibraries
                 .AsNoTracking()
                 .AnyAsync(l =>
@@ -348,7 +420,10 @@ namespace LawAfrica.API.Services.Documents
                 return await LogAndReturnAsync(userId, institutionIdForUsage, document.Id, d);
             }
 
-            // 6) Institution subscription access
+            // ------------------------------------------------------
+            // 8) Institution subscription access result
+            //    If the institution decision says allowed => FullAccess
+            // ------------------------------------------------------
             if (institutionDecision != null && institutionDecision.IsAllowed)
             {
                 var d = new DocumentEntitlementDecision
@@ -361,7 +436,9 @@ namespace LawAfrica.API.Services.Documents
                 return await LogAndReturnAsync(userId, institutionIdForUsage, document.Id, d);
             }
 
-            // 7) Public ownership
+            // ------------------------------------------------------
+            // 9) Public ownership of ANY product containing this document => FullAccess
+            // ------------------------------------------------------
             var ownsAnyContainingProduct = await _db.UserProductOwnerships
                 .AsNoTracking()
                 .AnyAsync(o =>
@@ -380,7 +457,9 @@ namespace LawAfrica.API.Services.Documents
                 return await LogAndReturnAsync(userId, institutionIdForUsage, document.Id, d);
             }
 
-            // 8) Public subscription
+            // ------------------------------------------------------
+            // 10) Public subscription (active) to ANY containing product => FullAccess
+            // ------------------------------------------------------
             var hasPublicSubscription = await _db.UserProductSubscriptions
                 .AsNoTracking()
                 .AnyAsync(s =>
@@ -402,14 +481,17 @@ namespace LawAfrica.API.Services.Documents
                 return await LogAndReturnAsync(userId, institutionIdForUsage, document.Id, d);
             }
 
-            // 9) Preview
+            // ------------------------------------------------------
+            // 11) Default: Not entitled => PreviewOnly
+            //     NOTE: This is where your "preview for public" behavior happens.
+            //     Hard-block cases are encoded earlier via DenyReason.
+            // ------------------------------------------------------
             {
                 var d = new DocumentEntitlementDecision
                 {
                     AccessLevel = DocumentAccessLevel.PreviewOnly,
                     DenyReason = DocumentEntitlementDenyReason.NotEntitled,
                     Message = "You do not have access to this document.",
-
                     CanPurchaseIndividually = canPurchaseIndividually,
                     PurchaseDisabledReason = purchaseDisabledReason
                 };
