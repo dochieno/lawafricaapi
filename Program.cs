@@ -2,6 +2,7 @@
 // ✅ Minimal change: do NOT require EmailSettings.Host when using Microsoft Graph.
 // ✅ Adds persistent disk support via STORAGE_ROOT env var on Render.
 // ✅ Adds deterministic GET /storage/** endpoint to eliminate 405 for cover images on Render.
+// ✅ Ensures Render/Vercel env vars override JSON via AddEnvironmentVariables().
 // ✅ Keeps existing logic unchanged.
 
 using LawAfrica.API;
@@ -19,12 +20,12 @@ using LawAfrica.API.Services.Subscriptions;
 using LawAfrica.API.Settings;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
-using System;
 using System.Text;
 using System.Text.Json.Serialization;
 
@@ -35,7 +36,10 @@ var builder = WebApplication.CreateBuilder(args);
 // --------------------------------------------------
 builder.Configuration
     .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
-    .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true, reloadOnChange: true);
+    .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true, reloadOnChange: true)
+    // ✅ IMPORTANT: allow Render env vars to override appsettings.json
+    // For nested keys: Mpesa__ConsumerKey, Paystack__SecretKey, etc.
+    .AddEnvironmentVariables();
 
 if (builder.Environment.IsDevelopment())
 {
@@ -276,7 +280,7 @@ app.UseExceptionHandler(errorApp =>
 {
     errorApp.Run(async context =>
     {
-        var feature = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>();
+        var feature = context.Features.Get<IExceptionHandlerFeature>();
         var ex = feature?.Error;
 
         if (ex != null)
