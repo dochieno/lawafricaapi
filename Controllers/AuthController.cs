@@ -181,36 +181,38 @@ namespace LawAfrica.API.Controllers
 
             var config = HttpContext.RequestServices.GetService(typeof(IConfiguration)) as IConfiguration;
 
-            // ✅ Your frontend landing page after verification
-            // Recommended appsettings key:
-            // "FrontendEmailVerifiedUrl": "http://localhost:5173/login"
-            // or "https://app.lawafrica.com/login"
+            // ✅ Where to send the user after verification (login page)
+            // Recommended Render env var:
+            //   FrontendEmailVerifiedUrl = https://lawafricadigitalhub.vercel.app/login
+            //
+            // Optional:
+            //   FrontendUrl = https://lawafricadigitalhub.vercel.app
             var frontendVerifiedUrl = (config?["FrontendEmailVerifiedUrl"] ?? "").Trim().TrimEnd('/');
+            var frontendUrl = (config?["FrontendUrl"] ?? "").Trim().TrimEnd('/');
+            var frontendBaseUrl = (config?["FrontendBaseUrl"] ?? "").Trim().TrimEnd('/'); // keep your existing key too
 
-            // Optional: fallback base URL if you prefer:
-            // "FrontendBaseUrl": "http://localhost:5173"
-            var frontendBaseUrl = (config?["FrontendBaseUrl"] ?? "").Trim().TrimEnd('/');
+            // If FrontendEmailVerifiedUrl not set, build from FrontendUrl or FrontendBaseUrl
+            if (string.IsNullOrWhiteSpace(frontendVerifiedUrl))
+            {
+                var baseUrl = !string.IsNullOrWhiteSpace(frontendUrl) ? frontendUrl : frontendBaseUrl;
+                if (!string.IsNullOrWhiteSpace(baseUrl))
+                    frontendVerifiedUrl = $"{baseUrl}/login";
+            }
 
-            // If FrontendEmailVerifiedUrl not set but base url is, default to /login
-            if (string.IsNullOrWhiteSpace(frontendVerifiedUrl) && !string.IsNullOrWhiteSpace(frontendBaseUrl))
-                frontendVerifiedUrl = $"{frontendBaseUrl}/login";
-
-            // ✅ Verify token (existing behavior)
+            // ✅ Verify token
             var ok = await _authService.VerifyEmailAsync(token);
 
-            // If we have a frontend URL, redirect there with status
+            // ✅ Redirect to frontend login if configured
             if (!string.IsNullOrWhiteSpace(frontendVerifiedUrl))
             {
                 var url = ok
                     ? $"{frontendVerifiedUrl}?verified=1"
-                    : $"{frontendVerifiedUrl}?verified=0&reason=expired";
+                    : $"{frontendVerifiedUrl}?verified=0";
 
                 return Redirect(url);
             }
 
-            // ✅ Fallback: branded HTML page (no external CSS)
-            // Try to load AppUrl for logo resolution (optional)
-            // "AppUrl": "https://localhost:7033"
+            // ✅ Fallback: branded HTML page (your existing behavior)
             var appUrl = (config?["AppUrl"] ?? "").Trim().TrimEnd('/');
             var logoUrl = string.IsNullOrWhiteSpace(appUrl) ? "" : $"{appUrl}/logo.png";
 
@@ -218,29 +220,31 @@ namespace LawAfrica.API.Controllers
                 ? @"<div style=""font-size:22px;font-weight:800;letter-spacing:0.2px;color:#101828;"">Law<span style=""color:#801010;"">Africa</span></div>"
                 : $@"<img src=""{System.Net.WebUtility.HtmlEncode(logoUrl)}"" alt=""LawAfrica"" width=""160"" style=""display:block;border:0;outline:none;text-decoration:none;height:auto;"" />";
 
-            var title = ok ? "Email verified" : "Verification link expired";
+            var title = ok ? "Email verified" : "Verification failed";
             var heading = ok ? "Your email is verified" : "This verification link is invalid or expired";
             var body = ok
                 ? "Your LawAfrica account email has been verified successfully. You can now sign in."
                 : "For security, verification links expire. Please request a new verification email from the app.";
 
-            // If we can infer a reasonable login URL, show it. Otherwise just show text.
-            var suggestedLoginUrl = !string.IsNullOrWhiteSpace(frontendBaseUrl) ? $"{frontendBaseUrl}/login" : "";
+            var suggestedLoginUrl =
+                !string.IsNullOrWhiteSpace(frontendUrl) ? $"{frontendUrl}/login" :
+                !string.IsNullOrWhiteSpace(frontendBaseUrl) ? $"{frontendBaseUrl}/login" :
+                "";
 
             var buttonHtml = !string.IsNullOrWhiteSpace(suggestedLoginUrl) && ok
                 ? $@"
-            <tr>
-              <td align=""left"" style=""padding-top:8px;"">
-                <a href=""{System.Net.WebUtility.HtmlEncode(suggestedLoginUrl)}""
-                   style=""display:inline-block;background:#801010;color:#ffffff;text-decoration:none;font-weight:700;
-                          padding:12px 18px;border-radius:10px;font-size:14px;"">
-                  Go to Login
-                </a>
-              </td>
-            </tr>"
-                : "";
+                <tr>
+                  <td align=""left"" style=""padding-top:8px;"">
+                    <a href=""{System.Net.WebUtility.HtmlEncode(suggestedLoginUrl)}""
+                       style=""display:inline-block;background:#801010;color:#ffffff;text-decoration:none;font-weight:700;
+                              padding:12px 18px;border-radius:10px;font-size:14px;"">
+                      Go to Login
+                    </a>
+                  </td>
+                </tr>"
+                        : "";
 
-            var html = $@"
+                    var html = $@"
             <!DOCTYPE html>
             <html lang=""en"">
             <head>
@@ -314,9 +318,9 @@ namespace LawAfrica.API.Controllers
               </table>
             </body>
             </html>";
-
             return Content(html, "text/html");
         }
+
 
 
         // =========================================================

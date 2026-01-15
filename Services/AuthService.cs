@@ -355,37 +355,68 @@ namespace LawAfrica.API.Services
         // =========================================================
         // ✅ Branded template-based verification email
         // =========================================================
-        private async Task SendVerificationEmail(User user)
-        {
-            if (string.IsNullOrWhiteSpace(user.Email))
-                return;
+            private async Task SendVerificationEmail(User user)
+            {
+                if (string.IsNullOrWhiteSpace(user.Email))
+                    return;
 
-            var token = user.EmailVerificationToken ?? string.Empty;
-            var appUrl = (_configuration["AppUrl"] ?? "").Trim().TrimEnd('/');
-            var verificationUrl = $"{appUrl}/api/auth/verify-email?token={Uri.EscapeDataString(token)}";
+                var token = (user.EmailVerificationToken ?? "").Trim();
+                if (string.IsNullOrWhiteSpace(token))
+                    return;
 
-            var subject = "Verify Your LawAfrica Account";
+                // ✅ Prefer explicit API base URL (Render) to ensure absolute links in emails
+                // Set on Render:
+                //   ApiBaseUrl = https://lawafricaapi.onrender.com
+                // Optional fallback:
+                //   AppUrl = https://lawafricaapi.onrender.com
+                var apiBaseUrl =
+                    (_configuration["ApiBaseUrl"] ?? "").Trim().TrimEnd('/') ??
+                    "";
 
-            var rendered = await _emailRenderer.RenderAsync(
-                templateName: "email-verification",
-                subject: subject,
-                model: new
-                {
-                    Subject = subject,
-                    Preheader = "Confirm your email to activate your account.",
-                    ProductName = "LawAfrica",
-                    Year = DateTime.UtcNow.Year.ToString(),
-                    SupportEmail = "support@lawafrica.com",
+                if (string.IsNullOrWhiteSpace(apiBaseUrl))
+                    apiBaseUrl = (_configuration["AppUrl"] ?? "").Trim().TrimEnd('/');
 
-                    DisplayName = (user.FirstName ?? user.Username),
-                    VerificationUrl = verificationUrl
-                },
-                inlineImages: null,
-                ct: CancellationToken.None
-            );
+                // Hard fallback (safe for prod)
+                if (string.IsNullOrWhiteSpace(apiBaseUrl))
+                    apiBaseUrl = "https://lawafricaapi.onrender.com";
 
-            await _emailService.SendEmailAsync(user.Email, rendered.Subject ?? subject, rendered.Html);
-        }
+                // ✅ Link goes to API verify endpoint (which will redirect to frontend login)
+                var verificationUrl =
+                    $"{apiBaseUrl}/api/auth/verify-email?token={Uri.EscapeDataString(token)}";
+
+                var subject = "Welcome to LawAfrica — verify your email ✅";
+
+                // ✅ More thrilling, welcoming copy
+                var preheader = "You’re in! Verify your email to unlock your LawAfrica account.";
+
+                var rendered = await _emailRenderer.RenderAsync(
+                    templateName: "email-verification",
+                    subject: subject,
+                    model: new
+                    {
+                        Subject = subject,
+                        Preheader = preheader,
+                        ProductName = "LawAfrica",
+                        Year = DateTime.UtcNow.Year.ToString(),
+                        SupportEmail = "support@lawafrica.com",
+
+                        DisplayName = (user.FirstName ?? user.Username),
+
+                        // ✅ the correct absolute link
+                        VerificationUrl = verificationUrl,
+
+                        // ✅ new optional template tokens (safe even if template ignores them)
+                        WelcomeTitle = "Welcome to LawAfrica 🎉",
+                        WelcomeBody =
+                            "You’re one step away from getting full access. Verify your email to activate your account, then sign in and start exploring legal resources, updates, and your personal library."
+                    },
+                    inlineImages: null,
+                    ct: CancellationToken.None
+                );
+
+                await _emailService.SendEmailAsync(user.Email, rendered.Subject ?? subject, rendered.Html);
+            }
+
 
         // =========================================================
         // ✅ Branded template-based password reset email

@@ -14,5 +14,7 @@
         public string GraphClientSecret { get; set; } = "";
         public string Provider { get; set; } = "Graph";
 
+        public string AppUrl { get; set; } = ""; // Vercel frontend base URL
+
     }
 }
