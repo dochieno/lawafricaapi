@@ -189,6 +189,7 @@ namespace LawAfrica.API.Controllers
             doc.AllowPublicPurchase = request.AllowPublicPurchase;
             doc.PublicCurrency = request.PublicCurrency;
             doc.PublicPrice = request.PublicPrice;
+            doc.PageCount = request.PageCount;
 
             doc.UpdatedAt = DateTime.UtcNow;
 

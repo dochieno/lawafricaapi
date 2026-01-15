@@ -11,6 +11,7 @@ namespace LawAfrica.API.Models.DTOs
         public string? Publisher { get; set; }
         public string? Edition { get; set; }
 
+        public int PageCount { get; set; }
         public LegalDocumentCategory Category { get; set; }
 
         public int CountryId { get; set; }
