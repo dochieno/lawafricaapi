@@ -12,10 +12,12 @@ namespace LawAfrica.API.Controllers
     public class ProfileController : ControllerBase
     {
         private readonly ApplicationDbContext _db;
+        private readonly IConfiguration _config;
 
-        public ProfileController(ApplicationDbContext db)
+        public ProfileController(ApplicationDbContext db, IConfiguration config)
         {
             _db = db;
+            _config = config;
         }
 
         // ---------------------------------------------------------
@@ -34,6 +36,9 @@ namespace LawAfrica.API.Controllers
             if (user == null)
                 return NotFound("User not found.");
 
+            // Optional: normalize legacy values without writing to DB
+            var normalized = NormalizeProfileImageUrl(user.ProfileImageUrl);
+
             return Ok(new
             {
                 user.Id,
@@ -47,9 +52,7 @@ namespace LawAfrica.API.Controllers
                 countryName = user.Country?.Name,
                 user.City,
 
-                // ✅ MUST be a browser-usable URL path like:
-                // /storage/ProfileImages/user_1_123.jpg OR null
-                user.ProfileImageUrl,
+                ProfileImageUrl = normalized, // ✅ always safe for browser
 
                 user.IsActive,
                 user.IsEmailVerified,
@@ -72,7 +75,6 @@ namespace LawAfrica.API.Controllers
             if (user == null)
                 return NotFound("User not found.");
 
-            // ---- EMAIL (with uniqueness check) ----
             if (!string.IsNullOrWhiteSpace(request.Email) &&
                 !string.Equals(request.Email, user.Email, StringComparison.OrdinalIgnoreCase))
             {
@@ -86,7 +88,6 @@ namespace LawAfrica.API.Controllers
                 user.IsEmailVerified = false;
             }
 
-            // ---- BASIC FIELDS ----
             if (!string.IsNullOrWhiteSpace(request.FirstName))
                 user.FirstName = request.FirstName.Trim();
 
@@ -99,12 +100,8 @@ namespace LawAfrica.API.Controllers
             if (!string.IsNullOrWhiteSpace(request.City))
                 user.City = request.City.Trim();
 
-            // ✅ SECURITY FIX:
-            // Do NOT allow ProfileImageUrl to be changed via UpdateProfile.
-            // Profile image must be managed ONLY via /api/profile/image endpoints.
-            // (This prevents bad/corrupt values like "user_1_x.jpg" or wrong casing.)
+            // ✅ DO NOT allow ProfileImageUrl from body
 
-            // ---- COUNTRY ----
             if (request.CountryId.HasValue)
             {
                 var exists = await _db.Countries.AnyAsync(c => c.Id == request.CountryId.Value);
@@ -121,52 +118,12 @@ namespace LawAfrica.API.Controllers
         }
 
         // ---------------------------------------------------------
-        // POST /api/profile/change-password
-        // ---------------------------------------------------------
-        [Authorize]
-        [HttpPost("change-password")]
-        public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest request)
-        {
-            if (string.IsNullOrWhiteSpace(request.CurrentPassword) ||
-                string.IsNullOrWhiteSpace(request.NewPassword) ||
-                string.IsNullOrWhiteSpace(request.ConfirmNewPassword))
-            {
-                return BadRequest("All password fields are required.");
-            }
-
-            if (request.NewPassword != request.ConfirmNewPassword)
-                return BadRequest("New password and confirmation do not match.");
-
-            if (request.NewPassword.Length < 6)
-                return BadRequest("New password must be at least 6 characters long.");
-
-            var userId = User.GetUserId();
-
-            var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId);
-            if (user == null)
-                return NotFound("User not found.");
-
-            var valid = BCrypt.Net.BCrypt.Verify(request.CurrentPassword, user.PasswordHash);
-            if (!valid)
-                return BadRequest("Current password is incorrect.");
-
-            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword);
-            user.UpdatedAt = DateTime.UtcNow;
-
-            await _db.SaveChangesAsync();
-
-            return Ok(new { message = "Password changed successfully." });
-        }
-
-        // ---------------------------------------------------------
         // POST /api/profile/image
         // ---------------------------------------------------------
         [Authorize]
         [HttpPost("image")]
         [RequestSizeLimit(5_000_000)]
-        public async Task<IActionResult> UploadProfileImage(
-            IFormFile file,
-            [FromServices] IWebHostEnvironment env)
+        public async Task<IActionResult> UploadProfileImage([FromForm] IFormFile file)
         {
             if (file == null || file.Length == 0)
                 return BadRequest("No file provided.");
@@ -181,19 +138,22 @@ namespace LawAfrica.API.Controllers
             var user = await _db.Users.FindAsync(userId);
             if (user == null) return Unauthorized();
 
-            // ✅ IMPORTANT: folder casing EXACT (Linux is case-sensitive)
-            var diskDir = Path.Combine(env.ContentRootPath, "Storage", "ProfileImages");
+            // ✅ CRITICAL: Save where /storage/** serves from (Render: STORAGE_ROOT)
+            var storageRoot = GetStorageRoot();
+            var diskDir = Path.Combine(storageRoot, "ProfileImages");
             Directory.CreateDirectory(diskDir);
 
-            // ✅ Delete old image safely (supports DB old values too)
+            // ✅ delete old
             if (!string.IsNullOrWhiteSpace(user.ProfileImageUrl))
             {
-                var oldDiskPath = ResolveProfileImageDiskPath(env.ContentRootPath, user.ProfileImageUrl);
+                var oldDiskPath = ResolveProfileImageDiskPath(storageRoot, user.ProfileImageUrl);
                 if (!string.IsNullOrWhiteSpace(oldDiskPath) && System.IO.File.Exists(oldDiskPath))
                     System.IO.File.Delete(oldDiskPath);
             }
 
             var ext = Path.GetExtension(file.FileName);
+            if (string.IsNullOrWhiteSpace(ext)) ext = ".jpg";
+
             var filename = $"user_{userId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}{ext}";
             var fullPath = Path.Combine(diskDir, filename);
 
@@ -202,7 +162,7 @@ namespace LawAfrica.API.Controllers
                 await file.CopyToAsync(stream);
             }
 
-            // ✅ Canonical URL stored in DB (browser-usable + correct casing)
+            // ✅ canonical url path (must match Program.cs "/storage" mapping)
             var urlPath = $"/storage/ProfileImages/{filename}";
             user.ProfileImageUrl = urlPath;
             user.UpdatedAt = DateTime.UtcNow;
@@ -210,9 +170,7 @@ namespace LawAfrica.API.Controllers
 
             return Ok(new
             {
-                // absolute for convenience
                 imageUrl = $"{Request.Scheme}://{Request.Host}{urlPath}",
-                // relative canonical for frontend storage
                 profileImageUrl = user.ProfileImageUrl
             });
         }
@@ -222,15 +180,17 @@ namespace LawAfrica.API.Controllers
         // ---------------------------------------------------------
         [Authorize]
         [HttpDelete("image")]
-        public async Task<IActionResult> RemoveProfileImage([FromServices] IWebHostEnvironment env)
+        public async Task<IActionResult> RemoveProfileImage()
         {
             var userId = User.GetUserId();
             var user = await _db.Users.FindAsync(userId);
             if (user == null) return Unauthorized();
 
+            var storageRoot = GetStorageRoot();
+
             if (!string.IsNullOrWhiteSpace(user.ProfileImageUrl))
             {
-                var diskPath = ResolveProfileImageDiskPath(env.ContentRootPath, user.ProfileImageUrl);
+                var diskPath = ResolveProfileImageDiskPath(storageRoot, user.ProfileImageUrl);
                 if (!string.IsNullOrWhiteSpace(diskPath) && System.IO.File.Exists(diskPath))
                     System.IO.File.Delete(diskPath);
 
@@ -245,49 +205,83 @@ namespace LawAfrica.API.Controllers
         // ---------------------------------------------------------
         // Helpers
         // ---------------------------------------------------------
+        private string GetStorageRoot()
+        {
+            // Must match Program.cs
+            var root = _config["STORAGE_ROOT"];
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                // local fallback
+                root = Path.Combine(AppContext.BaseDirectory, "Storage");
+            }
+            return root;
+        }
 
-        /// <summary>
-        /// Converts whatever is stored in DB into a real disk path.
-        /// Supports:
-        /// - "/storage/ProfileImages/x.jpg"
-        /// - "/storage/profileimages/x.jpg" (wrong-case old values)
-        /// - "Storage/ProfileImages/x.jpg"
-        /// - "user_1_x.jpg" (filename-only old values)
-        /// </summary>
-        private static string? ResolveProfileImageDiskPath(string contentRootPath, string stored)
+        private static string? ResolveProfileImageDiskPath(string storageRoot, string stored)
         {
             var s = (stored ?? "").Trim();
             if (string.IsNullOrWhiteSpace(s)) return null;
 
-            // URL form: /storage/...
+            s = s.Replace('\\', '/');
+
+            // URL form: /storage/ProfileImages/x.jpg
             if (s.StartsWith("/storage/", StringComparison.OrdinalIgnoreCase))
             {
-                // remove "/storage/" -> remaining is like "ProfileImages/x.jpg" (or wrong-case)
-                var rel = s.Substring("/storage/".Length).Replace('\\', '/');
-
-                // ✅ Force canonical folder casing for disk folder
+                var rel = s.Substring("/storage/".Length).TrimStart('/');
+                // Force correct casing folder on disk
                 if (rel.StartsWith("profileimages/", StringComparison.OrdinalIgnoreCase))
                     rel = "ProfileImages/" + rel.Substring("profileimages/".Length);
 
-                return Path.Combine(contentRootPath, "Storage", rel.Replace('/', Path.DirectorySeparatorChar));
+                return Path.Combine(storageRoot, rel.Replace('/', Path.DirectorySeparatorChar));
             }
 
-            // Disk-ish form: Storage/...
-            if (s.StartsWith("Storage/", StringComparison.OrdinalIgnoreCase) ||
-                s.StartsWith("Storage\\", StringComparison.OrdinalIgnoreCase))
+            // Disk-ish form: Storage/ProfileImages/x.jpg
+            if (s.StartsWith("storage/", StringComparison.OrdinalIgnoreCase))
             {
-                s = s.Replace('\\', '/');
+                var rel = s.Substring("storage/".Length).TrimStart('/');
+                if (rel.StartsWith("profileimages/", StringComparison.OrdinalIgnoreCase))
+                    rel = "ProfileImages/" + rel.Substring("profileimages/".Length);
 
-                // ✅ Force canonical folder casing
-                s = s.Replace("storage/profileimages/", "Storage/ProfileImages/", StringComparison.OrdinalIgnoreCase);
-                s = s.Replace("storage/ProfileImages/", "Storage/ProfileImages/", StringComparison.OrdinalIgnoreCase);
-
-                // "Storage/..." relative from content root
-                return Path.Combine(contentRootPath, s.Replace('/', Path.DirectorySeparatorChar));
+                return Path.Combine(storageRoot, rel.Replace('/', Path.DirectorySeparatorChar));
             }
 
             // Filename-only fallback
-            return Path.Combine(contentRootPath, "Storage", "ProfileImages", s.TrimStart('/', '\\'));
+            if (!s.Contains("/"))
+                return Path.Combine(storageRoot, "ProfileImages", s);
+
+            // fallback relative
+            return Path.Combine(storageRoot, s.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
+        }
+
+        private static string? NormalizeProfileImageUrl(string? v)
+        {
+            if (string.IsNullOrWhiteSpace(v)) return null;
+
+            var s = v.Trim().Replace('\\', '/');
+
+            if (s.StartsWith("/storage/", StringComparison.OrdinalIgnoreCase))
+            {
+                // enforce casing for folder in URL
+                if (s.StartsWith("/storage/profileimages/", StringComparison.OrdinalIgnoreCase))
+                    return "/storage/ProfileImages/" + s.Substring("/storage/profileimages/".Length);
+
+                return s;
+            }
+
+            if (s.StartsWith("storage/", StringComparison.OrdinalIgnoreCase))
+            {
+                var rel = s.Substring("storage/".Length).TrimStart('/');
+                if (rel.StartsWith("profileimages/", StringComparison.OrdinalIgnoreCase))
+                    rel = "ProfileImages/" + rel.Substring("profileimages/".Length);
+
+                return "/storage/" + rel;
+            }
+
+            // filename-only
+            if (!s.Contains("/"))
+                return "/storage/ProfileImages/" + s;
+
+            return s.StartsWith("/") ? s : "/" + s;
         }
     }
 }
