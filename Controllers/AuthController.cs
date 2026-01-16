@@ -63,28 +63,38 @@ namespace LawAfrica.API.Controllers
             if (request == null)
                 return BadRequest("Invalid request.");
 
-            var username = (request.Username ?? "").Trim();
+            var identifier = (request.Username ?? "").Trim(); // username OR email
             var password = request.Password ?? "";
 
-            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
-                return BadRequest("Username and password are required.");
+            if (string.IsNullOrWhiteSpace(identifier) || string.IsNullOrWhiteSpace(password))
+                return BadRequest("Username or email and password are required.");
 
+            var identLower = identifier.ToLower();
+
+            // ✅ Find by username OR email for consistent lockout + audit id
             var userRow = await _db.Users
                 .AsNoTracking()
-                .Where(u => u.Username.ToLower() == username.ToLower())
+                .Where(u =>
+                    u.Username.ToLower() == identLower ||
+                    (u.Email != null && u.Email.ToLower() == identLower)
+                )
                 .Select(u => new { u.Id, u.LockoutEndAt })
                 .FirstOrDefaultAsync();
 
+            // ✅ Early lockout response (optional but keeps UX consistent)
+            if (userRow?.LockoutEndAt.HasValue == true && userRow.LockoutEndAt.Value > DateTime.UtcNow)
+            {
+                await WriteLoginAuditAsync(userRow.Id, identifier, success: false, reason: "Account locked.");
+                return BadRequest($"Account locked until {userRow.LockoutEndAt.Value:u}");
+            }
+
+            // ✅ Pass through as-is; service now supports username OR email
             var result = await _authService.LoginAsync(request);
 
             if (!result.Success)
             {
-                await WriteLoginAuditAsync(userRow?.Id, username, success: false, reason: result.Message ?? "Login failed.");
-
-                if (userRow?.LockoutEndAt.HasValue == true && userRow.LockoutEndAt.Value > DateTime.UtcNow)
-                    return BadRequest($"Account locked until {userRow.LockoutEndAt.Value:u}");
-
-                return BadRequest(result.Message ?? "Incorrect username or password. Please try again.");
+                await WriteLoginAuditAsync(userRow?.Id, identifier, success: false, reason: result.Message ?? "Login failed.");
+                return BadRequest(result.Message ?? "Incorrect username/email or password. Please try again.");
             }
 
             if (result.Requires2FASetup)
@@ -109,10 +119,11 @@ namespace LawAfrica.API.Controllers
 
             if (!string.IsNullOrWhiteSpace(result.Token))
             {
-                await WriteLoginAuditAsync(result.UserId, username, success: true, reason: "");
+                await WriteLoginAuditAsync(result.UserId, identifier, success: true, reason: "");
                 return Ok(new { token = result.Token });
             }
 
+            // fallback (shouldn't usually happen)
             return Ok(new
             {
                 requires2FASetup = false,
@@ -120,6 +131,7 @@ namespace LawAfrica.API.Controllers
                 userId = result.UserId
             });
         }
+
 
         // =========================================================
         // LOGIN (Step 2: confirm 2FA and issue JWT)

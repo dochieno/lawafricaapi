@@ -251,7 +251,20 @@ namespace LawAfrica.API.Services
         // =========================================================
         public async Task<LoginResult> LoginAsync(LoginRequest request)
         {
-            var user = await _db.Users.FirstOrDefaultAsync(u => u.Username == request.Username);
+            var identifier = (request.Username ?? "").Trim(); // accepts username OR email
+            var password = request.Password ?? "";
+
+            if (string.IsNullOrWhiteSpace(identifier) || string.IsNullOrWhiteSpace(password))
+                return LoginResult.Failed("Invalid credentials.");
+
+            var identLower = identifier.ToLower();
+
+            // ✅ Allow login using Username OR Email (case-insensitive)
+            var user = await _db.Users.FirstOrDefaultAsync(u =>
+                u.Username.ToLower() == identLower ||
+                (u.Email != null && u.Email.ToLower() == identLower)
+            );
+
             if (user == null)
                 return LoginResult.Failed("Invalid credentials.");
 
@@ -270,18 +283,20 @@ namespace LawAfrica.API.Services
             if (string.IsNullOrWhiteSpace(user.PasswordHash) || !user.PasswordHash.StartsWith("$2"))
                 return LoginResult.Failed("Account password is not set correctly. Contact support.");
 
-            var passwordOk = BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash);
+            var passwordOk = BCrypt.Net.BCrypt.Verify(password, user.PasswordHash);
             if (!passwordOk)
             {
                 await RegisterFailedLogin(user, "Invalid password");
                 return LoginResult.Failed("Invalid credentials.");
             }
 
+            // ✅ Preserve your existing 2FA behavior
             if (string.IsNullOrWhiteSpace(user.TwoFactorSecret) || !user.TwoFactorEnabled)
                 return LoginResult.TwoFactorSetupRequired(user.Id);
 
             return LoginResult.TwoFactorRequired(user.Id);
         }
+
 
         // ----------------------- GENERATE TOKEN -----------------------
         private string GenerateJwtToken(User user)

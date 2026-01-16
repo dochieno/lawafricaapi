@@ -1,4 +1,5 @@
 ﻿using LawAfrica.API.Data;
+using LawAfrica.API.Models;
 using LawAfrica.API.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -11,7 +12,6 @@ namespace LawAfrica.API.Controllers
     public class AdminController : ControllerBase
     {
         private readonly ApplicationDbContext _db;
-
         private readonly AuthService _auth;
 
         public AdminController(ApplicationDbContext db, AuthService auth)
@@ -20,37 +20,234 @@ namespace LawAfrica.API.Controllers
             _auth = auth;
         }
 
-
-        // ---------------- GET ALL USERS (ADMIN ONLY) ----------------
+        // =========================================================
+        // USERS - LIST (ADMIN ONLY)
+        // Upgraded: search + filters + pagination + online
+        // =========================================================
+        // GET /api/admin/users?q=&type=&status=&online=&institutionId=&page=&pageSize=
+        //
+        // type: all | public | institution
+        // status: all | active | inactive | locked
+        // online: true | false
         [Authorize(Policy = "RequireAdmin")]
         [HttpGet("users")]
-        public async Task<IActionResult> GetAllUsers()
+        public async Task<IActionResult> GetUsers(
+            [FromQuery] string? q = null,
+            [FromQuery] string? type = "all",
+            [FromQuery] string? status = "all",
+            [FromQuery] bool? online = null,
+            [FromQuery] int? institutionId = null,
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 20)
         {
-            var users = await _db.Users
+            page = page <= 0 ? 1 : page;
+            pageSize = pageSize <= 0 ? 20 : Math.Min(pageSize, 200);
+
+            var now = DateTime.UtcNow;
+            var onlineCutoff = now.AddMinutes(-5); // online = seen within last 5 minutes
+
+            var query = _db.Users
+                .AsNoTracking()
+                .Include(u => u.Institution)
                 .Include(u => u.Country)
+                .AsQueryable();
+
+            // Search
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                var s = q.Trim().ToLower();
+                query = query.Where(u =>
+                    u.Username.ToLower().Contains(s) ||
+                    u.Email.ToLower().Contains(s) ||
+                    (u.FirstName != null && u.FirstName.ToLower().Contains(s)) ||
+                    (u.LastName != null && u.LastName.ToLower().Contains(s)));
+            }
+
+            // Type filter
+            var t = (type ?? "all").Trim().ToLower();
+            if (t == "public")
+            {
+                query = query.Where(u => u.InstitutionId == null && u.UserType == UserType.Public);
+            }
+            else if (t == "institution")
+            {
+                query = query.Where(u => u.InstitutionId != null);
+            }
+
+            // Institution filter
+            if (institutionId.HasValue && institutionId.Value > 0)
+            {
+                query = query.Where(u => u.InstitutionId == institutionId.Value);
+            }
+
+            // Status filter
+            var st = (status ?? "all").Trim().ToLower();
+            if (st == "active")
+            {
+                query = query.Where(u => u.IsActive == true);
+            }
+            else if (st == "inactive")
+            {
+                query = query.Where(u => u.IsActive == false);
+            }
+            else if (st == "locked")
+            {
+                query = query.Where(u => u.LockoutEndAt != null && u.LockoutEndAt > now);
+            }
+
+            // Online filter (requires UserPresences table)
+            // If table doesn't exist yet, you'll add it below.
+            if (online.HasValue)
+            {
+                if (online.Value)
+                {
+                    query = query.Where(u =>
+                        _db.UserPresences.Any(p => p.UserId == u.Id && p.LastSeenAtUtc >= onlineCutoff));
+                }
+                else
+                {
+                    query = query.Where(u =>
+                        !_db.UserPresences.Any(p => p.UserId == u.Id && p.LastSeenAtUtc >= onlineCutoff));
+                }
+            }
+
+            var total = await query.CountAsync();
+
+            var items = await query
+                .OrderByDescending(u => u.LastLoginAt ?? u.CreatedAt)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
                 .Select(u => new
                 {
                     u.Id,
                     u.Username,
                     u.Email,
+                    Name = (u.FirstName ?? "") + (string.IsNullOrWhiteSpace(u.LastName) ? "" : " " + u.LastName),
                     u.Role,
+                    u.UserType,
+                    u.IsGlobalAdmin,
+
                     u.IsActive,
+                    u.IsApproved,
                     u.IsEmailVerified,
+
+                    u.InstitutionId,
+                    InstitutionName = u.Institution != null ? u.Institution.Name : null,
+
+                    Country = u.Country != null ? u.Country.Name : null,
+
                     u.CreatedAt,
-                    Country = u.Country != null ? u.Country.Name : null
+                    u.LastLoginAt,
+                    u.UpdatedAt,
+
+                    u.LockoutEndAt,
+                    u.FailedLoginAttempts,
+
+                    // online derived
+                    IsOnline = _db.UserPresences.Any(p => p.UserId == u.Id && p.LastSeenAtUtc >= onlineCutoff),
+                    LastSeenAtUtc = _db.UserPresences
+                        .Where(p => p.UserId == u.Id)
+                        .Select(p => (DateTime?)p.LastSeenAtUtc)
+                        .FirstOrDefault()
                 })
                 .ToListAsync();
 
-            return Ok(users);
+                return Ok(new
+                {
+                    page,
+                    pageSize,
+                    total,
+                    items
+                });
         }
 
-        // Request model for changing user role
+        // =========================================================
+        // USERS - ACTIVATE / DEACTIVATE (ADMIN ONLY)
+        // =========================================================
+        public class SetActiveRequest
+        {
+            public bool IsActive { get; set; }
+        }
+
+        // PUT /api/admin/users/{id}/active
+        [Authorize(Policy = "RequireAdmin")]
+        [HttpPut("users/{id}/active")]
+        public async Task<IActionResult> SetUserActive(int id, [FromBody] SetActiveRequest req)
+        {
+            var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == id);
+            if (user == null) return NotFound("User not found.");
+
+            // Optional safety: don't allow deactivating global admin
+            if (user.IsGlobalAdmin && req.IsActive == false)
+                return BadRequest("You cannot deactivate a global admin account.");
+
+            user.IsActive = req.IsActive;
+            user.UpdatedAt = DateTime.UtcNow;
+
+            await _db.SaveChangesAsync();
+
+            return Ok(new
+            {
+                message = req.IsActive ? "User activated." : "User deactivated.",
+                userId = user.Id,
+                user.IsActive
+            });
+        }
+
+        // =========================================================
+        // USERS - BLOCK / UNBLOCK SIGN-IN (LOCKOUT) (ADMIN ONLY)
+        // =========================================================
+        public class SetLockRequest
+        {
+            // true => lock, false => unlock
+            public bool Locked { get; set; }
+
+            // If locking: minutes from now. If null => 1 year.
+            public int? Minutes { get; set; }
+        }
+
+        // PUT /api/admin/users/{id}/lock
+        [Authorize(Policy = "RequireAdmin")]
+        [HttpPut("users/{id}/lock")]
+        public async Task<IActionResult> SetUserLock(int id, [FromBody] SetLockRequest req)
+        {
+            var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == id);
+            if (user == null) return NotFound("User not found.");
+
+            if (user.IsGlobalAdmin && req.Locked == true)
+                return BadRequest("You cannot lock a global admin account.");
+
+            if (req.Locked)
+            {
+                var mins = req.Minutes.HasValue && req.Minutes.Value > 0 ? req.Minutes.Value : (60 * 24 * 365);
+                user.LockoutEndAt = DateTime.UtcNow.AddMinutes(mins);
+            }
+            else
+            {
+                user.LockoutEndAt = null;
+                user.FailedLoginAttempts = 0;
+            }
+
+            user.UpdatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+
+            return Ok(new
+            {
+                message = req.Locked ? "User sign-in blocked." : "User unblocked.",
+                userId = user.Id,
+                user.LockoutEndAt,
+                user.FailedLoginAttempts
+            });
+        }
+
+        // =========================================================
+        // KEEP: CHANGE ROLE (ADMIN ONLY)
+        // =========================================================
         public class ChangeRoleRequest
         {
             public string NewRole { get; set; } = string.Empty;
         }
 
-        // ---------------- CHANGE ROLE (ADMIN ONLY) ----------------
         [Authorize(Policy = "RequireAdmin")]
         [HttpPost("users/{id}/role")]
         public async Task<IActionResult> ChangeRole(int id, ChangeRoleRequest request)
@@ -74,7 +271,9 @@ namespace LawAfrica.API.Controllers
             });
         }
 
-        //Admin can regenerate 2FA for any user
+        // =========================================================
+        // KEEP: REGENERATE 2FA (ADMIN ONLY)
+        // =========================================================
         [Authorize(Policy = "RequireAdmin")]
         [HttpPost("users/{id}/regenerate-2fa")]
         public async Task<IActionResult> RegenerateUser2FA(int id)
@@ -91,7 +290,9 @@ namespace LawAfrica.API.Controllers
             });
         }
 
-        // ---------------- GET LOGIN AUDITS (ADMIN ONLY) ----------------
+        // =========================================================
+        // KEEP: LOGIN AUDITS (ADMIN ONLY)
+        // =========================================================
         [Authorize(Policy = "RequireAdmin")]
         [HttpGet("login-audits")]
         public async Task<IActionResult> GetLoginAudits()
@@ -112,8 +313,11 @@ namespace LawAfrica.API.Controllers
 
             return Ok(audits);
         }
-        // ---------------- UNLOCK USER ACCOUNT (ADMIN ONLY) ----------------
 
+        // =========================================================
+        // KEEP: UNLOCK USER ACCOUNT (ADMIN ONLY)
+        // (kept for backward compatibility)
+        // =========================================================
         [Authorize(Policy = "RequireAdmin")]
         [HttpPost("users/{id}/unlock")]
         public async Task<IActionResult> UnlockUser(int id)
@@ -131,7 +335,9 @@ namespace LawAfrica.API.Controllers
             return Ok(new { message = "User unlocked." });
         }
 
-        // ---------------- GET LOCKED USERS (ADMIN ONLY) ----------------
+        // =========================================================
+        // KEEP: GET LOCKED USERS (ADMIN ONLY)
+        // =========================================================
         [Authorize(Policy = "RequireAdmin")]
         [HttpGet("security/locked-users")]
         public async Task<IActionResult> GetLockedUsers()
@@ -153,7 +359,9 @@ namespace LawAfrica.API.Controllers
             return Ok(users);
         }
 
-        // ---------------- GET SUSPICIOUS IPs (ADMIN ONLY) ----------------
+        // =========================================================
+        // KEEP: GET SUSPICIOUS IPs (ADMIN ONLY)
+        // =========================================================
         [Authorize(Policy = "RequireAdmin")]
         [HttpGet("security/suspicious-ips")]
         public async Task<IActionResult> GetSuspiciousIps()
@@ -172,10 +380,11 @@ namespace LawAfrica.API.Controllers
                 .ToListAsync();
 
             return Ok(ips);
-
         }
 
-        // ---------------- GET USER SECURITY DETAILS (ADMIN ONLY) ----------------
+        // =========================================================
+        // KEEP: GET USER SECURITY DETAILS (ADMIN ONLY)
+        // =========================================================
         [Authorize(Policy = "RequireAdmin")]
         [HttpGet("security/users/{userId}")]
         public async Task<IActionResult> GetUserSecurity(int userId)
@@ -209,10 +418,5 @@ namespace LawAfrica.API.Controllers
                 RecentLogins = audits
             });
         }
-
-
-
-
-
     }
 }

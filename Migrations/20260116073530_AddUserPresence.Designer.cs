@@ -12,8 +12,8 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace LawAfrica.API.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    [Migration("20260108182826_AddLegalDocumentIdToPaymentIntent")]
-    partial class AddLegalDocumentIdToPaymentIntent
+    [Migration("20260116073530_AddUserPresence")]
+    partial class AddUserPresence
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -53,6 +53,60 @@ namespace LawAfrica.API.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("AuditEvents");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Authorization.AdminPermission", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Code")
+                        .IsUnique();
+
+                    b.ToTable("AdminPermissions", (string)null);
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Authorization.UserAdminPermission", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("PermissionId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PermissionId");
+
+                    b.HasIndex("UserId", "PermissionId")
+                        .IsUnique();
+
+                    b.ToTable("UserAdminPermissions", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.ContentProduct", b =>
@@ -237,6 +291,9 @@ namespace LawAfrica.API.Migrations
                     b.Property<string>("AddressLine2")
                         .HasColumnType("text");
 
+                    b.Property<bool>("AllowIndividualPurchasesWhenInstitutionInactive")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("AlternatePhoneNumber")
                         .HasColumnType("text");
 
@@ -268,10 +325,10 @@ namespace LawAfrica.API.Migrations
                     b.Property<bool>("IsVerified")
                         .HasColumnType("boolean");
 
-                    b.Property<int?>("MaxStaffSeats")
+                    b.Property<int>("MaxStaffSeats")
                         .HasColumnType("integer");
 
-                    b.Property<int?>("MaxStudentSeats")
+                    b.Property<int>("MaxStudentSeats")
                         .HasColumnType("integer");
 
                     b.Property<string>("Name")
@@ -315,7 +372,13 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("EmailDomain")
                         .IsUnique();
 
+                    b.HasIndex("InstitutionAccessCode")
+                        .IsUnique();
+
                     b.HasIndex("Name")
+                        .IsUnique();
+
+                    b.HasIndex("RegistrationNumber")
                         .IsUnique();
 
                     b.ToTable("Institutions", (string)null);
@@ -360,6 +423,50 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("Status", "StartDate");
 
                     b.ToTable("InstitutionProductSubscriptions");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.InstitutionSubscriptionActionRequest", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RequestNotes")
+                        .HasColumnType("text");
+
+                    b.Property<int>("RequestType")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("RequestedByUserId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ReviewNotes")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("ReviewedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int?>("ReviewedByUserId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("SubscriptionId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Status", "CreatedAt");
+
+                    b.HasIndex("SubscriptionId", "Status");
+
+                    b.ToTable("InstitutionSubscriptionActionRequests", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.InstitutionSubscriptionAudit", b =>
@@ -456,7 +563,8 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("ApprovedByUserId");
 
-                    b.HasIndex("InstitutionId");
+                    b.HasIndex("InstitutionId", "ReferenceNumber")
+                        .IsUnique();
 
                     b.HasIndex("UserId", "InstitutionId")
                         .IsUnique();
@@ -705,6 +813,170 @@ namespace LawAfrica.API.Migrations
                     b.ToTable("LoginAudits", (string)null);
                 });
 
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.Invoice", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<decimal>("AmountPaid")
+                        .HasColumnType("numeric");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)");
+
+                    b.Property<string>("CustomerName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<decimal>("DiscountTotal")
+                        .HasColumnType("numeric");
+
+                    b.Property<DateTime?>("DueAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ExternalInvoiceNumber")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<int?>("InstitutionId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("InvoiceNumber")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<DateTime>("IssuedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateTime?>("PaidAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Purpose")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("Subtotal")
+                        .HasColumnType("numeric");
+
+                    b.Property<decimal>("TaxTotal")
+                        .HasColumnType("numeric");
+
+                    b.Property<decimal>("Total")
+                        .HasColumnType("numeric");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int?>("UserId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InstitutionId");
+
+                    b.HasIndex("InvoiceNumber")
+                        .IsUnique();
+
+                    b.HasIndex("IssuedAt");
+
+                    b.HasIndex("Status");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("Invoices");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.InvoiceLine", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int?>("ContentProductId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<decimal>("DiscountAmount")
+                        .HasColumnType("numeric");
+
+                    b.Property<int>("InvoiceId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ItemCode")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<int?>("LegalDocumentId")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("LineSubtotal")
+                        .HasColumnType("numeric");
+
+                    b.Property<decimal>("LineTotal")
+                        .HasColumnType("numeric");
+
+                    b.Property<decimal>("Quantity")
+                        .HasColumnType("numeric");
+
+                    b.Property<decimal>("TaxAmount")
+                        .HasColumnType("numeric");
+
+                    b.Property<decimal>("UnitPrice")
+                        .HasColumnType("numeric");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InvoiceId");
+
+                    b.ToTable("InvoiceLines");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.InvoiceSequence", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<long>("LastNumber")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Year")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Year")
+                        .IsUnique();
+
+                    b.ToTable("InvoiceSequences");
+                });
+
             modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentIntent", b =>
                 {
                     b.Property<int>("Id")
@@ -744,6 +1016,9 @@ namespace LawAfrica.API.Migrations
                     b.Property<int?>("InstitutionId")
                         .HasColumnType("integer");
 
+                    b.Property<int?>("InvoiceId")
+                        .HasColumnType("integer");
+
                     b.Property<bool>("IsFinalized")
                         .HasColumnType("boolean");
 
@@ -768,10 +1043,25 @@ namespace LawAfrica.API.Migrations
                     b.Property<int>("Provider")
                         .HasColumnType("integer");
 
+                    b.Property<string>("ProviderChannel")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("ProviderPaidAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ProviderRawJson")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProviderReference")
+                        .HasColumnType("text");
+
                     b.Property<string>("ProviderResultCode")
                         .HasColumnType("text");
 
                     b.Property<string>("ProviderResultDesc")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProviderTransactionId")
                         .HasColumnType("text");
 
                     b.Property<int>("Purpose")
@@ -797,7 +1087,235 @@ namespace LawAfrica.API.Migrations
                         .IsUnique()
                         .HasFilter("\"CheckoutRequestId\" IS NOT NULL");
 
+                    b.HasIndex("InvoiceId");
+
+                    b.HasIndex("Provider", "ProviderReference")
+                        .IsUnique()
+                        .HasFilter("\"ProviderReference\" IS NOT NULL");
+
+                    b.HasIndex("Provider", "ProviderTransactionId")
+                        .IsUnique()
+                        .HasFilter("\"ProviderTransactionId\" IS NOT NULL");
+
                     b.ToTable("PaymentIntents");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentProviderTransaction", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<decimal>("Amount")
+                        .HasColumnType("numeric");
+
+                    b.Property<string>("Channel")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)");
+
+                    b.Property<DateTime>("FirstSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("LastSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("PaidAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Provider")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ProviderTransactionId")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("RawJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Reference")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PaidAt");
+
+                    b.HasIndex("Provider", "ProviderTransactionId")
+                        .IsUnique();
+
+                    b.HasIndex("Provider", "Reference");
+
+                    b.ToTable("PaymentProviderTransactions");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentProviderWebhookEvent", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("DedupeHash")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<DateTime?>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ProcessingError")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<int>("ProcessingStatus")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Provider")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ProviderEventId")
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)");
+
+                    b.Property<string>("RawBody")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("ReceivedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Reference")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<bool?>("SignatureValid")
+                        .HasColumnType("boolean");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ReceivedAt");
+
+                    b.HasIndex("Reference");
+
+                    b.HasIndex("Provider", "DedupeHash")
+                        .IsUnique();
+
+                    b.ToTable("PaymentProviderWebhookEvents");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentReconciliationItem", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Details")
+                        .HasColumnType("text");
+
+                    b.Property<int?>("InvoiceId")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("PaymentIntentId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Provider")
+                        .HasColumnType("integer");
+
+                    b.Property<long?>("ProviderTransactionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("ProviderTransactionIdRef")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("Reason")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Reference")
+                        .HasColumnType("text");
+
+                    b.Property<long>("RunId")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InvoiceId");
+
+                    b.HasIndex("PaymentIntentId");
+
+                    b.HasIndex("ProviderTransactionId");
+
+                    b.HasIndex("Reason");
+
+                    b.HasIndex("RunId");
+
+                    b.HasIndex("Status");
+
+                    b.HasIndex("Provider", "Reference");
+
+                    b.ToTable("PaymentReconciliationItems");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentReconciliationRun", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("FromUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("PerformedByUserId")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("Provider")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("ToUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt");
+
+                    b.HasIndex("PerformedByUserId");
+
+                    b.ToTable("PaymentReconciliationRuns");
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.RegistrationIntent", b =>
@@ -838,6 +1356,9 @@ namespace LawAfrica.API.Migrations
                     b.Property<int?>("InstitutionId")
                         .HasColumnType("integer");
 
+                    b.Property<int?>("InstitutionMemberType")
+                        .HasColumnType("integer");
+
                     b.Property<bool>("IsConsumed")
                         .HasColumnType("boolean");
 
@@ -857,7 +1378,9 @@ namespace LawAfrica.API.Migrations
                         .HasColumnType("text");
 
                     b.Property<string>("ReferenceNumber")
-                        .HasColumnType("text");
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
 
                     b.Property<int>("UserType")
                         .HasColumnType("integer");
@@ -874,7 +1397,16 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("Email")
                         .IsUnique();
 
-                    b.HasIndex("InstitutionId");
+                    b.HasIndex("ReferenceNumber")
+                        .IsUnique()
+                        .HasFilter("\"InstitutionId\" IS NULL");
+
+                    b.HasIndex("Username")
+                        .IsUnique();
+
+                    b.HasIndex("InstitutionId", "ReferenceNumber")
+                        .IsUnique()
+                        .HasFilter("\"InstitutionId\" IS NOT NULL");
 
                     b.ToTable("RegistrationIntents", (string)null);
                 });
@@ -906,6 +1438,62 @@ namespace LawAfrica.API.Migrations
                             Id = 2,
                             Name = "User"
                         });
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Usage.UsageEvent", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<bool>("Allowed")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("AtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DecisionReason")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<int?>("InstitutionId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("IpAddress")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<int>("LegalDocumentId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Surface")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<string>("UserAgent")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<int?>("UserId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AtUtc");
+
+                    b.HasIndex("AtUtc", "Allowed");
+
+                    b.HasIndex("InstitutionId", "AtUtc");
+
+                    b.HasIndex("LegalDocumentId", "AtUtc");
+
+                    b.ToTable("UsageEvents", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.UserLegalDocumentPurchase", b =>
@@ -972,6 +1560,19 @@ namespace LawAfrica.API.Migrations
                         .IsUnique();
 
                     b.ToTable("UserLibraries");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.UserPresence", b =>
+                {
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("LastSeenAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("UserId");
+
+                    b.ToTable("UserPresences");
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.UserProductOwnership", b =>
@@ -1180,6 +1781,9 @@ namespace LawAfrica.API.Migrations
                     b.Property<bool>("IsEmailVerified")
                         .HasColumnType("boolean");
 
+                    b.Property<bool>("IsGlobalAdmin")
+                        .HasColumnType("boolean");
+
                     b.Property<bool>("IsPhoneVerified")
                         .HasColumnType("boolean");
 
@@ -1264,6 +1868,25 @@ namespace LawAfrica.API.Migrations
                     b.ToTable("Users", (string)null);
                 });
 
+            modelBuilder.Entity("LawAfrica.API.Models.Authorization.UserAdminPermission", b =>
+                {
+                    b.HasOne("LawAfrica.API.Models.Authorization.AdminPermission", "Permission")
+                        .WithMany()
+                        .HasForeignKey("PermissionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Permission");
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("LawAfrica.API.Models.ContentProductLegalDocument", b =>
                 {
                     b.HasOne("LawAfrica.API.Models.ContentProduct", "ContentProduct")
@@ -1321,6 +1944,17 @@ namespace LawAfrica.API.Migrations
                     b.Navigation("ContentProduct");
 
                     b.Navigation("Institution");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.InstitutionSubscriptionActionRequest", b =>
+                {
+                    b.HasOne("LawAfrica.API.Models.InstitutionProductSubscription", "Subscription")
+                        .WithMany()
+                        .HasForeignKey("SubscriptionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Subscription");
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.InstitutionSubscriptionAudit", b =>
@@ -1444,6 +2078,32 @@ namespace LawAfrica.API.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.Invoice", b =>
+                {
+                    b.HasOne("LawAfrica.API.Models.Institution", "Institution")
+                        .WithMany()
+                        .HasForeignKey("InstitutionId");
+
+                    b.HasOne("User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId");
+
+                    b.Navigation("Institution");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.InvoiceLine", b =>
+                {
+                    b.HasOne("LawAfrica.API.Models.Payments.Invoice", "Invoice")
+                        .WithMany("Lines")
+                        .HasForeignKey("InvoiceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Invoice");
+                });
+
             modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentIntent", b =>
                 {
                     b.HasOne("User", "ApprovedByUser")
@@ -1451,7 +2111,53 @@ namespace LawAfrica.API.Migrations
                         .HasForeignKey("ApprovedByUserId")
                         .OnDelete(DeleteBehavior.Restrict);
 
+                    b.HasOne("LawAfrica.API.Models.Payments.Invoice", "Invoice")
+                        .WithMany()
+                        .HasForeignKey("InvoiceId");
+
                     b.Navigation("ApprovedByUser");
+
+                    b.Navigation("Invoice");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentReconciliationItem", b =>
+                {
+                    b.HasOne("LawAfrica.API.Models.Payments.Invoice", "Invoice")
+                        .WithMany()
+                        .HasForeignKey("InvoiceId");
+
+                    b.HasOne("LawAfrica.API.Models.Payments.PaymentIntent", "PaymentIntent")
+                        .WithMany()
+                        .HasForeignKey("PaymentIntentId");
+
+                    b.HasOne("LawAfrica.API.Models.Payments.PaymentProviderTransaction", "ProviderTransaction")
+                        .WithMany()
+                        .HasForeignKey("ProviderTransactionId");
+
+                    b.HasOne("LawAfrica.API.Models.Payments.PaymentReconciliationRun", "Run")
+                        .WithMany("Items")
+                        .HasForeignKey("RunId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Invoice");
+
+                    b.Navigation("PaymentIntent");
+
+                    b.Navigation("ProviderTransaction");
+
+                    b.Navigation("Run");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentReconciliationRun", b =>
+                {
+                    b.HasOne("User", "PerformedByUser")
+                        .WithMany()
+                        .HasForeignKey("PerformedByUserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("PerformedByUser");
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.RegistrationIntent", b =>
@@ -1499,6 +2205,17 @@ namespace LawAfrica.API.Migrations
                         .IsRequired();
 
                     b.Navigation("LegalDocument");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.UserPresence", b =>
+                {
+                    b.HasOne("User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.UserProductOwnership", b =>
@@ -1597,6 +2314,16 @@ namespace LawAfrica.API.Migrations
             modelBuilder.Entity("LawAfrica.API.Models.LegalDocumentNode", b =>
                 {
                     b.Navigation("Children");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.Invoice", b =>
+                {
+                    b.Navigation("Lines");
+                });
+
+            modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentReconciliationRun", b =>
+                {
+                    b.Navigation("Items");
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Role", b =>

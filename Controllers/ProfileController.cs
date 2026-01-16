@@ -46,7 +46,11 @@ namespace LawAfrica.API.Controllers
                 countryId = user.CountryId,
                 countryName = user.Country?.Name,
                 user.City,
+
+                // ✅ This should now be a browser-usable path like:
+                // /storage/ProfileImages/user_1_123.jpg  OR null
                 user.ProfileImageUrl,
+
                 user.IsActive,
                 user.IsEmailVerified,
                 user.CreatedAt,
@@ -79,7 +83,7 @@ namespace LawAfrica.API.Controllers
                     return BadRequest("Email is already in use by another account.");
 
                 user.Email = request.Email.Trim();
-                user.IsEmailVerified = false; // force re-verification if email changes
+                user.IsEmailVerified = false;
             }
 
             // ---- BASIC FIELDS ----
@@ -95,6 +99,8 @@ namespace LawAfrica.API.Controllers
             if (!string.IsNullOrWhiteSpace(request.City))
                 user.City = request.City.Trim();
 
+            // NOTE: Do not let users set ProfileImageUrl from the body unless you really want that.
+            // If you keep it, make sure it is sanitized.
             if (!string.IsNullOrWhiteSpace(request.ProfileImageUrl))
                 user.ProfileImageUrl = request.ProfileImageUrl.Trim();
 
@@ -109,7 +115,6 @@ namespace LawAfrica.API.Controllers
             }
 
             user.UpdatedAt = DateTime.UtcNow;
-
             await _db.SaveChangesAsync();
 
             return Ok(new { message = "Profile updated successfully." });
@@ -153,12 +158,15 @@ namespace LawAfrica.API.Controllers
             return Ok(new { message = "Password changed successfully." });
         }
 
-        //Upload Profile Image
+        // ---------------------------------------------------------
+        // POST /api/profile/image
+        // ---------------------------------------------------------
         [Authorize]
         [HttpPost("image")]
+        [RequestSizeLimit(5_000_000)]
         public async Task<IActionResult> UploadProfileImage(
-        IFormFile file,
-        [FromServices] IWebHostEnvironment env)
+            IFormFile file,
+            [FromServices] IWebHostEnvironment env)
         {
             if (file == null || file.Length == 0)
                 return BadRequest("No file provided.");
@@ -171,27 +179,18 @@ namespace LawAfrica.API.Controllers
 
             var userId = User.GetUserId();
             var user = await _db.Users.FindAsync(userId);
+            if (user == null) return Unauthorized();
 
-            if (user == null)
-                return Unauthorized();
-
-            var uploadsDir = Path.Combine(
-                env.ContentRootPath,
-                "Storage",
-                "ProfileImages"
-            );
-
+            // ✅ IMPORTANT: keep folder casing exactly as on disk (Linux is case-sensitive)
+            var uploadsDir = Path.Combine(env.ContentRootPath, "Storage", "ProfileImages");
             Directory.CreateDirectory(uploadsDir);
 
-            // Delete old image
-            if (!string.IsNullOrEmpty(user.ProfileImageUrl))
+            // ✅ Delete old image (safe for both old and new stored formats)
+            if (!string.IsNullOrWhiteSpace(user.ProfileImageUrl))
             {
-                var oldPath = Path.Combine(
-                    env.ContentRootPath,
-                    user.ProfileImageUrl
-                );
-                if (System.IO.File.Exists(oldPath))
-                    System.IO.File.Delete(oldPath);
+                var oldFullPath = ToPhysicalStoragePath(env, user.ProfileImageUrl);
+                if (System.IO.File.Exists(oldFullPath))
+                    System.IO.File.Delete(oldFullPath);
             }
 
             var ext = Path.GetExtension(file.FileName);
@@ -203,33 +202,33 @@ namespace LawAfrica.API.Controllers
                 await file.CopyToAsync(stream);
             }
 
-            user.ProfileImageUrl = $"Storage/ProfileImages/{filename}";
+            // ✅ Store a frontend-usable URL path (not a physical path)
+            // Must match folder casing: ProfileImages
+            user.ProfileImageUrl = $"/storage/ProfileImages/{filename}";
             user.UpdatedAt = DateTime.UtcNow;
-
             await _db.SaveChangesAsync();
 
             return Ok(new
             {
-                imageUrl = $"{Request.Scheme}://{Request.Host}/storage/profileimages/{filename}"
+                imageUrl = $"{Request.Scheme}://{Request.Host}/storage/ProfileImages/{filename}",
+                profileImageUrl = user.ProfileImageUrl
             });
         }
 
-
-        // Remove Profile Image
+        // ---------------------------------------------------------
+        // DELETE /api/profile/image
+        // ---------------------------------------------------------
         [Authorize]
         [HttpDelete("image")]
-        public async Task<IActionResult> RemoveProfileImage(
-        [FromServices] IWebHostEnvironment env)
+        public async Task<IActionResult> RemoveProfileImage([FromServices] IWebHostEnvironment env)
         {
             var userId = User.GetUserId();
             var user = await _db.Users.FindAsync(userId);
+            if (user == null) return Unauthorized();
 
-            if (user == null)
-                return Unauthorized();
-
-            if (!string.IsNullOrEmpty(user.ProfileImageUrl))
+            if (!string.IsNullOrWhiteSpace(user.ProfileImageUrl))
             {
-                var fullPath = Path.Combine(env.ContentRootPath, user.ProfileImageUrl);
+                var fullPath = ToPhysicalStoragePath(env, user.ProfileImageUrl);
                 if (System.IO.File.Exists(fullPath))
                     System.IO.File.Delete(fullPath);
 
@@ -238,10 +237,38 @@ namespace LawAfrica.API.Controllers
                 await _db.SaveChangesAsync();
             }
 
-            return Ok();
+            return Ok(new { message = "Profile image removed." });
         }
 
+        // ---------------------------------------------------------
+        // Helpers
+        // ---------------------------------------------------------
+        private static string ToPhysicalStoragePath(IWebHostEnvironment env, string profileImageUrl)
+        {
+            var v = profileImageUrl.Trim();
 
+            // New format: "/storage/ProfileImages/xyz.jpg"
+            if (v.StartsWith("/storage/", StringComparison.OrdinalIgnoreCase))
+            {
+                var relative = v.Substring("/storage/".Length)
+                    .Replace("/", Path.DirectorySeparatorChar.ToString());
 
+                return Path.Combine(env.ContentRootPath, "Storage", relative);
+            }
+
+            // Old format: "Storage/ProfileImages/xyz.jpg"
+            if (v.StartsWith("Storage/", StringComparison.OrdinalIgnoreCase) ||
+                v.StartsWith("Storage\\", StringComparison.OrdinalIgnoreCase))
+            {
+                var relative = v.Substring("Storage".Length)
+                    .TrimStart('/', '\\')
+                    .Replace("/", Path.DirectorySeparatorChar.ToString());
+
+                return Path.Combine(env.ContentRootPath, "Storage", relative);
+            }
+
+            // Fallback: treat as relative to ContentRootPath
+            return Path.Combine(env.ContentRootPath, v.Replace("/", Path.DirectorySeparatorChar.ToString()));
+        }
     }
 }

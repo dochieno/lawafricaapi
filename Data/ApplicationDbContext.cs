@@ -75,8 +75,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<PaymentProviderTransaction> PaymentProviderTransactions => Set<PaymentProviderTransaction>();
     public DbSet<PaymentReconciliationRun> PaymentReconciliationRuns => Set<PaymentReconciliationRun>();
     public DbSet<PaymentReconciliationItem> PaymentReconciliationItems => Set<PaymentReconciliationItem>();
-
-
+    public DbSet<UserPresence> UserPresences { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -397,6 +396,16 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(x => new { x.SubscriptionId, x.Status });
             entity.HasIndex(x => new { x.Status, x.CreatedAt });
         });
+
+        modelBuilder.Entity<UserPresence>()
+                    .HasKey(x => x.UserId);
+
+        modelBuilder.Entity<UserPresence>()
+                    .HasOne(x => x.User)
+                    .WithMany()
+                    .HasForeignKey(x => x.UserId)
+                    .OnDelete(DeleteBehavior.Cascade);
+
 
         modelBuilder.Entity<RegistrationIntent>(entity =>
         {
