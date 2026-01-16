@@ -693,7 +693,21 @@ namespace LawAfrica.API.Services
 
         public async Task<(bool ok, string? token, string? error)> VerifyTwoFactorLoginAsync(string username, string code)
         {
-            var user = await _db.Users.FirstOrDefaultAsync(u => u.Username == username);
+            // ✅ Normalize inputs
+            var ident = (username ?? "").Trim();
+            var identLower = ident.ToLowerInvariant();
+
+            var cleanCode = (code ?? "").Trim();
+
+            // Optional: keep behavior consistent
+            if (string.IsNullOrWhiteSpace(ident) || string.IsNullOrWhiteSpace(cleanCode))
+                return (false, null, "Username and code are required.");
+
+            // ✅ Case-insensitive username lookup (normalized)
+            var user = await _db.Users.FirstOrDefaultAsync(u =>
+                u.Username != null && u.Username.Trim().ToLower() == identLower
+            );
+
             if (user == null)
                 return (false, null, "User not found.");
 
@@ -706,7 +720,7 @@ namespace LawAfrica.API.Services
             if (!user.TwoFactorEnabled || string.IsNullOrWhiteSpace(user.TwoFactorSecret))
                 return (false, null, "2FA not enabled.");
 
-            var ok = ValidateTotp(user.TwoFactorSecret, code, driftSteps: 5);
+            var ok = ValidateTotp(user.TwoFactorSecret, cleanCode, driftSteps: 5);
             if (!ok)
             {
                 await RegisterFailedLogin(user, "Invalid 2FA code");
@@ -720,6 +734,7 @@ namespace LawAfrica.API.Services
 
             return (true, GenerateJwtToken(user), null);
         }
+
 
         public async Task<SecurityStatusResponse?> GetSecurityStatusAsync(int userId)
         {

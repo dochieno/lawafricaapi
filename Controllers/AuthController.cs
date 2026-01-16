@@ -149,7 +149,9 @@ namespace LawAfrica.API.Controllers
             if (request == null)
                 return BadRequest("Invalid request.");
 
+            // ✅ Normalize once
             var username = (request.Username ?? "").Trim();
+            var usernameLower = username.ToLowerInvariant();
             var code = (request.Code ?? "").Trim();
 
             if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(code))
@@ -157,7 +159,7 @@ namespace LawAfrica.API.Controllers
 
             var userRow = await _db.Users
                 .AsNoTracking()
-                .Where(u => u.Username.ToLower() == username.ToLower())
+                .Where(u => u.Username != null && u.Username.Trim().ToLower() == usernameLower)
                 .Select(u => new { u.Id, u.LockoutEndAt })
                 .FirstOrDefaultAsync();
 
@@ -179,6 +181,7 @@ namespace LawAfrica.API.Controllers
             await WriteLoginAuditAsync(userRow?.Id, username, success: true, reason: "");
             return Ok(new { token });
         }
+
 
         // =========================================================
         // EMAIL VERIFICATION
