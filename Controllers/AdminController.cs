@@ -1,5 +1,7 @@
-﻿using LawAfrica.API.Data;
+﻿using LawAfrica.API.Authorization.Policies;
+using LawAfrica.API.Data;
 using LawAfrica.API.Models;
+using LawAfrica.API.Models.Institutions;
 using LawAfrica.API.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -9,7 +11,7 @@ namespace LawAfrica.API.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
-    [Authorize(Roles = "Admin")]
+    [Authorize(Policy = "RequireAdmin")] // keeps your Program.cs policy
     public class AdminController : ControllerBase
     {
         private readonly ApplicationDbContext _db;
@@ -106,17 +108,38 @@ namespace LawAfrica.API.Controllers
                 usersQ = usersQ.Where(u => u.LockoutEndAt != null && u.LockoutEndAt > now);
             }
 
-            // Join presence (so we can filter by online efficiently)
+            // Memberships (1 per user+institution)
+            var membershipsQ = _db.InstitutionMemberships.AsNoTracking();
+
+            // Join presence + membership (LEFT JOIN both)
             var joined =
                 from u in usersQ
                 join p in presenceAgg on u.Id equals p.UserId into pj
                 from p in pj.DefaultIfEmpty()
+                join m in membershipsQ
+                    on new { UserId = u.Id, InstitutionId = (int?)u.InstitutionId }
+                    equals new { UserId = m.UserId, InstitutionId = (int?)m.InstitutionId }
+                    into mj
+                from m in mj.DefaultIfEmpty()
                 select new
                 {
                     User = u,
-                    LastSeenAtUtc = (DateTime?)p.LastSeenAtUtc
+                    LastSeenAtUtc = (DateTime?)p.LastSeenAtUtc,
+
+                    MembershipId = (int?)m.Id,
+                    MembershipStatus = (MembershipStatus?)m.Status,
+                    MemberType = (InstitutionMemberType?)m.MemberType,
+                    ReferenceNumber = m.ReferenceNumber,
+                    MembershipIsActive = (bool?)m.IsActive,
+                    MembershipApprovedAt = (DateTime?)m.ApprovedAt,
+
+                    IsInstitutionAdmin = m != null
+                        && m.MemberType == InstitutionMemberType.InstitutionAdmin
+                        && m.Status == MembershipStatus.Approved
+                        && m.IsActive
                 };
 
+            // Online filter
             if (online.HasValue)
             {
                 if (online.Value)
@@ -131,7 +154,6 @@ namespace LawAfrica.API.Controllers
 
             var total = await joined.CountAsync();
 
-            // page items
             var items = await joined
                 .OrderByDescending(x => x.User.LastLoginAt ?? x.User.CreatedAt)
                 .Skip((page - 1) * pageSize)
@@ -164,12 +186,22 @@ namespace LawAfrica.API.Controllers
                     x.User.FailedLoginAttempts,
 
                     LastSeenAtUtc = x.LastSeenAtUtc,
-                    IsOnline = x.LastSeenAtUtc != null && x.LastSeenAtUtc >= onlineCutoff
+                    IsOnline = x.LastSeenAtUtc != null && x.LastSeenAtUtc >= onlineCutoff,
+
+                    // ✅ Membership fields required by frontend approval/actions
+                    MembershipId = x.MembershipId,
+                    MembershipStatus = x.MembershipStatus,
+                    MemberType = x.MemberType,
+                    ReferenceNumber = x.ReferenceNumber,
+                    MembershipIsActive = x.MembershipIsActive,
+                    MembershipApprovedAt = x.MembershipApprovedAt,
+
+                    // ✅ Computed
+                    IsInstitutionAdmin = x.IsInstitutionAdmin
                 })
                 .ToListAsync();
 
-            // Summary counts for UI chips (public/institution/online/locked/active)
-            // Keep it lightweight with a few targeted counts.
+            // Summary counts (fast + stable)
             var baseUsers = _db.Users.AsNoTracking().AsQueryable();
 
             var activePublicCount = await baseUsers.CountAsync(u =>
@@ -184,8 +216,7 @@ namespace LawAfrica.API.Controllers
             var lockedCount = await baseUsers.CountAsync(u =>
                 u.LockoutEndAt != null && u.LockoutEndAt > now);
 
-            var onlineCount =
-                await presenceAgg.CountAsync(p => p.LastSeenAtUtc >= onlineCutoff);
+            var onlineCount = await presenceAgg.CountAsync(p => p.LastSeenAtUtc >= onlineCutoff);
 
             return Ok(new
             {
@@ -204,14 +235,13 @@ namespace LawAfrica.API.Controllers
         }
 
         // =========================================================
-        // USERS - ACTIVATE / DEACTIVATE (ADMIN ONLY)
+        // USERS - ACTIVATE / DEACTIVATE
         // PUT /api/admin/users/{id}/active
         // =========================================================
         public class SetActiveRequest
         {
             public bool IsActive { get; set; }
         }
-
 
         [HttpPut("users/{id}/active")]
         public async Task<IActionResult> SetUserActive(int id, [FromBody] SetActiveRequest req)
@@ -236,13 +266,13 @@ namespace LawAfrica.API.Controllers
         }
 
         // =========================================================
-        // USERS - BLOCK / UNBLOCK SIGN-IN (LOCKOUT) (ADMIN ONLY)
+        // USERS - LOCK / UNLOCK
         // PUT /api/admin/users/{id}/lock
         // =========================================================
         public class SetLockRequest
         {
             public bool Locked { get; set; }
-            public int? Minutes { get; set; } // if locking
+            public int? Minutes { get; set; }
         }
 
         [HttpPut("users/{id}/lock")]
@@ -258,7 +288,7 @@ namespace LawAfrica.API.Controllers
             {
                 var mins = req.Minutes.HasValue && req.Minutes.Value > 0
                     ? req.Minutes.Value
-                    : (60 * 24 * 365); // default: 1 year
+                    : (60 * 24 * 365);
 
                 user.LockoutEndAt = DateTime.UtcNow.AddMinutes(mins);
             }
@@ -281,7 +311,9 @@ namespace LawAfrica.API.Controllers
         }
 
         // =========================================================
-        // KEEP: CHANGE ROLE (ADMIN ONLY)
+        // USERS - CHANGE ROLE
+        // POST /api/admin/users/{id}/role
+        // Body: { newRole: "Admin"|"User" }
         // =========================================================
         public class ChangeRoleRequest
         {
@@ -289,11 +321,24 @@ namespace LawAfrica.API.Controllers
         }
 
         [HttpPost("users/{id}/role")]
-        public async Task<IActionResult> ChangeRole(int id, ChangeRoleRequest request)
+        public async Task<IActionResult> ChangeRole(int id, [FromBody] ChangeRoleRequest request)
         {
             var user = await _db.Users.FindAsync(id);
             if (user == null)
                 return NotFound("User not found.");
+
+            // ✅ Rule: Institution users can NEVER be system Admin
+            if (user.InstitutionId != null &&
+                request.NewRole.Equals("Admin", StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest("Institution users cannot be promoted to system Admin.");
+            }
+
+            if (user.IsGlobalAdmin &&
+                request.NewRole.Equals("User", StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest("You cannot demote a global admin account.");
+            }
 
             var validRoles = new[] { "Admin", "User" };
             if (!validRoles.Contains(request.NewRole))
@@ -308,9 +353,9 @@ namespace LawAfrica.API.Controllers
         }
 
         // =========================================================
-        // KEEP: REGENERATE 2FA (ADMIN ONLY)
+        // USERS - REGENERATE 2FA
+        // POST /api/admin/users/{id}/regenerate-2fa
         // =========================================================
-
         [HttpPost("users/{id}/regenerate-2fa")]
         public async Task<IActionResult> RegenerateUser2FA(int id)
         {
@@ -324,9 +369,9 @@ namespace LawAfrica.API.Controllers
         }
 
         // =========================================================
-        // KEEP: LOGIN AUDITS (ADMIN ONLY)
+        // LOGIN AUDITS
+        // GET /api/admin/login-audits
         // =========================================================
-
         [HttpGet("login-audits")]
         public async Task<IActionResult> GetLoginAudits()
         {
@@ -348,9 +393,9 @@ namespace LawAfrica.API.Controllers
         }
 
         // =========================================================
-        // KEEP: UNLOCK USER ACCOUNT (ADMIN ONLY)
+        // UNLOCK USER ACCOUNT
+        // POST /api/admin/users/{id}/unlock
         // =========================================================
-
         [HttpPost("users/{id}/unlock")]
         public async Task<IActionResult> UnlockUser(int id)
         {
@@ -368,9 +413,9 @@ namespace LawAfrica.API.Controllers
         }
 
         // =========================================================
-        // KEEP: GET LOCKED USERS (ADMIN ONLY)
+        // GET LOCKED USERS
+        // GET /api/admin/security/locked-users
         // =========================================================
-
         [HttpGet("security/locked-users")]
         public async Task<IActionResult> GetLockedUsers()
         {
@@ -392,9 +437,9 @@ namespace LawAfrica.API.Controllers
         }
 
         // =========================================================
-        // KEEP: GET SUSPICIOUS IPs (ADMIN ONLY)
+        // GET SUSPICIOUS IPs
+        // GET /api/admin/security/suspicious-ips
         // =========================================================
-
         [HttpGet("security/suspicious-ips")]
         public async Task<IActionResult> GetSuspiciousIps()
         {
@@ -415,9 +460,9 @@ namespace LawAfrica.API.Controllers
         }
 
         // =========================================================
-        // KEEP: GET USER SECURITY DETAILS (ADMIN ONLY)
+        // GET USER SECURITY DETAILS
+        // GET /api/admin/security/users/{userId}
         // =========================================================
-
         [HttpGet("security/users/{userId}")]
         public async Task<IActionResult> GetUserSecurity(int userId)
         {

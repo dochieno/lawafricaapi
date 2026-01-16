@@ -58,6 +58,7 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
+        options.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
         options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
     });
 
@@ -148,6 +149,14 @@ builder.Services.AddAuthorization(options =>
 {
     options.AddPolicy("RequireAdmin", policy => policy.RequireRole("Admin"));
     options.AddPolicy("RequireUser", policy => policy.RequireRole("User", "Admin"));
+
+    // ✅ NEW: allows either Role=Admin OR token claim isGlobalAdmin=true
+    // This fixes dashboards for GlobalAdmins who are not Role=Admin.
+    options.AddPolicy("RequireAdminOrGlobalAdmin", policy =>
+        policy.RequireAssertion(ctx =>
+            ctx.User.IsInRole("Admin") ||
+            ctx.User.HasClaim(c => (c.Type == "isGlobalAdmin" || c.Type == "IsGlobalAdmin") &&
+                                   string.Equals(c.Value, "true", StringComparison.OrdinalIgnoreCase))));
 
     options.AddPolicy(PolicyNames.ApprovedUserOnly,
         policy => policy.Requirements.Add(new ApprovedUserRequirement()));
