@@ -709,37 +709,26 @@ namespace LawAfrica.API.Services
             return true;
         }
 
-        public async Task<bool> VerifyTwoFactorSetupAsync(int userId, string code)
-        {
-            var user = await _db.Users.FindAsync(userId);
-            if (user == null || string.IsNullOrWhiteSpace(user.TwoFactorSecret))
-                return false;
-
-            var isValid = ValidateTotp(user.TwoFactorSecret, code, driftSteps: 2);
-            if (!isValid) return false;
-
-            user.TwoFactorEnabled = true;
-            user.UpdatedAt = DateTime.UtcNow;
-
-            await _db.SaveChangesAsync();
-            return true;
-        }
 
         public async Task<(bool ok, string? token, string? error)> VerifyTwoFactorLoginAsync(string username, string code)
         {
             // ✅ Normalize inputs
             var ident = (username ?? "").Trim();
-            var identLower = ident.ToLowerInvariant();
-
             var cleanCode = (code ?? "").Trim();
 
-            // Optional: keep behavior consistent
             if (string.IsNullOrWhiteSpace(ident) || string.IsNullOrWhiteSpace(cleanCode))
-                return (false, null, "Username and code are required.");
+                return (false, null, "Username or email and code are required.");
 
-            // ✅ Case-insensitive username lookup (normalized)
+            // ✅ Prefer normalized username match (fast, consistent), but also allow email
+            var identUpper = ident.ToUpperInvariant();
+            var identLower = ident.ToLowerInvariant();
+
+            // ✅ Username OR Email lookup (case-insensitive)
+            // - Username: via NormalizedUsername (recommended)
+            // - Email: compare lowercased (safe cross-db)
             var user = await _db.Users.FirstOrDefaultAsync(u =>
-                u.Username != null && u.Username.Trim().ToLower() == identLower
+                (!string.IsNullOrWhiteSpace(u.NormalizedUsername) && u.NormalizedUsername == identUpper) ||
+                (!string.IsNullOrWhiteSpace(u.Email) && u.Email.Trim().ToLower() == identLower)
             );
 
             if (user == null)
@@ -768,6 +757,7 @@ namespace LawAfrica.API.Services
 
             return (true, GenerateJwtToken(user), null);
         }
+
 
 
         public async Task<SecurityStatusResponse?> GetSecurityStatusAsync(int userId)
@@ -877,50 +867,6 @@ namespace LawAfrica.API.Services
                 SetupToken = rawSetupToken,
                 SetupTokenExpiryUtc = expiryUtc
             };
-        }
-
-        public async Task<bool> SetUserActiveStatusAsync(int userId, bool isActive)
-        {
-            var user = await _db.Users.FindAsync(userId);
-            if (user == null)
-                return false;
-
-            user.IsActive = isActive;
-            user.UpdatedAt = DateTime.UtcNow;
-
-            await _db.SaveChangesAsync();
-            return true;
-        }
-
-        public async Task<string?> VerifyLoginTwoFactorAsync(int userId, string code)
-        {
-            var user = await _db.Users.FindAsync(userId);
-            if (user == null || !user.TwoFactorEnabled || string.IsNullOrWhiteSpace(user.TwoFactorSecret))
-                return null;
-
-            var ok = ValidateTotp(user.TwoFactorSecret, code, driftSteps: 2);
-            if (!ok) return null;
-
-            user.LastLoginAt = DateTime.UtcNow;
-            user.UpdatedAt = DateTime.UtcNow;
-
-            await _db.SaveChangesAsync();
-            return GenerateJwtToken(user);
-        }
-
-        private async Task LogLoginAttemptAsync(int? userId, bool success, string reason)
-        {
-            _db.LoginAudits.Add(new LoginAudit
-            {
-                UserId = userId,
-                IsSuccessful = success,
-                FailureReason = reason,
-                IpAddress = _httpContextAccessor.HttpContext?.Connection.RemoteIpAddress?.ToString() ?? "Unknown",
-                UserAgent = _httpContextAccessor.HttpContext?.Request.Headers["User-Agent"].ToString() ?? "Unknown",
-                LoggedInAt = DateTime.UtcNow
-            });
-
-            await _db.SaveChangesAsync();
         }
 
         private async Task RegisterFailedLogin(User user, string reason)

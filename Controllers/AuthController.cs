@@ -136,51 +136,62 @@ namespace LawAfrica.API.Controllers
         // =========================================================
         // LOGIN (Step 2: confirm 2FA and issue JWT)
         // =========================================================
-        public class ConfirmTwoFactorRequest
-        {
-            public string Username { get; set; } = string.Empty;
-            public string Code { get; set; } = string.Empty;
-        }
-
-        [AllowAnonymous]
-        [HttpPost("confirm-2fa")]
-        public async Task<IActionResult> ConfirmTwoFactor([FromBody] ConfirmTwoFactorRequest request)
-        {
-            if (request == null)
-                return BadRequest("Invalid request.");
-
-            // ✅ Normalize once
-            var username = (request.Username ?? "").Trim();
-            var usernameLower = username.ToLowerInvariant();
-            var code = (request.Code ?? "").Trim();
-
-            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(code))
-                return BadRequest("Username and code are required.");
-
-            var userRow = await _db.Users
-                .AsNoTracking()
-                .Where(u => u.Username != null && u.Username.Trim().ToLower() == usernameLower)
-                .Select(u => new { u.Id, u.LockoutEndAt })
-                .FirstOrDefaultAsync();
-
-            if (userRow?.LockoutEndAt.HasValue == true && userRow.LockoutEndAt.Value > DateTime.UtcNow)
+            public class ConfirmTwoFactorRequest
             {
-                await WriteLoginAuditAsync(userRow.Id, username, success: false, reason: "Account locked.");
-                return BadRequest($"Account locked until {userRow.LockoutEndAt.Value:u}");
+                // NOTE: Frontend already sends "Username".
+                // We keep the name to avoid breaking existing flows.
+                public string Username { get; set; } = string.Empty;
+                public string Code { get; set; } = string.Empty;
             }
 
-            var (ok, token, error) = await _authService.VerifyTwoFactorLoginAsync(username, code);
-
-            if (!ok || string.IsNullOrWhiteSpace(token))
+            [AllowAnonymous]
+            [HttpPost("confirm-2fa")]
+            public async Task<IActionResult> ConfirmTwoFactor([FromBody] ConfirmTwoFactorRequest request)
             {
-                var msg = error ?? "The verification code you entered is incorrect or expired. Please try again.";
-                await WriteLoginAuditAsync(userRow?.Id, username, success: false, reason: msg);
-                return BadRequest(msg);
+                if (request == null)
+                    return BadRequest("Invalid request.");
+
+                // ✅ Normalize once
+                var ident = (request.Username ?? "").Trim(); // can be username OR email
+                var code = (request.Code ?? "").Trim();
+
+                if (string.IsNullOrWhiteSpace(ident) || string.IsNullOrWhiteSpace(code))
+                    return BadRequest("Username or email and code are required.");
+
+                var identUpper = ident.ToUpperInvariant();
+                var identLower = ident.ToLowerInvariant();
+
+                // ✅ Lookup user for lockout/audit using username OR email (case-insensitive)
+                var userRow = await _db.Users
+                    .AsNoTracking()
+                    .Where(u =>
+                        (!string.IsNullOrWhiteSpace(u.NormalizedUsername) && u.NormalizedUsername == identUpper) ||
+                        (!string.IsNullOrWhiteSpace(u.Email) && u.Email.Trim().ToLower() == identLower)
+                    )
+                    .Select(u => new { u.Id, u.LockoutEndAt })
+                    .FirstOrDefaultAsync();
+
+                // ✅ If user exists and locked, block before trying 2FA
+                if (userRow?.LockoutEndAt.HasValue == true && userRow.LockoutEndAt.Value > DateTime.UtcNow)
+                {
+                    await WriteLoginAuditAsync(userRow.Id, ident, success: false, reason: "Account locked.");
+                    return BadRequest($"Account locked until {userRow.LockoutEndAt.Value:u}");
+                }
+
+                // ✅ Service now supports username OR email
+                var (ok, token, error) = await _authService.VerifyTwoFactorLoginAsync(ident, code);
+
+                if (!ok || string.IsNullOrWhiteSpace(token))
+                {
+                    var msg = error ?? "The verification code you entered is incorrect or expired. Please try again.";
+                    await WriteLoginAuditAsync(userRow?.Id, ident, success: false, reason: msg);
+                    return BadRequest(msg);
+                }
+
+                await WriteLoginAuditAsync(userRow?.Id, ident, success: true, reason: "");
+                return Ok(new { token });
             }
 
-            await WriteLoginAuditAsync(userRow?.Id, username, success: true, reason: "");
-            return Ok(new { token });
-        }
 
 
         // =========================================================
