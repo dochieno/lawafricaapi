@@ -22,13 +22,12 @@ namespace LawAfrica.API.Controllers
 
         // =========================================================
         // USERS - LIST (ADMIN ONLY)
-        // Upgraded: search + filters + pagination + online
-        // =========================================================
         // GET /api/admin/users?q=&type=&status=&online=&institutionId=&page=&pageSize=
         //
         // type: all | public | institution
         // status: all | active | inactive | locked
         // online: true | false
+        // =========================================================
         [Authorize(Policy = "RequireAdmin")]
         [HttpGet("users")]
         public async Task<IActionResult> GetUsers(
@@ -44,132 +43,175 @@ namespace LawAfrica.API.Controllers
             pageSize = pageSize <= 0 ? 20 : Math.Min(pageSize, 200);
 
             var now = DateTime.UtcNow;
-            var onlineCutoff = now.AddMinutes(-5); // online = seen within last 5 minutes
+            var onlineCutoff = now.AddMinutes(-5);
 
-            var query = _db.Users
+            // Aggregate presences: 1 row per user
+            var presenceAgg =
+                _db.UserPresences
+                  .AsNoTracking()
+                  .GroupBy(p => p.UserId)
+                  .Select(g => new
+                  {
+                      UserId = g.Key,
+                      LastSeenAtUtc = g.Max(x => x.LastSeenAtUtc)
+                  });
+
+            // Base users query
+            var usersQ = _db.Users
                 .AsNoTracking()
                 .Include(u => u.Institution)
                 .Include(u => u.Country)
                 .AsQueryable();
 
-            // Search
+            // Search (Postgres-friendly, case-insensitive)
             if (!string.IsNullOrWhiteSpace(q))
             {
-                var s = q.Trim().ToLower();
-                query = query.Where(u =>
-                    u.Username.ToLower().Contains(s) ||
-                    u.Email.ToLower().Contains(s) ||
-                    (u.FirstName != null && u.FirstName.ToLower().Contains(s)) ||
-                    (u.LastName != null && u.LastName.ToLower().Contains(s)));
+                var s = q.Trim();
+                usersQ = usersQ.Where(u =>
+                    EF.Functions.ILike(u.Username, $"%{s}%") ||
+                    EF.Functions.ILike(u.Email, $"%{s}%") ||
+                    (u.FirstName != null && EF.Functions.ILike(u.FirstName, $"%{s}%")) ||
+                    (u.LastName != null && EF.Functions.ILike(u.LastName, $"%{s}%")));
             }
 
             // Type filter
             var t = (type ?? "all").Trim().ToLower();
             if (t == "public")
             {
-                query = query.Where(u => u.InstitutionId == null && u.UserType == UserType.Public);
+                usersQ = usersQ.Where(u => u.InstitutionId == null && u.UserType == UserType.Public);
             }
             else if (t == "institution")
             {
-                query = query.Where(u => u.InstitutionId != null);
+                usersQ = usersQ.Where(u => u.InstitutionId != null);
             }
 
             // Institution filter
             if (institutionId.HasValue && institutionId.Value > 0)
             {
-                query = query.Where(u => u.InstitutionId == institutionId.Value);
+                usersQ = usersQ.Where(u => u.InstitutionId == institutionId.Value);
             }
 
             // Status filter
             var st = (status ?? "all").Trim().ToLower();
             if (st == "active")
             {
-                query = query.Where(u => u.IsActive == true);
+                usersQ = usersQ.Where(u => u.IsActive == true);
             }
             else if (st == "inactive")
             {
-                query = query.Where(u => u.IsActive == false);
+                usersQ = usersQ.Where(u => u.IsActive == false);
             }
             else if (st == "locked")
             {
-                query = query.Where(u => u.LockoutEndAt != null && u.LockoutEndAt > now);
+                usersQ = usersQ.Where(u => u.LockoutEndAt != null && u.LockoutEndAt > now);
             }
 
-            // Online filter (requires UserPresences table)
-            // If table doesn't exist yet, you'll add it below.
+            // Join presence (so we can filter by online efficiently)
+            var joined =
+                from u in usersQ
+                join p in presenceAgg on u.Id equals p.UserId into pj
+                from p in pj.DefaultIfEmpty()
+                select new
+                {
+                    User = u,
+                    LastSeenAtUtc = (DateTime?)p.LastSeenAtUtc
+                };
+
             if (online.HasValue)
             {
                 if (online.Value)
                 {
-                    query = query.Where(u =>
-                        _db.UserPresences.Any(p => p.UserId == u.Id && p.LastSeenAtUtc >= onlineCutoff));
+                    joined = joined.Where(x => x.LastSeenAtUtc != null && x.LastSeenAtUtc >= onlineCutoff);
                 }
                 else
                 {
-                    query = query.Where(u =>
-                        !_db.UserPresences.Any(p => p.UserId == u.Id && p.LastSeenAtUtc >= onlineCutoff));
+                    joined = joined.Where(x => x.LastSeenAtUtc == null || x.LastSeenAtUtc < onlineCutoff);
                 }
             }
 
-            var total = await query.CountAsync();
+            var total = await joined.CountAsync();
 
-            var items = await query
-                .OrderByDescending(u => u.LastLoginAt ?? u.CreatedAt)
+            // page items
+            var items = await joined
+                .OrderByDescending(x => x.User.LastLoginAt ?? x.User.CreatedAt)
                 .Skip((page - 1) * pageSize)
                 .Take(pageSize)
-                .Select(u => new
+                .Select(x => new
                 {
-                    u.Id,
-                    u.Username,
-                    u.Email,
-                    Name = (u.FirstName ?? "") + (string.IsNullOrWhiteSpace(u.LastName) ? "" : " " + u.LastName),
-                    u.Role,
-                    u.UserType,
-                    u.IsGlobalAdmin,
+                    x.User.Id,
+                    x.User.Username,
+                    x.User.Email,
+                    Name = (x.User.FirstName ?? "") + (string.IsNullOrWhiteSpace(x.User.LastName) ? "" : " " + x.User.LastName),
 
-                    u.IsActive,
-                    u.IsApproved,
-                    u.IsEmailVerified,
+                    x.User.Role,
+                    x.User.UserType,
+                    x.User.IsGlobalAdmin,
 
-                    u.InstitutionId,
-                    InstitutionName = u.Institution != null ? u.Institution.Name : null,
+                    x.User.IsActive,
+                    x.User.IsApproved,
+                    x.User.IsEmailVerified,
 
-                    Country = u.Country != null ? u.Country.Name : null,
+                    x.User.InstitutionId,
+                    InstitutionName = x.User.Institution != null ? x.User.Institution.Name : null,
 
-                    u.CreatedAt,
-                    u.LastLoginAt,
-                    u.UpdatedAt,
+                    Country = x.User.Country != null ? x.User.Country.Name : null,
 
-                    u.LockoutEndAt,
-                    u.FailedLoginAttempts,
+                    x.User.CreatedAt,
+                    x.User.LastLoginAt,
+                    x.User.UpdatedAt,
 
-                    // online derived
-                    IsOnline = _db.UserPresences.Any(p => p.UserId == u.Id && p.LastSeenAtUtc >= onlineCutoff),
-                    LastSeenAtUtc = _db.UserPresences
-                        .Where(p => p.UserId == u.Id)
-                        .Select(p => (DateTime?)p.LastSeenAtUtc)
-                        .FirstOrDefault()
+                    x.User.LockoutEndAt,
+                    x.User.FailedLoginAttempts,
+
+                    LastSeenAtUtc = x.LastSeenAtUtc,
+                    IsOnline = x.LastSeenAtUtc != null && x.LastSeenAtUtc >= onlineCutoff
                 })
                 .ToListAsync();
 
-                return Ok(new
+            // Summary counts for UI chips (public/institution/online/locked/active)
+            // Keep it lightweight with a few targeted counts.
+            var baseUsers = _db.Users.AsNoTracking().AsQueryable();
+
+            var activePublicCount = await baseUsers.CountAsync(u =>
+                u.IsActive &&
+                u.InstitutionId == null &&
+                u.UserType == UserType.Public);
+
+            var activeInstitutionCount = await baseUsers.CountAsync(u =>
+                u.IsActive &&
+                u.InstitutionId != null);
+
+            var lockedCount = await baseUsers.CountAsync(u =>
+                u.LockoutEndAt != null && u.LockoutEndAt > now);
+
+            var onlineCount =
+                await presenceAgg.CountAsync(p => p.LastSeenAtUtc >= onlineCutoff);
+
+            return Ok(new
+            {
+                page,
+                pageSize,
+                total,
+                summary = new
                 {
-                    page,
-                    pageSize,
-                    total,
-                    items
-                });
+                    activePublic = activePublicCount,
+                    activeInstitution = activeInstitutionCount,
+                    locked = lockedCount,
+                    online = onlineCount
+                },
+                items
+            });
         }
 
         // =========================================================
         // USERS - ACTIVATE / DEACTIVATE (ADMIN ONLY)
+        // PUT /api/admin/users/{id}/active
         // =========================================================
         public class SetActiveRequest
         {
             public bool IsActive { get; set; }
         }
 
-        // PUT /api/admin/users/{id}/active
         [Authorize(Policy = "RequireAdmin")]
         [HttpPut("users/{id}/active")]
         public async Task<IActionResult> SetUserActive(int id, [FromBody] SetActiveRequest req)
@@ -177,7 +219,6 @@ namespace LawAfrica.API.Controllers
             var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == id);
             if (user == null) return NotFound("User not found.");
 
-            // Optional safety: don't allow deactivating global admin
             if (user.IsGlobalAdmin && req.IsActive == false)
                 return BadRequest("You cannot deactivate a global admin account.");
 
@@ -196,17 +237,14 @@ namespace LawAfrica.API.Controllers
 
         // =========================================================
         // USERS - BLOCK / UNBLOCK SIGN-IN (LOCKOUT) (ADMIN ONLY)
+        // PUT /api/admin/users/{id}/lock
         // =========================================================
         public class SetLockRequest
         {
-            // true => lock, false => unlock
             public bool Locked { get; set; }
-
-            // If locking: minutes from now. If null => 1 year.
-            public int? Minutes { get; set; }
+            public int? Minutes { get; set; } // if locking
         }
 
-        // PUT /api/admin/users/{id}/lock
         [Authorize(Policy = "RequireAdmin")]
         [HttpPut("users/{id}/lock")]
         public async Task<IActionResult> SetUserLock(int id, [FromBody] SetLockRequest req)
@@ -214,12 +252,15 @@ namespace LawAfrica.API.Controllers
             var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == id);
             if (user == null) return NotFound("User not found.");
 
-            if (user.IsGlobalAdmin && req.Locked == true)
+            if (user.IsGlobalAdmin && req.Locked)
                 return BadRequest("You cannot lock a global admin account.");
 
             if (req.Locked)
             {
-                var mins = req.Minutes.HasValue && req.Minutes.Value > 0 ? req.Minutes.Value : (60 * 24 * 365);
+                var mins = req.Minutes.HasValue && req.Minutes.Value > 0
+                    ? req.Minutes.Value
+                    : (60 * 24 * 365); // default: 1 year
+
                 user.LockoutEndAt = DateTime.UtcNow.AddMinutes(mins);
             }
             else
@@ -265,10 +306,7 @@ namespace LawAfrica.API.Controllers
 
             await _db.SaveChangesAsync();
 
-            return Ok(new
-            {
-                message = $"User '{user.Username}' role changed to '{user.Role}'."
-            });
+            return Ok(new { message = $"User '{user.Username}' role changed to '{user.Role}'." });
         }
 
         // =========================================================
@@ -284,10 +322,7 @@ namespace LawAfrica.API.Controllers
 
             await _auth.RegenerateTwoFactorAuthAsync(id);
 
-            return Ok(new
-            {
-                message = $"2FA reset for user '{user.Username}'. New QR code sent via email."
-            });
+            return Ok(new { message = $"2FA reset for user '{user.Username}'. New QR code sent via email." });
         }
 
         // =========================================================
@@ -316,7 +351,6 @@ namespace LawAfrica.API.Controllers
 
         // =========================================================
         // KEEP: UNLOCK USER ACCOUNT (ADMIN ONLY)
-        // (kept for backward compatibility)
         // =========================================================
         [Authorize(Policy = "RequireAdmin")]
         [HttpPost("users/{id}/unlock")]
