@@ -46,6 +46,17 @@ namespace LawAfrica.API.Controllers
             return Redirect($"{frontendReturn}?reference={Uri.EscapeDataString(r)}");
         }
 
+        // ✅ SAFETY NET:
+        // If Paystack callback is accidentally set to .../return-visit (GET),
+        // we redirect to the correct /return endpoint instead of 405.
+        // This does NOT affect your frontend logging endpoint (POST return-visit).
+        [AllowAnonymous]
+        [HttpGet("return-visit")]
+        public IActionResult ReturnVisitGetFallback([FromQuery] string? reference, [FromQuery] string? trxref)
+        {
+            return ReturnToFrontend(reference, trxref);
+        }
+
         /// <summary>
         /// Creates a PaymentIntent + initializes Paystack transaction, returns authorization_url to redirect user.
         /// </summary>
@@ -277,14 +288,16 @@ namespace LawAfrica.API.Controllers
 
         private string BuildApiReturnProxyUrl()
         {
-            // Prefer a canonical public base URL (works behind proxies/CDNs)
-            var baseUrl = (_opts.PublicBaseUrl ?? "").Trim().TrimEnd('/');
+            // If you later add PaystackOptions.PublicBaseUrl, you can prefer it here.
+            // For now: try forwarded headers first (Render/CDN friendly), then fallback.
 
-            if (!string.IsNullOrWhiteSpace(baseUrl))
-                return $"{baseUrl}/api/payments/paystack/return";
+            var forwardedProto = Request.Headers["X-Forwarded-Proto"].ToString();
+            var forwardedHost = Request.Headers["X-Forwarded-Host"].ToString();
 
-            // Fallback (may be wrong if behind a proxy, but better than nothing)
-            return $"{Request.Scheme}://{Request.Host.Value}/api/payments/paystack/return";
+            var scheme = !string.IsNullOrWhiteSpace(forwardedProto) ? forwardedProto : Request.Scheme;
+            var host = !string.IsNullOrWhiteSpace(forwardedHost) ? forwardedHost : Request.Host.Value;
+
+            return $"{scheme}://{host}/api/payments/paystack/return";
         }
 
         private static string SafeTrim(string? value, int max)
