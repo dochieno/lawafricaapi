@@ -259,70 +259,84 @@ namespace LawAfrica.API.Controllers
             }
         }
 
-        // ✅ Download Endpoint (SINGLE SOURCE OF TRUTH = DocumentEntitlementService)
-        [Authorize]
-        [HttpGet("{id}/download")]
-        public async Task<IActionResult> Download(
-            int id,
-            [FromServices] DocumentEntitlementService entitlementService,
-            [FromServices] FileStorageService storage)
-        {
-            var doc = await _db.LegalDocuments.FindAsync(id);
-            if (doc == null || string.IsNullOrWhiteSpace(doc.FilePath))
-                return NotFound("Document not found or file missing.");
-
-            var userId = User.GetUserId();
-
-            // ✅ SINGLE SOURCE OF TRUTH
-            var decision = await entitlementService.GetEntitlementDecisionAsync(userId, doc);
-
-            // ✅ Hard blocks: institution inactive or seat exceeded
-            if (!decision.IsAllowed &&
-                (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
-                 decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded))
-            {
-                Response.Headers["X-Entitlement-Deny-Reason"] = decision.DenyReason.ToString();
-                if (!string.IsNullOrWhiteSpace(decision.Message))
-                    Response.Headers["X-Entitlement-Message"] = decision.Message;
-
-                return StatusCode(StatusCodes.Status403Forbidden, new
+                // ✅ Download Endpoint (SINGLE SOURCE OF TRUTH = DocumentEntitlementService)
+                [Authorize]
+                [HttpGet("{id}/download")]
+                public async Task<IActionResult> Download(
+                    int id,
+                    [FromServices] DocumentEntitlementService entitlementService,
+                    [FromServices] FileStorageService storage)
                 {
-                    message = decision.Message ?? "Access blocked. Please contact your administrator.",
-                    denyReason = decision.DenyReason.ToString(),
-                    canPurchaseIndividually = decision.CanPurchaseIndividually,
-                    purchaseDisabledReason = decision.PurchaseDisabledReason
-                });
-            }
+                    var doc = await _db.LegalDocuments.FindAsync(id);
+                    if (doc == null || string.IsNullOrWhiteSpace(doc.FilePath))
+                        return NotFound("Document not found or file missing.");
 
-            // ✅ Not entitled: return 403 (frontend can show purchase flow / preview messaging)
-            // NOTE: react-pdf still needs the file for PreviewOnly.
-            // Your current system implements preview by limiting pages in the UI (DEFAULT_PREVIEW_MAX_PAGES),
-            // so we allow PreviewOnly to load the file.
-            //
-            // If you ever want server-side preview (first N pages only), that would require additional processing.
-            if (decision.DenyReason == DocumentEntitlementDenyReason.NotEntitled)
-            {
-                // Allow PreviewOnly to read the file (UI will limit pages).
-                // If you want NotEntitled to be blocked entirely, change this to a 403 return.
-            }
+                    var userId = User.GetUserId();
 
-            var physicalPath = storage.ResolvePhysicalPathFromDbPath(doc.FilePath);
-            if (!System.IO.File.Exists(physicalPath))
-                return NotFound("File missing on server.");
+                    // ✅ SINGLE SOURCE OF TRUTH
+                    var decision = await entitlementService.GetEntitlementDecisionAsync(userId, doc);
 
-            var contentType = doc.FileType switch
-            {
-                "pdf" => "application/pdf",
-                "epub" => "application/epub+zip",
-                _ => "application/octet-stream"
-            };
+                    // ✅ Hard blocks: institution inactive or seat exceeded
+                    if (!decision.IsAllowed &&
+                        (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
+                         decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded))
+                    {
+                        Response.Headers["X-Entitlement-Deny-Reason"] = decision.DenyReason.ToString();
+                        if (!string.IsNullOrWhiteSpace(decision.Message))
+                            Response.Headers["X-Entitlement-Message"] = decision.Message;
 
-            Response.Headers.Append("Content-Disposition", $"inline; filename=\"{Path.GetFileName(physicalPath)}\"");
-            Response.Headers.Append("X-Document-Access",
-                decision.AccessLevel == DocumentAccessLevel.FullAccess ? "Full" : "Preview");
+                        // ✅ Ensure frontend can read these headers under CORS
+                        Response.Headers["Access-Control-Expose-Headers"] =
+                            "Accept-Ranges, Content-Range, Content-Length, Content-Type, Content-Disposition, X-Document-Access, X-Entitlement-Deny-Reason, X-Entitlement-Message";
 
-            return PhysicalFile(physicalPath, contentType, enableRangeProcessing: true);
-        }
+                        return StatusCode(StatusCodes.Status403Forbidden, new
+                        {
+                            message = decision.Message ?? "Access blocked. Please contact your administrator.",
+                            denyReason = decision.DenyReason.ToString(),
+                            canPurchaseIndividually = decision.CanPurchaseIndividually,
+                            purchaseDisabledReason = decision.PurchaseDisabledReason
+                        });
+                    }
+
+                    // ✅ Not entitled: allow PreviewOnly to read the file (UI will limit pages).
+                    // If you ever want NotEntitled to be blocked entirely, change this to a 403 return.
+                    if (decision.DenyReason == DocumentEntitlementDenyReason.NotEntitled)
+                    {
+                        // Allowed for preview UX.
+                    }
+
+                    var physicalPath = storage.ResolvePhysicalPathFromDbPath(doc.FilePath);
+                    if (!System.IO.File.Exists(physicalPath))
+                        return NotFound("File missing on server.");
+
+                    var contentType = doc.FileType switch
+                    {
+                        "pdf" => "application/pdf",
+                        "epub" => "application/epub+zip",
+                        _ => "application/octet-stream"
+                    };
+
+                    // ✅ Inline open in browser
+                    Response.Headers["Content-Disposition"] = $"inline; filename=\"{Path.GetFileName(physicalPath)}\"";
+
+                    // ✅ Range + streaming friendliness
+                    Response.Headers["Accept-Ranges"] = "bytes"; // explicit (even though enableRangeProcessing handles it)
+                    Response.Headers["Cache-Control"] = "private, max-age=0, must-revalidate";
+                    Response.Headers["Pragma"] = "no-cache";
+                    Response.Headers["X-Content-Type-Options"] = "nosniff";
+                    Response.Headers["Cache-Control"] = "private, max-age=0, must-revalidate, no-transform";
+
+                    // ✅ Your access header (useful for debugging / UI)
+                    Response.Headers["X-Document-Access"] =
+                        decision.AccessLevel == DocumentAccessLevel.FullAccess ? "Full" : "Preview";
+
+                    // ✅ Allow browser JS to read key headers under CORS (especially Content-Range for pdf.js)
+                    Response.Headers["Access-Control-Expose-Headers"] =
+                        "Accept-Ranges, Content-Range, Content-Length, Content-Type, Content-Disposition, X-Document-Access, X-Entitlement-Deny-Reason, X-Entitlement-Message";
+
+                    return PhysicalFile(physicalPath, contentType, enableRangeProcessing: true);
+                }
+
 
         // ✅ Upload Cover (SAFE): accepts form keys "file" or "File"
         [Authorize(Roles = "Admin")]
