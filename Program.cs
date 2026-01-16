@@ -370,6 +370,22 @@ app.MapMethods("{*path}", new[] { "OPTIONS" }, () => Results.Ok())
 app.UseAuthentication();
 app.UseAuthorization();
 
+// ✅ NEW: Paystack misconfig safety-net (root path)
+// If Paystack (or old cached config) redirects to https://lawafricaapi.onrender.com/return-visit
+// we catch it and forward to the real proxy endpoint.
+app.MapGet("/return-visit", (HttpContext ctx) =>
+{
+    var reference = (ctx.Request.Query["reference"].ToString() ?? "").Trim();
+    var trxref = (ctx.Request.Query["trxref"].ToString() ?? "").Trim();
+    var r = !string.IsNullOrWhiteSpace(reference) ? reference : trxref;
+
+    var target = string.IsNullOrWhiteSpace(r)
+        ? "/api/payments/paystack/return"
+        : $"/api/payments/paystack/return?reference={Uri.EscapeDataString(r)}";
+
+    return Results.Redirect(target);
+});
+
 // ✅ Ensure controllers always get the CORS policy too
 app.MapControllers().RequireCors("ViteDev");
 
