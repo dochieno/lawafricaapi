@@ -31,19 +31,15 @@ namespace LawAfrica.API.Controllers
             _logger = logger;
         }
 
-        // ✅ If you ever decide to route callback through API first (optional).
-        // Paystack can redirect to:
-        //   https://lawafricaapi.onrender.com/api/payments/paystack/return?reference=...&trxref=...
-        // Then we redirect to frontend:
-        //   https://lawafricadigitalhub.vercel.app/payments/paystack/return?reference=...&trxref=...
+        // ✅ API proxy return: Paystack redirects here (GET) then we redirect to frontend return page.
         [AllowAnonymous]
         [HttpGet("return")]
         public IActionResult ReturnToFrontend([FromQuery] string? reference, [FromQuery] string? trxref)
         {
-            // Prefer reference, fallback trxref
             var r = (reference ?? trxref ?? "").Trim();
 
             var frontendReturn = "https://lawafricadigitalhub.vercel.app/payments/paystack/return";
+
             if (string.IsNullOrWhiteSpace(r))
                 return Redirect(frontendReturn);
 
@@ -57,12 +53,12 @@ namespace LawAfrica.API.Controllers
         [HttpPost("initialize")]
         public async Task<IActionResult> Initialize([FromBody] InitiatePaystackCheckoutRequest request, CancellationToken ct)
         {
-            // ✅ Same rule as MPesa: only PublicSignupFee can be anonymous
             var isAuthenticated = User?.Identity?.IsAuthenticated ?? false;
 
             int? userId = null;
             string? email = null;
 
+            // ✅ Same rule as MPesa: only PublicSignupFee can be anonymous
             if (request.Purpose != PaymentPurpose.PublicSignupFee)
             {
                 if (!isAuthenticated)
@@ -81,18 +77,14 @@ namespace LawAfrica.API.Controllers
             // ✅ Paystack requires email
             if (isAuthenticated && userId.HasValue && userId.Value > 0)
             {
-                // 1) Prefer DB email (source of truth)
                 email = await _db.Users
                     .AsNoTracking()
                     .Where(u => u.Id == userId.Value)
                     .Select(u => u.Email)
                     .FirstOrDefaultAsync(ct);
 
-                // 2) If DB email missing, allow fallback to request.Email (sent by frontend)
                 if (string.IsNullOrWhiteSpace(email))
-                {
                     email = request.Email?.Trim();
-                }
 
                 if (string.IsNullOrWhiteSpace(email))
                 {
@@ -158,25 +150,21 @@ namespace LawAfrica.API.Controllers
             _db.PaymentIntents.Add(intent);
             await _db.SaveChangesAsync(ct);
 
-            // 2) Create a reference we control (matching + idempotency)
+            // 2) Create reference we control
             var reference = $"LA-{intent.Id}-{Guid.NewGuid():N}"
                 .Substring(0, $"LA-{intent.Id}-".Length + 6);
 
             intent.ProviderReference = reference;
-            intent.ProviderTransactionId = null;
             intent.UpdatedAt = DateTime.UtcNow;
-
             await _db.SaveChangesAsync(ct);
 
             // 3) Call Paystack initialize
             try
             {
-                // ✅ Callback should be FRONTEND return, not webhook.
-                // If not set in env, we fall back to your production frontend return.
-                var fallbackFrontendReturn = "https://lawafricadigitalhub.vercel.app/payments/paystack/return";
-                var callbackUrl = string.IsNullOrWhiteSpace(_opts.CallbackUrl)
-                    ? fallbackFrontendReturn
-                    : _opts.CallbackUrl.Trim();
+                // ✅ CRITICAL FIX:
+                // - Signup: keep existing behavior (working)
+                // - Non-signup: force callback to API proxy GET /return (anonymous), then redirect to frontend
+                var callbackUrl = ResolvePaystackCallbackUrl(request.Purpose);
 
                 var init = await _paystack.InitializeTransactionAsync(
                     email: email!,
@@ -188,7 +176,6 @@ namespace LawAfrica.API.Controllers
 
                 intent.ProviderReference = init.Reference;
                 intent.UpdatedAt = DateTime.UtcNow;
-
                 await _db.SaveChangesAsync(ct);
 
                 return Ok(new
@@ -259,46 +246,45 @@ namespace LawAfrica.API.Controllers
             });
         }
 
-        [Authorize]
-        [HttpPost("return-visit")]
-        public async Task<IActionResult> LogReturnVisit(
-            [FromBody] PaystackReturnVisitRequest request,
-            CancellationToken ct)
+        // =========================
+        // Helpers
+        // =========================
+
+        private string ResolvePaystackCallbackUrl(PaymentPurpose purpose)
         {
-            if (request == null)
-                return BadRequest("Invalid request.");
+            // ✅ DO NOT mess signup flow
+            if (purpose == PaymentPurpose.PublicSignupFee)
+            {
+                var fallbackFrontendReturn = "https://lawafricadigitalhub.vercel.app/payments/paystack/return";
 
-            var reference = (request.Reference ?? "").Trim();
-            if (string.IsNullOrWhiteSpace(reference))
-                return BadRequest("Reference is required.");
+                var configured = (_opts.CallbackUrl ?? "").Trim();
+                if (string.IsNullOrWhiteSpace(configured)) return fallbackFrontendReturn;
 
-            var userId = HttpContext.User.GetUserId();
+                // Guard against the exact failure you hit (misconfigured to /return-visit)
+                if (configured.Contains("return-visit", StringComparison.OrdinalIgnoreCase))
+                    return fallbackFrontendReturn;
 
-            var intent = await _db.PaymentIntents
-                .FirstOrDefaultAsync(x =>
-                    x.Provider == PaymentProvider.Paystack &&
-                    x.ProviderReference == reference &&
-                    x.UserId == userId,
-                    ct);
+                // Guard against mistakenly pointing signup callback to API proxy (not desired)
+                if (configured.Contains("/api/payments/paystack/return", StringComparison.OrdinalIgnoreCase))
+                    return fallbackFrontendReturn;
 
-            if (intent == null)
-                return NotFound("Payment intent not found for this reference.");
+                return configured;
+            }
 
-            var now = DateTime.UtcNow.ToString("u");
-            var line =
-                $"[PaystackReturnVisit] {now} " +
-                $"url={SafeTrim(request.CurrentUrl ?? "", 240)} " +
-                $"ua={SafeTrim(request.UserAgent ?? "", 200)}";
+            // ✅ Non-signup purchases: always go through API proxy return
+            return BuildApiReturnProxyUrl();
+        }
 
-            var existing = intent.AdminNotes ?? "";
-            if (!string.IsNullOrWhiteSpace(existing))
-                existing += "\n";
+        private string BuildApiReturnProxyUrl()
+        {
+            // Prefer a canonical public base URL (works behind proxies/CDNs)
+            var baseUrl = (_opts.PublicBaseUrl ?? "").Trim().TrimEnd('/');
 
-            intent.AdminNotes = SafeTrim(existing + line, 500);
-            intent.UpdatedAt = DateTime.UtcNow;
+            if (!string.IsNullOrWhiteSpace(baseUrl))
+                return $"{baseUrl}/api/payments/paystack/return";
 
-            await _db.SaveChangesAsync(ct);
-            return Ok(new { ok = true });
+            // Fallback (may be wrong if behind a proxy, but better than nothing)
+            return $"{Request.Scheme}://{Request.Host.Value}/api/payments/paystack/return";
         }
 
         private static string SafeTrim(string? value, int max)
