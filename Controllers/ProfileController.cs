@@ -47,8 +47,8 @@ namespace LawAfrica.API.Controllers
                 countryName = user.Country?.Name,
                 user.City,
 
-                // ✅ This should now be a browser-usable path like:
-                // /storage/ProfileImages/user_1_123.jpg  OR null
+                // ✅ MUST be a browser-usable URL path like:
+                // /storage/ProfileImages/user_1_123.jpg OR null
                 user.ProfileImageUrl,
 
                 user.IsActive,
@@ -99,10 +99,10 @@ namespace LawAfrica.API.Controllers
             if (!string.IsNullOrWhiteSpace(request.City))
                 user.City = request.City.Trim();
 
-            // NOTE: Do not let users set ProfileImageUrl from the body unless you really want that.
-            // If you keep it, make sure it is sanitized.
-            if (!string.IsNullOrWhiteSpace(request.ProfileImageUrl))
-                user.ProfileImageUrl = request.ProfileImageUrl.Trim();
+            // ✅ SECURITY FIX:
+            // Do NOT allow ProfileImageUrl to be changed via UpdateProfile.
+            // Profile image must be managed ONLY via /api/profile/image endpoints.
+            // (This prevents bad/corrupt values like "user_1_x.jpg" or wrong casing.)
 
             // ---- COUNTRY ----
             if (request.CountryId.HasValue)
@@ -181,36 +181,38 @@ namespace LawAfrica.API.Controllers
             var user = await _db.Users.FindAsync(userId);
             if (user == null) return Unauthorized();
 
-            // ✅ IMPORTANT: keep folder casing exactly as on disk (Linux is case-sensitive)
-            var uploadsDir = Path.Combine(env.ContentRootPath, "Storage", "ProfileImages");
-            Directory.CreateDirectory(uploadsDir);
+            // ✅ IMPORTANT: folder casing EXACT (Linux is case-sensitive)
+            var diskDir = Path.Combine(env.ContentRootPath, "Storage", "ProfileImages");
+            Directory.CreateDirectory(diskDir);
 
-            // ✅ Delete old image (safe for both old and new stored formats)
+            // ✅ Delete old image safely (supports DB old values too)
             if (!string.IsNullOrWhiteSpace(user.ProfileImageUrl))
             {
-                var oldFullPath = ToPhysicalStoragePath(env, user.ProfileImageUrl);
-                if (System.IO.File.Exists(oldFullPath))
-                    System.IO.File.Delete(oldFullPath);
+                var oldDiskPath = ResolveProfileImageDiskPath(env.ContentRootPath, user.ProfileImageUrl);
+                if (!string.IsNullOrWhiteSpace(oldDiskPath) && System.IO.File.Exists(oldDiskPath))
+                    System.IO.File.Delete(oldDiskPath);
             }
 
             var ext = Path.GetExtension(file.FileName);
             var filename = $"user_{userId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}{ext}";
-            var fullPath = Path.Combine(uploadsDir, filename);
+            var fullPath = Path.Combine(diskDir, filename);
 
             using (var stream = new FileStream(fullPath, FileMode.Create))
             {
                 await file.CopyToAsync(stream);
             }
 
-            // ✅ Store a frontend-usable URL path (not a physical path)
-            // Must match folder casing: ProfileImages
-            user.ProfileImageUrl = $"/storage/ProfileImages/{filename}";
+            // ✅ Canonical URL stored in DB (browser-usable + correct casing)
+            var urlPath = $"/storage/ProfileImages/{filename}";
+            user.ProfileImageUrl = urlPath;
             user.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync();
 
             return Ok(new
             {
-                imageUrl = $"{Request.Scheme}://{Request.Host}/storage/ProfileImages/{filename}",
+                // absolute for convenience
+                imageUrl = $"{Request.Scheme}://{Request.Host}{urlPath}",
+                // relative canonical for frontend storage
                 profileImageUrl = user.ProfileImageUrl
             });
         }
@@ -228,9 +230,9 @@ namespace LawAfrica.API.Controllers
 
             if (!string.IsNullOrWhiteSpace(user.ProfileImageUrl))
             {
-                var fullPath = ToPhysicalStoragePath(env, user.ProfileImageUrl);
-                if (System.IO.File.Exists(fullPath))
-                    System.IO.File.Delete(fullPath);
+                var diskPath = ResolveProfileImageDiskPath(env.ContentRootPath, user.ProfileImageUrl);
+                if (!string.IsNullOrWhiteSpace(diskPath) && System.IO.File.Exists(diskPath))
+                    System.IO.File.Delete(diskPath);
 
                 user.ProfileImageUrl = null;
                 user.UpdatedAt = DateTime.UtcNow;
@@ -243,32 +245,49 @@ namespace LawAfrica.API.Controllers
         // ---------------------------------------------------------
         // Helpers
         // ---------------------------------------------------------
-        private static string ToPhysicalStoragePath(IWebHostEnvironment env, string profileImageUrl)
+
+        /// <summary>
+        /// Converts whatever is stored in DB into a real disk path.
+        /// Supports:
+        /// - "/storage/ProfileImages/x.jpg"
+        /// - "/storage/profileimages/x.jpg" (wrong-case old values)
+        /// - "Storage/ProfileImages/x.jpg"
+        /// - "user_1_x.jpg" (filename-only old values)
+        /// </summary>
+        private static string? ResolveProfileImageDiskPath(string contentRootPath, string stored)
         {
-            var v = profileImageUrl.Trim();
+            var s = (stored ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(s)) return null;
 
-            // New format: "/storage/ProfileImages/xyz.jpg"
-            if (v.StartsWith("/storage/", StringComparison.OrdinalIgnoreCase))
+            // URL form: /storage/...
+            if (s.StartsWith("/storage/", StringComparison.OrdinalIgnoreCase))
             {
-                var relative = v.Substring("/storage/".Length)
-                    .Replace("/", Path.DirectorySeparatorChar.ToString());
+                // remove "/storage/" -> remaining is like "ProfileImages/x.jpg" (or wrong-case)
+                var rel = s.Substring("/storage/".Length).Replace('\\', '/');
 
-                return Path.Combine(env.ContentRootPath, "Storage", relative);
+                // ✅ Force canonical folder casing for disk folder
+                if (rel.StartsWith("profileimages/", StringComparison.OrdinalIgnoreCase))
+                    rel = "ProfileImages/" + rel.Substring("profileimages/".Length);
+
+                return Path.Combine(contentRootPath, "Storage", rel.Replace('/', Path.DirectorySeparatorChar));
             }
 
-            // Old format: "Storage/ProfileImages/xyz.jpg"
-            if (v.StartsWith("Storage/", StringComparison.OrdinalIgnoreCase) ||
-                v.StartsWith("Storage\\", StringComparison.OrdinalIgnoreCase))
+            // Disk-ish form: Storage/...
+            if (s.StartsWith("Storage/", StringComparison.OrdinalIgnoreCase) ||
+                s.StartsWith("Storage\\", StringComparison.OrdinalIgnoreCase))
             {
-                var relative = v.Substring("Storage".Length)
-                    .TrimStart('/', '\\')
-                    .Replace("/", Path.DirectorySeparatorChar.ToString());
+                s = s.Replace('\\', '/');
 
-                return Path.Combine(env.ContentRootPath, "Storage", relative);
+                // ✅ Force canonical folder casing
+                s = s.Replace("storage/profileimages/", "Storage/ProfileImages/", StringComparison.OrdinalIgnoreCase);
+                s = s.Replace("storage/ProfileImages/", "Storage/ProfileImages/", StringComparison.OrdinalIgnoreCase);
+
+                // "Storage/..." relative from content root
+                return Path.Combine(contentRootPath, s.Replace('/', Path.DirectorySeparatorChar));
             }
 
-            // Fallback: treat as relative to ContentRootPath
-            return Path.Combine(env.ContentRootPath, v.Replace("/", Path.DirectorySeparatorChar.ToString()));
+            // Filename-only fallback
+            return Path.Combine(contentRootPath, "Storage", "ProfileImages", s.TrimStart('/', '\\'));
         }
     }
 }
