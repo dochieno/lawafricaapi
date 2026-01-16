@@ -9,6 +9,7 @@ namespace LawAfrica.API.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
+    [Authorize(Roles = "Admin")]
     public class AdminController : ControllerBase
     {
         private readonly ApplicationDbContext _db;
@@ -28,7 +29,6 @@ namespace LawAfrica.API.Controllers
         // status: all | active | inactive | locked
         // online: true | false
         // =========================================================
-        [Authorize(Policy = "RequireAdmin")]
         [HttpGet("users")]
         public async Task<IActionResult> GetUsers(
             [FromQuery] string? q = null,
@@ -212,7 +212,7 @@ namespace LawAfrica.API.Controllers
             public bool IsActive { get; set; }
         }
 
-        [Authorize(Policy = "RequireAdmin")]
+
         [HttpPut("users/{id}/active")]
         public async Task<IActionResult> SetUserActive(int id, [FromBody] SetActiveRequest req)
         {
@@ -245,7 +245,6 @@ namespace LawAfrica.API.Controllers
             public int? Minutes { get; set; } // if locking
         }
 
-        [Authorize(Policy = "RequireAdmin")]
         [HttpPut("users/{id}/lock")]
         public async Task<IActionResult> SetUserLock(int id, [FromBody] SetLockRequest req)
         {
@@ -289,7 +288,6 @@ namespace LawAfrica.API.Controllers
             public string NewRole { get; set; } = string.Empty;
         }
 
-        [Authorize(Policy = "RequireAdmin")]
         [HttpPost("users/{id}/role")]
         public async Task<IActionResult> ChangeRole(int id, ChangeRoleRequest request)
         {
@@ -312,7 +310,7 @@ namespace LawAfrica.API.Controllers
         // =========================================================
         // KEEP: REGENERATE 2FA (ADMIN ONLY)
         // =========================================================
-        [Authorize(Policy = "RequireAdmin")]
+
         [HttpPost("users/{id}/regenerate-2fa")]
         public async Task<IActionResult> RegenerateUser2FA(int id)
         {
@@ -328,7 +326,7 @@ namespace LawAfrica.API.Controllers
         // =========================================================
         // KEEP: LOGIN AUDITS (ADMIN ONLY)
         // =========================================================
-        [Authorize(Policy = "RequireAdmin")]
+
         [HttpGet("login-audits")]
         public async Task<IActionResult> GetLoginAudits()
         {
@@ -352,7 +350,7 @@ namespace LawAfrica.API.Controllers
         // =========================================================
         // KEEP: UNLOCK USER ACCOUNT (ADMIN ONLY)
         // =========================================================
-        [Authorize(Policy = "RequireAdmin")]
+
         [HttpPost("users/{id}/unlock")]
         public async Task<IActionResult> UnlockUser(int id)
         {
@@ -372,7 +370,7 @@ namespace LawAfrica.API.Controllers
         // =========================================================
         // KEEP: GET LOCKED USERS (ADMIN ONLY)
         // =========================================================
-        [Authorize(Policy = "RequireAdmin")]
+
         [HttpGet("security/locked-users")]
         public async Task<IActionResult> GetLockedUsers()
         {
@@ -396,7 +394,7 @@ namespace LawAfrica.API.Controllers
         // =========================================================
         // KEEP: GET SUSPICIOUS IPs (ADMIN ONLY)
         // =========================================================
-        [Authorize(Policy = "RequireAdmin")]
+
         [HttpGet("security/suspicious-ips")]
         public async Task<IActionResult> GetSuspiciousIps()
         {
@@ -419,7 +417,7 @@ namespace LawAfrica.API.Controllers
         // =========================================================
         // KEEP: GET USER SECURITY DETAILS (ADMIN ONLY)
         // =========================================================
-        [Authorize(Policy = "RequireAdmin")]
+
         [HttpGet("security/users/{userId}")]
         public async Task<IActionResult> GetUserSecurity(int userId)
         {
