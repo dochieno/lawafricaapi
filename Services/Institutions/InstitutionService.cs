@@ -131,15 +131,14 @@ namespace LawAfrica.API.Services.Institutions
                     PostalCode = NullIfEmpty(req.PostalCode),
 
                     CountryId = req.CountryId,
-
-                    RegistrationNumber = NullIfEmpty(req.RegistrationNumber),
+                    
                     TaxPin = NullIfEmpty(req.TaxPin),
 
                     InstitutionType = req.InstitutionType,
 
                     // NOTE: we'll normalize below and ensure it is always set
                     InstitutionAccessCode = req.InstitutionAccessCode,
-
+                    RegistrationNumber = req.RegistrationNumber,
                     RequiresUserApproval = req.RequiresUserApproval,
                     MaxStudentSeats = req.MaxStudentSeats,
                     MaxStaffSeats = req.MaxStaffSeats,
@@ -231,12 +230,8 @@ namespace LawAfrica.API.Services.Institutions
             entity.PostalCode = NullIfEmpty(req.PostalCode);
 
             entity.CountryId = req.CountryId;
-
-            entity.RegistrationNumber = NullIfEmpty(req.RegistrationNumber);
             entity.TaxPin = NullIfEmpty(req.TaxPin);
-
             entity.InstitutionType = req.InstitutionType;
-            entity.InstitutionAccessCode = NullIfEmpty(req.InstitutionAccessCode);
             entity.RequiresUserApproval = req.RequiresUserApproval;
             entity.MaxStudentSeats = req.MaxStudentSeats;
             entity.MaxStaffSeats = req.MaxStaffSeats;
