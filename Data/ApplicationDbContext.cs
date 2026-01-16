@@ -5,6 +5,7 @@ using LawAfrica.API.Models.Institutions;
 using LawAfrica.API.Models.Payments;
 using LawAfrica.API.Models.Usage;
 using Microsoft.EntityFrameworkCore;
+using System.Linq;
 
 namespace LawAfrica.API.Data;
 
@@ -15,44 +16,59 @@ public class ApplicationDbContext : DbContext
     {
     }
 
+    // =========================================================
+    // ✅ Normalized usernames (long-term fix)
+    // - Keeps behavior consistent everywhere
+    // - Enables fast indexed lookups by NormalizedUsername
+    // =========================================================
+    public override int SaveChanges()
+    {
+        NormalizeUsers();
+        return base.SaveChanges();
+    }
+
+    public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        NormalizeUsers();
+        return base.SaveChangesAsync(cancellationToken);
+    }
+
+    private void NormalizeUsers()
+    {
+        foreach (var entry in ChangeTracker.Entries<User>()
+                     .Where(e => e.State == EntityState.Added || e.State == EntityState.Modified))
+        {
+            var u = entry.Entity;
+
+            // ✅ Trim always
+            u.Username = (u.Username ?? "").Trim();
+
+            // ✅ Consistent invariant normalization (recommended)
+            u.NormalizedUsername = u.Username.ToUpperInvariant();
+        }
+    }
+
+    // =========================================================
+    // DbSets
+    // =========================================================
     public DbSet<User> Users => Set<User>();
-
     public DbSet<Country> Countries { get; set; }
-
     public DbSet<Role> Roles { get; set; }
     public DbSet<LoginAudit> LoginAudits => Set<LoginAudit>();
 
-    //Legal Documents
     public DbSet<LegalDocument> LegalDocuments => Set<LegalDocument>();
-
-    //Legal Document Nodes
     public DbSet<LegalDocumentNode> LegalDocumentNodes => Set<LegalDocumentNode>();
-
-    //Legal Document Notes
     public DbSet<LegalDocumentNote> LegalDocumentNotes { get; set; }
-
-    //Legal Document Progress
     public DbSet<LegalDocumentProgress> LegalDocumentProgress { get; set; } = null!;
-
-    //User Library
     public DbSet<UserLibrary> UserLibraries { get; set; }
-
-    //Document Text Indexes
     public DbSet<DocumentTextIndex> DocumentTextIndexes { get; set; } = null!;
-
-    //Legal Document Annotations
     public DbSet<LegalDocumentAnnotation> LegalDocumentAnnotations { get; set; } = null!;
 
-    //Institutions
     public DbSet<Institution> Institutions { get; set; }
-
-    //Registration Intents
     public DbSet<RegistrationIntent> RegistrationIntents { get; set; }
 
-    // Audit Events
     public DbSet<AuditEvent> AuditEvents { get; set; }
     public DbSet<UsageEvent> UsageEvents { get; set; }
-
 
     public DbSet<InstitutionProductSubscription> InstitutionProductSubscriptions { get; set; }
     public DbSet<UserProductSubscription> UserProductSubscriptions { get; set; }
@@ -67,7 +83,6 @@ public class ApplicationDbContext : DbContext
     public DbSet<UserAdminPermission> UserAdminPermissions => Set<UserAdminPermission>();
     public DbSet<InstitutionSubscriptionActionRequest> InstitutionSubscriptionActionRequests { get; set; } = null!;
 
-    //Invoicing & Payments
     public DbSet<Invoice> Invoices => Set<Invoice>();
     public DbSet<InvoiceLine> InvoiceLines => Set<InvoiceLine>();
     public DbSet<InvoiceSequence> InvoiceSequences => Set<InvoiceSequence>();
@@ -81,6 +96,9 @@ public class ApplicationDbContext : DbContext
     {
         base.OnModelCreating(modelBuilder);
 
+        // =========================================================
+        // Seed
+        // =========================================================
         modelBuilder.Entity<Country>().HasData(
             new Country { Id = 1, Name = "Kenya", IsoCode = "KE", PhoneCode = "+254" },
             new Country { Id = 2, Name = "Uganda", IsoCode = "UG", PhoneCode = "+256" },
@@ -94,6 +112,9 @@ public class ApplicationDbContext : DbContext
             new Role { Id = 2, Name = "User" }
         );
 
+        // =========================================================
+        // Country
+        // =========================================================
         modelBuilder.Entity<Country>(entity =>
         {
             entity.ToTable("Countries");
@@ -107,6 +128,9 @@ public class ApplicationDbContext : DbContext
             entity.Property(c => c.PhoneCode).HasMaxLength(10);
         });
 
+        // =========================================================
+        // LoginAudit
+        // =========================================================
         modelBuilder.Entity<LoginAudit>(entity =>
         {
             entity.ToTable("LoginAudits");
@@ -117,11 +141,13 @@ public class ApplicationDbContext : DbContext
                   .HasForeignKey(x => x.UserId);
         });
 
+        // =========================================================
+        // InstitutionProductSubscription indexes
+        // =========================================================
         modelBuilder.Entity<InstitutionProductSubscription>()
             .HasIndex(x => new { x.InstitutionId, x.ContentProductId })
             .IsUnique();
 
-        // ✅ Phase 1 performance indexes for auto-status transitions
         modelBuilder.Entity<InstitutionProductSubscription>()
             .HasIndex(x => new { x.Status, x.StartDate });
 
@@ -142,7 +168,9 @@ public class ApplicationDbContext : DbContext
             .HasIndex(x => new { x.UserId, x.LegalDocumentId })
             .IsUnique();
 
-        //Content Products
+        // =========================================================
+        // ContentProductLegalDocument relations
+        // =========================================================
         modelBuilder.Entity<ContentProductLegalDocument>()
             .HasOne(x => x.ContentProduct)
             .WithMany(p => p.ProductDocuments)
@@ -164,6 +192,9 @@ public class ApplicationDbContext : DbContext
         modelBuilder.Entity<InstitutionSubscriptionAudit>()
             .HasIndex(a => new { a.SubscriptionId, a.CreatedAt });
 
+        // =========================================================
+        // LegalDocument
+        // =========================================================
         modelBuilder.Entity<LegalDocument>()
             .HasOne(d => d.Country)
             .WithMany()
@@ -204,6 +235,10 @@ public class ApplicationDbContext : DbContext
             .Property(x => x.Type)
             .HasMaxLength(20);
 
+        // =========================================================
+        // ✅ User (NormalizedUsername + index)
+        // NOTE: Keep your existing Username unique index for now.
+        // =========================================================
         modelBuilder.Entity<User>(entity =>
         {
             entity.ToTable("Users");
@@ -212,6 +247,10 @@ public class ApplicationDbContext : DbContext
             entity.Property(u => u.Username)
                   .IsRequired()
                   .HasMaxLength(100);
+
+            entity.Property(u => u.NormalizedUsername)
+                  .IsRequired()
+                  .HasMaxLength(256);
 
             entity.Property(u => u.Email)
                   .IsRequired()
@@ -228,8 +267,12 @@ public class ApplicationDbContext : DbContext
                   .IsRequired()
                   .HasMaxLength(50);
 
+            // Existing uniqueness (keep)
             entity.HasIndex(u => u.Username).IsUnique();
             entity.HasIndex(u => u.Email).IsUnique();
+
+            // ✅ Long-term: case-insensitive uniqueness + fast lookup
+            entity.HasIndex(u => u.NormalizedUsername).IsUnique();
 
             entity.HasOne(u => u.Country)
                   .WithMany(c => c.Users)
@@ -242,6 +285,9 @@ public class ApplicationDbContext : DbContext
                   .OnDelete(DeleteBehavior.Restrict);
         });
 
+        // =========================================================
+        // Institution
+        // =========================================================
         modelBuilder.Entity<Institution>(entity =>
         {
             entity.ToTable("Institutions");
@@ -274,6 +320,9 @@ public class ApplicationDbContext : DbContext
                   .ValueGeneratedOnAdd();
         });
 
+        // =========================================================
+        // ✅ RegistrationIntent (merged: you had this twice)
+        // =========================================================
         modelBuilder.Entity<RegistrationIntent>(entity =>
         {
             entity.ToTable("RegistrationIntents");
@@ -297,7 +346,21 @@ public class ApplicationDbContext : DbContext
             entity.Property(r => r.PasswordHash)
                   .IsRequired();
 
+            entity.Property(r => r.ReferenceNumber)
+                  .IsRequired()
+                  .HasMaxLength(120);
+
+            // Existing + your added constraints
             entity.HasIndex(r => r.Email).IsUnique();
+            entity.HasIndex(r => r.Username).IsUnique();
+
+            entity.HasIndex(r => r.ReferenceNumber)
+                  .IsUnique()
+                  .HasFilter("\"InstitutionId\" IS NULL");
+
+            entity.HasIndex(r => new { r.InstitutionId, r.ReferenceNumber })
+                  .IsUnique()
+                  .HasFilter("\"InstitutionId\" IS NOT NULL");
 
             entity.HasOne(r => r.Country)
                   .WithMany()
@@ -313,7 +376,9 @@ public class ApplicationDbContext : DbContext
                   .HasDefaultValueSql("timezone('utc', now())");
         });
 
-        // ✅ MOVED OUTSIDE RegistrationIntent block (IMPORTANT)
+        // =========================================================
+        // PaymentIntent (existing)
+        // =========================================================
         modelBuilder.Entity<PaymentIntent>()
             .HasOne(p => p.ApprovedByUser)
             .WithMany()
@@ -325,6 +390,24 @@ public class ApplicationDbContext : DbContext
             .IsUnique()
             .HasFilter("\"CheckoutRequestId\" IS NOT NULL");
 
+        // Additional Payment (existing)
+        modelBuilder.Entity<PaymentIntent>(b =>
+        {
+            b.HasIndex(x => new { x.Provider, x.ProviderReference })
+                .IsUnique()
+                .HasFilter("\"ProviderReference\" IS NOT NULL");
+
+            b.HasIndex(x => new { x.Provider, x.ProviderTransactionId })
+                .IsUnique()
+                .HasFilter("\"ProviderTransactionId\" IS NOT NULL");
+
+            b.HasIndex(x => x.CheckoutRequestId);
+            b.HasIndex(x => x.InvoiceId);
+        });
+
+        // =========================================================
+        // InstitutionMembership
+        // =========================================================
         modelBuilder.Entity<InstitutionMembership>()
             .HasOne(m => m.User)
             .WithMany()
@@ -341,7 +424,6 @@ public class ApplicationDbContext : DbContext
             .HasIndex(m => new { m.UserId, m.InstitutionId })
             .IsUnique();
 
-        // ✅ ADD: ReferenceNumber must be unique per institution (prevents duplicate student/employee numbers)
         modelBuilder.Entity<InstitutionMembership>()
             .HasIndex(m => new { m.InstitutionId, m.ReferenceNumber })
             .IsUnique();
@@ -352,6 +434,9 @@ public class ApplicationDbContext : DbContext
             .HasForeignKey(m => m.ApprovedByUserId)
             .OnDelete(DeleteBehavior.Restrict);
 
+        // =========================================================
+        // Admin permissions
+        // =========================================================
         modelBuilder.Entity<AdminPermission>(entity =>
         {
             entity.ToTable("AdminPermissions");
@@ -385,7 +470,6 @@ public class ApplicationDbContext : DbContext
         modelBuilder.Entity<InstitutionSubscriptionActionRequest>(entity =>
         {
             entity.ToTable("InstitutionSubscriptionActionRequests");
-
             entity.HasKey(x => x.Id);
 
             entity.HasOne(x => x.Subscription)
@@ -397,73 +481,21 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(x => new { x.Status, x.CreatedAt });
         });
 
+        // =========================================================
+        // UserPresence
+        // =========================================================
         modelBuilder.Entity<UserPresence>()
-                    .HasKey(x => x.UserId);
+            .HasKey(x => x.UserId);
 
         modelBuilder.Entity<UserPresence>()
-                    .HasOne(x => x.User)
-                    .WithMany()
-                    .HasForeignKey(x => x.UserId)
-                    .OnDelete(DeleteBehavior.Cascade);
+            .HasOne(x => x.User)
+            .WithMany()
+            .HasForeignKey(x => x.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
 
-
-        modelBuilder.Entity<RegistrationIntent>(entity =>
-        {
-            entity.ToTable("RegistrationIntents");
-
-            entity.Property(r => r.Email)
-                  .IsRequired()
-                  .HasMaxLength(255);
-
-            entity.Property(r => r.Username)
-                  .IsRequired()
-                  .HasMaxLength(100);
-
-            // ✅ ADD: enforce username uniqueness at intent stage too
-            entity.HasIndex(r => r.Username).IsUnique();
-
-            // ✅ ADD: ReferenceNumber is mandatory (your controller already enforces it)
-            entity.Property(r => r.ReferenceNumber)
-                  .IsRequired()
-                  .HasMaxLength(120);
-
-            // ✅ ADD: Unique reference numbers for PUBLIC (InstitutionId is NULL)
-            entity.HasIndex(r => r.ReferenceNumber)
-                  .IsUnique()
-                  .HasFilter("\"InstitutionId\" IS NULL");
-
-            // ✅ ADD: Unique reference numbers PER INSTITUTION (InstitutionId is NOT NULL)
-            entity.HasIndex(r => new { r.InstitutionId, r.ReferenceNumber })
-                  .IsUnique()
-                  .HasFilter("\"InstitutionId\" IS NOT NULL");
-
-            entity.Property(r => r.FirstName)
-                  .IsRequired()
-                  .HasMaxLength(100);
-
-            entity.Property(r => r.LastName)
-                  .IsRequired()
-                  .HasMaxLength(100);
-
-            entity.Property(r => r.PasswordHash)
-                  .IsRequired();
-
-            entity.HasIndex(r => r.Email).IsUnique();
-
-            entity.HasOne(r => r.Country)
-                  .WithMany()
-                  .HasForeignKey(r => r.CountryId)
-                  .OnDelete(DeleteBehavior.Restrict);
-
-            entity.HasOne(r => r.Institution)
-                  .WithMany()
-                  .HasForeignKey(r => r.InstitutionId)
-                  .OnDelete(DeleteBehavior.Restrict);
-
-            entity.Property(r => r.CreatedAt)
-                  .HasDefaultValueSql("timezone('utc', now())");
-        });
-
+        // =========================================================
+        // UsageEvent
+        // =========================================================
         modelBuilder.Entity<UsageEvent>(entity =>
         {
             entity.ToTable("UsageEvents");
@@ -480,24 +512,9 @@ public class ApplicationDbContext : DbContext
             entity.Property(x => x.UserAgent).HasMaxLength(400);
         });
 
-        //Additional Payment
-        modelBuilder.Entity<PaymentIntent>(b =>
-        {
-            // ✅ Paystack / provider-agnostic idempotency & matching
-            b.HasIndex(x => new { x.Provider, x.ProviderReference })
-                .IsUnique()
-                .HasFilter("\"ProviderReference\" IS NOT NULL");
-
-            b.HasIndex(x => new { x.Provider, x.ProviderTransactionId })
-                .IsUnique()
-                .HasFilter("\"ProviderTransactionId\" IS NOT NULL");
-
-            // Optional: you already query by Mpesa checkout request id
-            b.HasIndex(x => x.CheckoutRequestId);
-        });
-
-
-        //Invoicing
+        // =========================================================
+        // Invoicing
+        // =========================================================
         modelBuilder.Entity<Invoice>(b =>
         {
             b.HasIndex(x => x.InvoiceNumber).IsUnique();
@@ -508,14 +525,11 @@ public class ApplicationDbContext : DbContext
             b.Property(x => x.Currency).HasMaxLength(10);
             b.Property(x => x.ExternalInvoiceNumber).HasMaxLength(100);
             b.Property(x => x.Notes).HasMaxLength(500);
-
-
         });
+
         modelBuilder.Entity<Invoice>()
-                    .Property(x => x.CustomerName)
-                    .HasMaxLength(200);
-
-
+            .Property(x => x.CustomerName)
+            .HasMaxLength(200);
 
         modelBuilder.Entity<InvoiceLine>(b =>
         {
@@ -529,12 +543,9 @@ public class ApplicationDbContext : DbContext
             b.HasIndex(x => x.Year).IsUnique();
         });
 
-        modelBuilder.Entity<PaymentIntent>(b =>
-        {
-            b.HasIndex(x => x.InvoiceId);
-        });
-
-
+        // =========================================================
+        // Payment webhooks / reconciliation
+        // =========================================================
         modelBuilder.Entity<PaymentProviderWebhookEvent>(b =>
         {
             b.HasIndex(x => new { x.Provider, x.DedupeHash }).IsUnique();
@@ -576,8 +587,6 @@ public class ApplicationDbContext : DbContext
                 .HasForeignKey(x => x.RunId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
-
-
 
         // Ensure EF picks up these entities (optional but harmless)
         modelBuilder.Entity<InstitutionProductSubscription>();

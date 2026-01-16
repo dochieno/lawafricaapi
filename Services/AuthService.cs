@@ -28,6 +28,7 @@ namespace LawAfrica.API.Services
         private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly byte[] _keyBytes;
         private readonly SigningCredentials _signingCredentials;
+        private static readonly Regex UsernameRegex = new(@"^[A-Za-z0-9._-]+$", RegexOptions.Compiled);
 
         private const int MAX_FAILED_ATTEMPTS = 2;
         private static readonly TimeSpan LOCKOUT_DURATION = TimeSpan.FromMinutes(15);
@@ -164,31 +165,62 @@ namespace LawAfrica.API.Services
         // =========================================================
         // Step 1: Register new user
         // =========================================================
+
         public async Task<UserResponse?> RegisterAsync(RegisterRequest request)
         {
-            if (await _db.Users.AnyAsync(u => u.Username == request.Username))
+            if (request == null) return null;
+
+            // ✅ normalize inputs early
+            var username = (request.Username ?? "").Trim();
+            var normalizedUsername = username.ToUpperInvariant();
+            if (IsValid(request.Username))
+                throw new ArgumentException(
+                    "Username may contain letters and dots only (e.g. d.ochieno). Numbers and spaces are not allowed."
+                );
+
+
+            var email = (request.Email ?? "").Trim();
+            var normalizedEmail = email; // keep as-is; DB uniqueness handles casing depending on collation
+
+            var password = request.Password ?? "";
+
+            if (string.IsNullOrWhiteSpace(username)) return null;
+            if (string.IsNullOrWhiteSpace(password)) return null;
+
+            if (!IsStrongPassword(password))
                 return null;
 
-            if (!string.IsNullOrWhiteSpace(request.Email) &&
-                await _db.Users.AnyAsync(u => u.Email == request.Email))
+            var usernameTaken = await _db.Users.AnyAsync(u =>
+                (u.NormalizedUsername != null && u.NormalizedUsername == normalizedUsername) ||
+                (u.NormalizedUsername == null && u.Username.ToUpper() == normalizedUsername));
+
+            if (usernameTaken)
                 return null;
 
-            if (string.IsNullOrWhiteSpace(request.Password))
-                return null;
+            // ✅ Email uniqueness (trimmed). Keep your logic but normalize trimming.
+            if (!string.IsNullOrWhiteSpace(normalizedEmail))
+            {
+                var emailTaken = await _db.Users.AnyAsync(u => u.Email == normalizedEmail);
+                if (emailTaken)
+                    return null;
+            }
 
             bool isFirstUser = !await _db.Users.AnyAsync();
 
             var user = new User
             {
-                Username = request.Username,
-                Email = request.Email,
+                Username = username,                 // trimmed
+                NormalizedUsername = normalizedUsername, // ✅ set explicitly (also set by SaveChanges, but safe)
+                Email = normalizedEmail,
                 PhoneNumber = request.PhoneNumber,
                 FirstName = request.FirstName,
                 LastName = request.LastName,
                 CountryId = request.CountryId,
                 City = request.City,
+
                 Role = isFirstUser ? "Admin" : "User",
                 RoleId = isFirstUser ? 1 : 2,
+
                 IsActive = true,
                 IsEmailVerified = false,
 
@@ -198,7 +230,7 @@ namespace LawAfrica.API.Services
                 CreatedAt = DateTime.UtcNow
             };
 
-            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
+            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(password);
 
             user.EmailVerificationToken = GenerateVerificationToken();
             user.EmailVerificationTokenExpiry = DateTime.UtcNow.AddHours(24);
@@ -218,10 +250,12 @@ namespace LawAfrica.API.Services
             return ToUserResponse(user);
         }
 
-        // =========================================================
-        // ✅ Send verification email for ANY user (used by registration intent flow)
-        // =========================================================
-        public async Task<bool> SendEmailVerificationAsync(int userId)
+
+
+    // =========================================================
+    // ✅ Send verification email for ANY user (used by registration intent flow)
+    // =========================================================
+    public async Task<bool> SendEmailVerificationAsync(int userId)
         {
             var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId);
             if (user == null) return false;
@@ -1054,6 +1088,35 @@ namespace LawAfrica.API.Services
                 .Replace("+", "-")
                 .Replace("/", "_")
                 .Replace("=", "");
+        }
+
+        // =========================
+        // Helpers
+        // =========================
+        private static bool IsStrongPassword(string password)
+        {
+            if (string.IsNullOrWhiteSpace(password)) return false;
+            if (password.Length < 8) return false;
+
+            // at least one upper, one lower, one digit, one special
+            bool hasUpper = password.Any(char.IsUpper);
+            bool hasLower = password.Any(char.IsLower);
+            bool hasDigit = password.Any(char.IsDigit);
+            bool hasSpecial = password.Any(ch => !char.IsLetterOrDigit(ch));
+
+            return hasUpper && hasLower && hasDigit && hasSpecial;
+        }
+
+        public static bool IsValid(string? username)
+        {
+            if (string.IsNullOrWhiteSpace(username))
+                return false;
+
+            // No leading/trailing whitespace
+            if (!string.Equals(username, username.Trim(), StringComparison.Ordinal))
+                return false;
+
+            return UsernameRegex.IsMatch(username);
         }
     }
 }
