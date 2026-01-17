@@ -50,7 +50,7 @@ namespace LawAfrica.API.Controllers
         }
 
         // ✅ If your frontend calls it as POST, this works too
-        [Authorize]
+        [AllowAnonymous]
         [HttpPost("return-visit")]
         public IActionResult ReturnVisitPost([FromBody] ReturnVisitRequest req)
         {
@@ -66,7 +66,7 @@ namespace LawAfrica.API.Controllers
 
         // ✅ Optional but HIGHLY recommended:
         // If webhook is delayed, the return page can "confirm" payment server-side and proceed.
-        [Authorize]
+        [AllowAnonymous]
         [HttpPost("confirm")]
         public async Task<IActionResult> Confirm([FromBody] ConfirmPaystackRequest req, CancellationToken ct)
         {
@@ -75,24 +75,39 @@ namespace LawAfrica.API.Controllers
                 return BadRequest("Reference is required.");
 
             var intent = await _db.PaymentIntents
-                .FirstOrDefaultAsync(x => x.Provider == PaymentProvider.Paystack && x.ProviderReference == reference, ct);
+                .FirstOrDefaultAsync(x =>
+                    x.Provider == PaymentProvider.Paystack &&
+                    x.ProviderReference == reference, ct);
 
             if (intent == null)
                 return NotFound("PaymentIntent not found.");
 
-            // ✅ Security: ensure current user owns the intent (prevents hijacking)
-            var userId = User.GetUserId();
-            if (intent.UserId.HasValue && intent.UserId.Value != userId)
-                return Forbid();
-
-            // If already success, just finalize idempotently
-            if (intent.Status == PaymentStatus.Success)
+            // ✅ If the caller IS authenticated, enforce ownership (prevents hijacking)
+            if (User?.Identity?.IsAuthenticated == true)
             {
-                await _finalizer.FinalizeIfNeededAsync(intent.Id);
-                return Ok(new { ok = true, status = intent.Status.ToString(), paymentIntentId = intent.Id });
+                var userId = User.GetUserId();
+                if (intent.UserId.HasValue && intent.UserId.Value != userId)
+                    return Forbid();
             }
 
-            // Otherwise verify now (same truth as webhook)
+            // ✅ If already success, finalize+fulfill idempotently
+            if (intent.Status == PaymentStatus.Success)
+            {
+                if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase)
+                    await _legalDocFulfillment.FulfillAsync(intent);
+
+                await _finalizer.FinalizeIfNeededAsync(intent.Id);
+
+                return Ok(new
+                {
+                    ok = true,
+                    status = intent.Status.ToString(),
+                    paymentIntentId = intent.Id,
+                    legalDocumentId = intent.LegalDocumentId
+                });
+            }
+
+            // Otherwise verify now (server-to-server truth)
             var verify = await _paystack.VerifyTransactionAsync(reference, ct);
 
             if (!verify.IsSuccessful)
@@ -116,14 +131,20 @@ namespace LawAfrica.API.Controllers
 
             await _db.SaveChangesAsync(ct);
 
-            // Fulfill legal doc purchase (same as webhook)
+            // Fulfill legal doc purchase
             if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase)
                 await _legalDocFulfillment.FulfillAsync(intent);
 
             // Finalize
             await _finalizer.FinalizeIfNeededAsync(intent.Id);
 
-            return Ok(new { ok = true, status = intent.Status.ToString(), paymentIntentId = intent.Id });
+            return Ok(new
+            {
+                ok = true,
+                status = intent.Status.ToString(),
+                paymentIntentId = intent.Id,
+                legalDocumentId = intent.LegalDocumentId
+            });
         }
     }
 }
