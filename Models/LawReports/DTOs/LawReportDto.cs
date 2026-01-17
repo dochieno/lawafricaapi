@@ -1,4 +1,5 @@
-﻿using LawAfrica.API.Models.Reports;
+﻿using LawAfrica.API.Models;
+using LawAfrica.API.Models.Reports;
 
 namespace LawAfrica.API.DTOs.Reports
 {
@@ -22,7 +23,15 @@ namespace LawAfrica.API.DTOs.Reports
 
         public string ContentText { get; set; } = "";
 
-        // Helpful for catalog UI
         public string Title { get; set; } = "";
+
+        // ✅ Needed
+        public int CountryId { get; set; }
+
+        // ✅ New
+        public ReportService Service { get; set; }
+
+        // ✅ Always LLR Services
+        public LegalDocumentCategory Category => LegalDocumentCategory.LLRServices;
     }
 }

@@ -1,10 +1,19 @@
-﻿using System.ComponentModel.DataAnnotations;
+﻿using LawAfrica.API.Models;
 using LawAfrica.API.Models.Reports;
+using System.ComponentModel.DataAnnotations;
 
 namespace LawAfrica.API.DTOs.Reports
 {
     public class LawReportUpsertDto : IValidatableObject
     {
+        // ✅ Required
+        [Range(1, int.MaxValue)]
+        public int CountryId { get; set; }
+
+        // ✅ New required
+        [Required]
+        public ReportService Service { get; set; } = ReportService.LawAfricaLawReports_LLR;
+
         [Required, MaxLength(30)]
         public string ReportNumber { get; set; } = string.Empty;
 
@@ -18,10 +27,10 @@ namespace LawAfrica.API.DTOs.Reports
         public string? Citation { get; set; }
 
         [Required]
-        public ReportDecisionType DecisionType { get; set; } // must be Judgment/Ruling (enum enforces)
+        public ReportDecisionType DecisionType { get; set; }
 
         [Required]
-        public ReportCaseType CaseType { get; set; } // must be the allowed values (enum enforces)
+        public ReportCaseType CaseType { get; set; }
 
         [MaxLength(200)]
         public string? Court { get; set; }
@@ -37,10 +46,18 @@ namespace LawAfrica.API.DTOs.Reports
         [Required]
         public string ContentText { get; set; } = string.Empty;
 
+        // ✅ Read-only is fine; just NEVER assign to it in controller
+        public LegalDocumentCategory Category => LegalDocumentCategory.LLRServices;
+
         public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
         {
+            if (CountryId <= 0)
+                yield return new ValidationResult("CountryId is required.", new[] { nameof(CountryId) });
+
             if (!ReportValidation.IsValidReportNumber(ReportNumber))
-                yield return new ValidationResult("ReportNumber must start with 3 letters followed by digits, e.g. CAR353.", new[] { nameof(ReportNumber) });
+                yield return new ValidationResult(
+                    "ReportNumber must start with 3 letters followed by digits, e.g. CAR353.",
+                    new[] { nameof(ReportNumber) });
 
             if (string.IsNullOrWhiteSpace(ContentText))
                 yield return new ValidationResult("ContentText is required.", new[] { nameof(ContentText) });

@@ -6,7 +6,13 @@ namespace LawAfrica.API.Models.Reports
     public enum ReportDecisionType
     {
         Judgment = 1,
-        Ruling = 2
+        Ruling = 2,
+        Award = 3,
+        AwardByConsent = 4,
+        NoticeofMotion = 5,
+        InterpretationofAwrd = 6,
+        Order = 7,
+        InterpretationofAmendedOrder = 8
     }
 
     public enum ReportCaseType
@@ -27,19 +33,25 @@ namespace LawAfrica.API.Models.Reports
         public int LegalDocumentId { get; set; }
         public LegalDocument LegalDocument { get; set; } = null!;
 
+        // ✅ Required for mapping to LegalDocument
+        public int CountryId { get; set; }
+
+        // ✅ New
+        public ReportService Service { get; set; } = ReportService.LawAfricaLawReports_LLR;
+
         // -------------------
         // DEDUPE / IDENTITY
         // -------------------
         [MaxLength(120)]
-        public string? Citation { get; set; } // optional but preferred if available
+        public string? Citation { get; set; }
 
         [Required, MaxLength(30)]
-        public string ReportNumber { get; set; } = string.Empty; // e.g. CAR353
+        public string ReportNumber { get; set; } = string.Empty;
 
         public int Year { get; set; }
 
         [MaxLength(120)]
-        public string? CaseNumber { get; set; } // e.g. Petition 12 of 2020
+        public string? CaseNumber { get; set; }
 
         // -------------------
         // CLASSIFICATION
@@ -54,10 +66,10 @@ namespace LawAfrica.API.Models.Reports
         public string? Court { get; set; }
 
         [MaxLength(200)]
-        public string? Parties { get; set; } // "A v B"
+        public string? Parties { get; set; }
 
-        [MaxLength(500)]
-        public string? Judges { get; set; } // single text field, split in UI by newline/semicolon
+        [MaxLength(2000)]
+        public string? Judges { get; set; }
 
         public DateTime? DecisionDate { get; set; }
 
