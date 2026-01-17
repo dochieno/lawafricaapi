@@ -68,54 +68,69 @@ namespace LawAfrica.API.Controllers
         {
             q = (q ?? "").Trim();
 
-            var query = _db.LawReports
-                .AsNoTracking()
-                .Include(x => x.LegalDocument)
-                .AsQueryable();
-
-            if (!string.IsNullOrWhiteSpace(q))
+            try
             {
-                query = query.Where(r =>
-                    (r.ReportNumber != null && r.ReportNumber.Contains(q)) ||
-                    (r.Citation != null && r.Citation.Contains(q)) ||
-                    (r.CaseNumber != null && r.CaseNumber.Contains(q)) ||
-                    (r.Parties != null && r.Parties.Contains(q)) ||
-                    (r.Court != null && r.Court.Contains(q)) ||
-                    (r.Judges != null && r.Judges.Contains(q)) ||
-                    (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.Contains(q))
-                );
-            }
+                var query = _db.LawReports
+                    .AsNoTracking()
+                    .Include(x => x.LegalDocument)
+                    .AsQueryable();
 
-            var list = await query
-                .OrderByDescending(r => r.UpdatedAt ?? r.CreatedAt)
-                .ThenByDescending(r => r.Id)
-                .Select(r => new LawReportDto
+                if (!string.IsNullOrWhiteSpace(q))
                 {
-                    Id = r.Id,
-                    LegalDocumentId = r.LegalDocumentId,
+                    query = query.Where(r =>
+                        (r.ReportNumber != null && r.ReportNumber.Contains(q)) ||
+                        (r.Citation != null && r.Citation.Contains(q)) ||
+                        (r.CaseNumber != null && r.CaseNumber.Contains(q)) ||
+                        (r.Parties != null && r.Parties.Contains(q)) ||
+                        (r.Court != null && r.Court.Contains(q)) ||
+                        (r.Judges != null && r.Judges.Contains(q)) ||
+                        (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.Contains(q))
+                    );
+                }
 
-                    CountryId = r.CountryId,
-                    Service = r.Service,
+                var list = await query
+                    .OrderByDescending(r => r.UpdatedAt ?? r.CreatedAt)
+                    .ThenByDescending(r => r.Id)
+                    .Select(r => new LawReportDto
+                    {
+                        Id = r.Id,
+                        LegalDocumentId = r.LegalDocumentId,
 
-                    ReportNumber = r.ReportNumber,
-                    Year = r.Year,
-                    CaseNumber = r.CaseNumber,
-                    Citation = r.Citation,
-                    DecisionType = r.DecisionType,
-                    CaseType = r.CaseType,
-                    Court = r.Court,
-                    Parties = r.Parties,
-                    Judges = r.Judges,
-                    DecisionDate = r.DecisionDate,
+                        CountryId = r.CountryId,
+                        Service = r.Service,
 
-                    // keep list light
-                    ContentText = "",
-                    Title = r.LegalDocument != null ? r.LegalDocument.Title : ""
-                })
-                .ToListAsync();
+                        ReportNumber = r.ReportNumber,
+                        Year = r.Year,
+                        CaseNumber = r.CaseNumber,
+                        Citation = r.Citation,
+                        DecisionType = r.DecisionType,
+                        CaseType = r.CaseType,
+                        Court = r.Court,
+                        Parties = r.Parties,
+                        Judges = r.Judges,
+                        DecisionDate = r.DecisionDate,
 
-            return Ok(list);
+                        ContentText = "",
+
+                        // ✅ avoid NullReference
+                        Title = r.LegalDocument != null ? r.LegalDocument.Title : ""
+                    })
+                    .ToListAsync();
+
+                return Ok(list);
+            }
+            catch (Exception ex)
+            {
+                // Return something you can actually read on the frontend
+                return StatusCode(500, new
+                {
+                    message = "Failed to load law reports (admin).",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
         }
+
 
         // -------------------------
         // CREATE
