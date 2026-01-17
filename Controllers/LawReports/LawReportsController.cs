@@ -54,8 +54,72 @@ namespace LawAfrica.API.Controllers
             };
         }
 
-        // ✅ Admin only for writing (adjust to your permission system)
+        // ...
+
+        // -------------------------
+        // Report Content (by LegalDocumentId)
+        // -------------------------
+
+        // ✅ Admin page will call this using LegalDocumentId
         [Authorize(Roles = "Admin")]
+    [HttpGet("by-document/{legalDocumentId:int}/content")]
+    public async Task<ActionResult<LawReportContentDto>> GetContentByLegalDocumentId(int legalDocumentId)
+    {
+        var r = await _db.LawReports
+            .Include(x => x.LegalDocument)
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.LegalDocumentId == legalDocumentId);
+
+        if (r == null) return NotFound(new { message = "LawReport not found for this LegalDocumentId." });
+
+        // safety: ensure it's actually a Report kind
+        if (r.LegalDocument == null || r.LegalDocument.Kind != LegalDocumentKind.Report)
+            return BadRequest(new { message = "LegalDocument is not of kind Report." });
+
+        return Ok(new LawReportContentDto
+        {
+            LawReportId = r.Id,
+            LegalDocumentId = r.LegalDocumentId,
+            Title = r.LegalDocument.Title,
+            ContentText = r.ContentText ?? "",
+            UpdatedAt = r.UpdatedAt
+        });
+    }
+
+    // ✅ UPSERT (practically Update) report content by LegalDocumentId
+    // If the LawReport row is missing, we return 404 because we can't create
+    // a valid LawReport without required metadata (ReportNumber/Year/etc).
+    [Authorize(Roles = "Admin")]
+    [HttpPut("by-document/{legalDocumentId:int}/content")]
+    public async Task<IActionResult> UpsertContentByLegalDocumentId(
+        int legalDocumentId,
+        [FromBody] LawReportContentUpsertDto dto)
+    {
+        if (!ModelState.IsValid) return ValidationProblem(ModelState);
+
+        var r = await _db.LawReports
+            .Include(x => x.LegalDocument)
+            .FirstOrDefaultAsync(x => x.LegalDocumentId == legalDocumentId);
+
+        if (r == null)
+            return NotFound(new { message = "LawReport not found for this LegalDocumentId." });
+
+        if (r.LegalDocument == null || r.LegalDocument.Kind != LegalDocumentKind.Report)
+            return BadRequest(new { message = "LegalDocument is not of kind Report." });
+
+        r.ContentText = (dto.ContentText ?? "").Trim();
+        r.UpdatedAt = DateTime.UtcNow;
+
+        // optional: also bump parent UpdatedAt
+        r.LegalDocument.UpdatedAt = DateTime.UtcNow;
+
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+
+    // ✅ Admin only for writing (adjust to your permission system)
+    [Authorize(Roles = "Admin")]
         [HttpPost]
         public async Task<ActionResult<LawReportDto>> Create([FromBody] LawReportUpsertDto dto)
         {
