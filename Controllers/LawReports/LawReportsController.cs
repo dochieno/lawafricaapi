@@ -62,29 +62,29 @@ namespace LawAfrica.API.Controllers
 
         // ✅ Admin page will call this using LegalDocumentId
         [Authorize(Roles = "Admin")]
-    [HttpGet("by-document/{legalDocumentId:int}/content")]
-    public async Task<ActionResult<LawReportContentDto>> GetContentByLegalDocumentId(int legalDocumentId)
-    {
-        var r = await _db.LawReports
-            .Include(x => x.LegalDocument)
-            .AsNoTracking()
-            .FirstOrDefaultAsync(x => x.LegalDocumentId == legalDocumentId);
-
-        if (r == null) return NotFound(new { message = "LawReport not found for this LegalDocumentId." });
-
-        // safety: ensure it's actually a Report kind
-        if (r.LegalDocument == null || r.LegalDocument.Kind != LegalDocumentKind.Report)
-            return BadRequest(new { message = "LegalDocument is not of kind Report." });
-
-        return Ok(new LawReportContentDto
+        [HttpGet("by-document/{legalDocumentId:int}/content")]
+        public async Task<ActionResult<LawReportContentDto>> GetContentByLegalDocumentId(int legalDocumentId)
         {
-            LawReportId = r.Id,
-            LegalDocumentId = r.LegalDocumentId,
-            Title = r.LegalDocument.Title,
-            ContentText = r.ContentText ?? "",
-            UpdatedAt = r.UpdatedAt
-        });
-    }
+            var r = await _db.LawReports
+                .Include(x => x.LegalDocument)
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.LegalDocumentId == legalDocumentId);
+
+            if (r == null) return NotFound(new { message = "LawReport not found for this LegalDocumentId." });
+
+            // safety: ensure it's actually a Report kind
+            if (r.LegalDocument == null || r.LegalDocument.Kind != LegalDocumentKind.Report)
+                return BadRequest(new { message = "LegalDocument is not of kind Report." });
+
+            return Ok(new LawReportContentDto
+            {
+                LawReportId = r.Id,
+                LegalDocumentId = r.LegalDocumentId,
+                Title = r.LegalDocument.Title,
+                ContentText = r.ContentText ?? "",
+                UpdatedAt = r.UpdatedAt
+            });
+        }
 
     // ✅ UPSERT (practically Update) report content by LegalDocumentId
     // If the LawReport row is missing, we return 404 because we can't create
@@ -119,7 +119,7 @@ namespace LawAfrica.API.Controllers
 
 
     // ✅ Admin only for writing (adjust to your permission system)
-    [Authorize(Roles = "Admin")]
+        [Authorize(Roles = "Admin")]
         [HttpPost]
         public async Task<ActionResult<LawReportDto>> Create([FromBody] LawReportUpsertDto dto)
         {
@@ -230,6 +230,58 @@ namespace LawAfrica.API.Controllers
             await _db.SaveChangesAsync();
             return NoContent();
         }
+
+        // ✅ Admin list (used by AdminLLRServices UI)
+        [Authorize(Roles = "Admin")]
+        [HttpGet("admin")]
+        public async Task<ActionResult<List<LawReportDto>>> AdminList([FromQuery] string? q = null)
+        {
+            q = (q ?? "").Trim();
+
+            var query = _db.LawReports
+                .AsNoTracking()
+                .Include(x => x.LegalDocument)
+                .AsQueryable();
+
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                // simple contains search (safe; optimize later)
+                query = query.Where(r =>
+                    (r.ReportNumber != null && r.ReportNumber.Contains(q)) ||
+                    (r.Citation != null && r.Citation.Contains(q)) ||
+                    (r.CaseNumber != null && r.CaseNumber.Contains(q)) ||
+                    (r.Parties != null && r.Parties.Contains(q)) ||
+                    (r.Court != null && r.Court.Contains(q)) ||
+                    (r.Judges != null && r.Judges.Contains(q)) ||
+                    (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.Contains(q))
+                );
+            }
+
+            var list = await query
+                .OrderByDescending(r => r.UpdatedAt ?? r.CreatedAt)
+                .ThenByDescending(r => r.Id)
+                .Select(r => new LawReportDto
+                {
+                    Id = r.Id,
+                    LegalDocumentId = r.LegalDocumentId,
+                    ReportNumber = r.ReportNumber,
+                    Year = r.Year,
+                    CaseNumber = r.CaseNumber,
+                    Citation = r.Citation,
+                    DecisionType = r.DecisionType,
+                    CaseType = r.CaseType,
+                    Court = r.Court,
+                    Parties = r.Parties,
+                    Judges = r.Judges,
+                    DecisionDate = r.DecisionDate,
+                    ContentText = null!, // ✅ keep list light (Admin UI loads full report on Edit/Content)
+                    Title = r.LegalDocument.Title
+                })
+                .ToListAsync();
+
+            return Ok(list);
+        }
+
 
         [Authorize(Roles = "Admin")]
         [HttpDelete("{id:int}")]
