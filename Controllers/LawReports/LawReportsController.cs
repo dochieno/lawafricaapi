@@ -7,7 +7,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.ComponentModel.DataAnnotations;
-using System.Xml.Linq;
 
 namespace LawAfrica.API.Controllers
 {
@@ -35,6 +34,9 @@ namespace LawAfrica.API.Controllers
 
             if (r == null) return NotFound();
 
+            // ✅ harden against null parent (should not happen if FK is enforced, but safe)
+            var title = r.LegalDocument?.Title ?? "";
+
             return new LawReportDto
             {
                 Id = r.Id,
@@ -49,18 +51,15 @@ namespace LawAfrica.API.Controllers
                 Parties = r.Parties,
                 Judges = r.Judges,
                 DecisionDate = r.DecisionDate,
-                ContentText = r.ContentText,
-                Title = r.LegalDocument.Title
+                ContentText = r.ContentText ?? "",
+                Title = title
             };
         }
-
-        // ...
 
         // -------------------------
         // Report Content (by LegalDocumentId)
         // -------------------------
 
-        // ✅ Admin page will call this using LegalDocumentId
         [Authorize(Roles = "Admin")]
         [HttpGet("by-document/{legalDocumentId:int}/content")]
         public async Task<ActionResult<LawReportContentDto>> GetContentByLegalDocumentId(int legalDocumentId)
@@ -72,7 +71,6 @@ namespace LawAfrica.API.Controllers
 
             if (r == null) return NotFound(new { message = "LawReport not found for this LegalDocumentId." });
 
-            // safety: ensure it's actually a Report kind
             if (r.LegalDocument == null || r.LegalDocument.Kind != LegalDocumentKind.Report)
                 return BadRequest(new { message = "LegalDocument is not of kind Report." });
 
@@ -80,57 +78,53 @@ namespace LawAfrica.API.Controllers
             {
                 LawReportId = r.Id,
                 LegalDocumentId = r.LegalDocumentId,
-                Title = r.LegalDocument.Title,
+                Title = r.LegalDocument.Title ?? "",
                 ContentText = r.ContentText ?? "",
                 UpdatedAt = r.UpdatedAt
             });
         }
 
-    // ✅ UPSERT (practically Update) report content by LegalDocumentId
-    // If the LawReport row is missing, we return 404 because we can't create
-    // a valid LawReport without required metadata (ReportNumber/Year/etc).
-    [Authorize(Roles = "Admin")]
-    [HttpPut("by-document/{legalDocumentId:int}/content")]
-    public async Task<IActionResult> UpsertContentByLegalDocumentId(
-        int legalDocumentId,
-        [FromBody] LawReportContentUpsertDto dto)
-    {
-        if (!ModelState.IsValid) return ValidationProblem(ModelState);
+        [Authorize(Roles = "Admin")]
+        [HttpPut("by-document/{legalDocumentId:int}/content")]
+        public async Task<IActionResult> UpsertContentByLegalDocumentId(
+            int legalDocumentId,
+            [FromBody] LawReportContentUpsertDto dto)
+        {
+            if (!ModelState.IsValid) return ValidationProblem(ModelState);
 
-        var r = await _db.LawReports
-            .Include(x => x.LegalDocument)
-            .FirstOrDefaultAsync(x => x.LegalDocumentId == legalDocumentId);
+            var r = await _db.LawReports
+                .Include(x => x.LegalDocument)
+                .FirstOrDefaultAsync(x => x.LegalDocumentId == legalDocumentId);
 
-        if (r == null)
-            return NotFound(new { message = "LawReport not found for this LegalDocumentId." });
+            if (r == null)
+                return NotFound(new { message = "LawReport not found for this LegalDocumentId." });
 
-        if (r.LegalDocument == null || r.LegalDocument.Kind != LegalDocumentKind.Report)
-            return BadRequest(new { message = "LegalDocument is not of kind Report." });
+            if (r.LegalDocument == null || r.LegalDocument.Kind != LegalDocumentKind.Report)
+                return BadRequest(new { message = "LegalDocument is not of kind Report." });
 
-        r.ContentText = (dto.ContentText ?? "").Trim();
-        r.UpdatedAt = DateTime.UtcNow;
+            r.ContentText = (dto.ContentText ?? "").Trim();
+            r.UpdatedAt = DateTime.UtcNow;
 
-        // optional: also bump parent UpdatedAt
-        r.LegalDocument.UpdatedAt = DateTime.UtcNow;
+            r.LegalDocument.UpdatedAt = DateTime.UtcNow;
 
-        await _db.SaveChangesAsync();
-        return NoContent();
-    }
+            await _db.SaveChangesAsync();
+            return NoContent();
+        }
 
+        // -------------------------
+        // CREATE / UPDATE / DELETE
+        // -------------------------
 
-    // ✅ Admin only for writing (adjust to your permission system)
         [Authorize(Roles = "Admin")]
         [HttpPost]
         public async Task<ActionResult<LawReportDto>> Create([FromBody] LawReportUpsertDto dto)
         {
             if (!ModelState.IsValid) return ValidationProblem(ModelState);
 
-            // Dedupe check
             var existing = await FindExistingByDedupe(dto);
             if (existing != null)
                 return Conflict(new { message = "Duplicate report exists.", existingLawReportId = existing.Id });
 
-            // Create LegalDocument parent
             var title = BuildReportTitle(dto);
 
             var doc = new LegalDocument
@@ -138,15 +132,11 @@ namespace LawAfrica.API.Controllers
                 Title = title,
                 Description = $"Law Report {dto.ReportNumber} ({dto.Year})",
                 Kind = LegalDocumentKind.Report,
-
-                // Reports are text-based; keep FilePath empty
                 FilePath = "",
                 FileType = "report",
                 FileSizeBytes = 0,
                 PageCount = null,
                 ChapterCount = null,
-
-                // business flags
                 IsPremium = true,
                 Status = LegalDocumentStatus.Published,
                 PublishedAt = DateTime.UtcNow
@@ -168,7 +158,7 @@ namespace LawAfrica.API.Controllers
                 Parties = TrimOrNull(dto.Parties),
                 Judges = TrimOrNull(dto.Judges),
                 DecisionDate = dto.DecisionDate,
-                ContentText = dto.ContentText
+                ContentText = dto.ContentText ?? ""
             };
 
             _db.LawReports.Add(report);
@@ -188,8 +178,8 @@ namespace LawAfrica.API.Controllers
                 Parties = report.Parties,
                 Judges = report.Judges,
                 DecisionDate = report.DecisionDate,
-                ContentText = report.ContentText,
-                Title = doc.Title
+                ContentText = report.ContentText ?? "",
+                Title = doc.Title ?? ""
             });
         }
 
@@ -205,7 +195,6 @@ namespace LawAfrica.API.Controllers
 
             if (r == null) return NotFound();
 
-            // If keys changed, ensure no collision
             var existing = await FindExistingByDedupe(dto);
             if (existing != null && existing.Id != id)
                 return Conflict(new { message = "Duplicate report exists.", existingLawReportId = existing.Id });
@@ -220,16 +209,28 @@ namespace LawAfrica.API.Controllers
             r.Parties = TrimOrNull(dto.Parties);
             r.Judges = TrimOrNull(dto.Judges);
             r.DecisionDate = dto.DecisionDate;
-            r.ContentText = dto.ContentText;
+            r.ContentText = dto.ContentText ?? "";
             r.UpdatedAt = DateTime.UtcNow;
 
-            // Keep parent title in sync
-            r.LegalDocument.Title = BuildReportTitle(dto);
-            r.LegalDocument.UpdatedAt = DateTime.UtcNow;
+            if (r.LegalDocument != null)
+            {
+                r.LegalDocument.Title = BuildReportTitle(dto);
+                r.LegalDocument.Kind = LegalDocumentKind.Report;
+                r.LegalDocument.FileType = "report";
+                r.LegalDocument.FilePath = "";
+                r.LegalDocument.IsPremium = true;
+                r.LegalDocument.UpdatedAt = DateTime.UtcNow;
+            }
 
             await _db.SaveChangesAsync();
             return NoContent();
         }
+
+        // ✅ IMPORTANT: you must have this, because frontend sometimes falls back to /api/law-reports
+        [Authorize(Roles = "Admin")]
+        [HttpGet]
+        public Task<ActionResult<List<LawReportDto>>> List([FromQuery] string? q = null)
+            => AdminList(q);
 
         // ✅ Admin list (used by AdminLLRServices UI)
         [Authorize(Roles = "Admin")]
@@ -241,11 +242,11 @@ namespace LawAfrica.API.Controllers
             var query = _db.LawReports
                 .AsNoTracking()
                 .Include(x => x.LegalDocument)
+                .Where(x => x.LegalDocument != null) // ✅ prevents null crash
                 .AsQueryable();
 
             if (!string.IsNullOrWhiteSpace(q))
             {
-                // simple contains search (safe; optimize later)
                 query = query.Where(r =>
                     (r.ReportNumber != null && r.ReportNumber.Contains(q)) ||
                     (r.Citation != null && r.Citation.Contains(q)) ||
@@ -274,14 +275,13 @@ namespace LawAfrica.API.Controllers
                     Parties = r.Parties,
                     Judges = r.Judges,
                     DecisionDate = r.DecisionDate,
-                    ContentText = null!, // ✅ keep list light (Admin UI loads full report on Edit/Content)
-                    Title = r.LegalDocument.Title
+                    ContentText = "", // ✅ keep list light
+                    Title = r.LegalDocument != null ? (r.LegalDocument.Title ?? "") : ""
                 })
                 .ToListAsync();
 
             return Ok(list);
         }
-
 
         [Authorize(Roles = "Admin")]
         [HttpDelete("{id:int}")]
@@ -290,8 +290,6 @@ namespace LawAfrica.API.Controllers
             var r = await _db.LawReports.FirstOrDefaultAsync(x => x.Id == id);
             if (r == null) return NotFound();
 
-            // cascade delete will remove LawReport when LegalDocument deleted,
-            // but we want to delete the parent to keep catalog clean
             var doc = await _db.LegalDocuments.FindAsync(r.LegalDocumentId);
             if (doc != null) _db.LegalDocuments.Remove(doc);
 
@@ -312,7 +310,6 @@ namespace LawAfrica.API.Controllers
             var r = await _db.LawReports.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id);
             if (r == null) return NotFound();
 
-            // very simple search (upgrade later to full text)
             var text = r.ContentText ?? "";
             var hits = new List<object>();
 
@@ -337,6 +334,7 @@ namespace LawAfrica.API.Controllers
         // -------------------------
         // IMPORT PREVIEW/CONFIRM
         // -------------------------
+        // (unchanged from your version)
 
         [Authorize(Roles = "Admin")]
         [HttpPost("import/excel")]
@@ -345,9 +343,7 @@ namespace LawAfrica.API.Controllers
         {
             if (file == null || file.Length == 0) return BadRequest("Excel file is required.");
 
-            // ✅ Parse rows (implement parser below; keeps controller clean)
             var items = await ReportImportParsers.ParseExcelAsync(file);
-
             var preview = await BuildPreview(items);
             return Ok(preview);
         }
@@ -359,9 +355,7 @@ namespace LawAfrica.API.Controllers
         {
             if (file == null || file.Length == 0) return BadRequest("Word file is required.");
 
-            // ✅ Minimal assumption: Word contains content text, metadata provided in form fields
             var item = await ReportImportParsers.ParseWordAsync(file, reportNumber, year);
-
             var preview = await BuildPreview(new List<ReportImportPreviewItemDto> { item });
             return Ok(preview);
         }
@@ -377,7 +371,6 @@ namespace LawAfrica.API.Controllers
 
             foreach (var dto in req.Items)
             {
-                // validate DTO rules
                 var ctx = new ValidationContext(dto);
                 var valResults = new List<System.ComponentModel.DataAnnotations.ValidationResult>();
                 if (!Validator.TryValidateObject(dto, ctx, valResults, validateAllProperties: true))
@@ -396,7 +389,6 @@ namespace LawAfrica.API.Controllers
                         continue;
                     }
 
-                    // Update existing
                     existing.Citation = TrimOrNull(dto.Citation);
                     existing.ReportNumber = dto.ReportNumber.Trim();
                     existing.Year = dto.Year;
@@ -407,10 +399,9 @@ namespace LawAfrica.API.Controllers
                     existing.Parties = TrimOrNull(dto.Parties);
                     existing.Judges = TrimOrNull(dto.Judges);
                     existing.DecisionDate = dto.DecisionDate;
-                    existing.ContentText = dto.ContentText;
+                    existing.ContentText = dto.ContentText ?? "";
                     existing.UpdatedAt = DateTime.UtcNow;
 
-                    // keep parent title synced
                     var doc = await _db.LegalDocuments.FindAsync(existing.LegalDocumentId);
                     if (doc != null)
                     {
@@ -427,7 +418,6 @@ namespace LawAfrica.API.Controllers
                     continue;
                 }
 
-                // Create new (LegalDocument + LawReport)
                 var title = BuildReportTitle(dto);
 
                 var docNew = new LegalDocument
@@ -458,7 +448,7 @@ namespace LawAfrica.API.Controllers
                     Parties = TrimOrNull(dto.Parties),
                     Judges = TrimOrNull(dto.Judges),
                     DecisionDate = dto.DecisionDate,
-                    ContentText = dto.ContentText
+                    ContentText = dto.ContentText ?? ""
                 };
                 _db.LawReports.Add(reportNew);
                 await _db.SaveChangesAsync();
@@ -479,14 +469,12 @@ namespace LawAfrica.API.Controllers
             var reportNumber = dto.ReportNumber.Trim();
             var caseNo = TrimOrNull(dto.CaseNumber);
 
-            // If citation provided, prefer it
             if (!string.IsNullOrWhiteSpace(citation))
             {
                 var byCitation = await _db.LawReports.FirstOrDefaultAsync(x => x.Citation == citation);
                 if (byCitation != null) return byCitation;
             }
 
-            // Otherwise use composite key
             return await _db.LawReports.FirstOrDefaultAsync(x =>
                 x.ReportNumber == reportNumber &&
                 x.Year == dto.Year &&
@@ -495,7 +483,6 @@ namespace LawAfrica.API.Controllers
 
         private async Task<ReportImportPreviewDto> BuildPreview(List<ReportImportPreviewItemDto> items)
         {
-            // validate + dedupe mark
             foreach (var it in items)
             {
                 it.Errors ??= new List<string>();
@@ -506,8 +493,6 @@ namespace LawAfrica.API.Controllers
                 if (it.Year < 1900 || it.Year > 2100)
                     it.Errors.Add("Year must be between 1900 and 2100.");
 
-                // DecisionType + CaseType come as raw strings from imports
-                // we require them to match enum names
                 if (!TryParseDecisionType(it.DecisionType, out _))
                     it.Errors.Add("DecisionType must be Judgment or Ruling.");
 
@@ -517,7 +502,6 @@ namespace LawAfrica.API.Controllers
                 if (string.IsNullOrWhiteSpace(it.ContentText))
                     it.Errors.Add("ContentText is required.");
 
-                // dedupe check
                 var existing = await FindExistingByDedupe(new LawReportUpsertDto
                 {
                     ReportNumber = it.ReportNumber,
@@ -563,10 +547,7 @@ namespace LawAfrica.API.Controllers
 
         private static string BuildReportTitle(LawReportUpsertDto dto)
         {
-            var parts = new List<string>
-            {
-                $"{dto.ReportNumber.Trim()} ({dto.Year})"
-            };
+            var parts = new List<string> { $"{dto.ReportNumber.Trim()} ({dto.Year})" };
 
             if (!string.IsNullOrWhiteSpace(dto.Parties))
                 parts.Add(dto.Parties.Trim());
