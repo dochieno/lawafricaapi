@@ -34,15 +34,7 @@ namespace LawAfrica.API.Controllers
             _logger = logger;
         }
 
-        // ✅ This prevents the 405 if the frontend/browser hits it as GET
-        [Authorize]
-        [HttpGet("return-visit")]
-        public IActionResult ReturnVisitGet([FromQuery] string? reference)
-        {
-            _logger.LogInformation("[PAYSTACK RETURN VISIT][GET] ref={Ref} user={UserId}",
-                reference, User?.Identity?.Name ?? "unknown");
-            return Ok(new { ok = true });
-        }
+
 
         public class ReturnVisitRequest
         {
