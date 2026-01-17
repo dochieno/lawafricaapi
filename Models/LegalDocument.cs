@@ -1,4 +1,6 @@
 ﻿using LawAfrica.API.Models;
+using LawAfrica.API.Models.LawReports.Enums;
+using System.Xml.Linq;
 
 public class LegalDocument
 {
@@ -52,11 +54,9 @@ public class LegalDocument
     public decimal? PublicPrice { get; set; }           // e.g. 500.00
     public string? PublicCurrency { get; set; } = "KES"; // optional, default KES
     public bool AllowPublicPurchase { get; set; } = false; // gate purchase visibility/availability
-
-
-
-
-
+    public LegalDocumentKind Kind { get; set; } = LegalDocumentKind.Standard;
+    public LawAfrica.API.Models.Reports.LawReport? LawReport { get; set; }
+    // ✅ 1:1 child (optional)
     public ICollection<ContentProductLegalDocument> ProductDocuments { get; set; } = new List<ContentProductLegalDocument>();
 
 

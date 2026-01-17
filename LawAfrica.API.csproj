@@ -26,6 +26,7 @@
   <ItemGroup>
     <Folder Include="Data\Migrations\" />
     <Folder Include="Migrations\" />
+    <Folder Include="Models\LawReports\DTOs\" />
     <Folder Include="Storage\LegalDocuments\" />
     <Folder Include="Storage\Covers\" />
     <Folder Include="Storage\ProfileImages\" />

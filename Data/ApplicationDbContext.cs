@@ -2,10 +2,13 @@
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.Authorization;
 using LawAfrica.API.Models.Institutions;
+using LawAfrica.API.Models.LawReports.Enums;
 using LawAfrica.API.Models.Payments;
+using LawAfrica.API.Models.Reports;
 using LawAfrica.API.Models.Usage;
 using Microsoft.EntityFrameworkCore;
 using System.Linq;
+using System.Xml.Linq;
 
 namespace LawAfrica.API.Data;
 
@@ -91,6 +94,9 @@ public class ApplicationDbContext : DbContext
     public DbSet<PaymentReconciliationRun> PaymentReconciliationRuns => Set<PaymentReconciliationRun>();
     public DbSet<PaymentReconciliationItem> PaymentReconciliationItems => Set<PaymentReconciliationItem>();
     public DbSet<UserPresence> UserPresences { get; set; } = null!;
+
+    //LawReports
+    public DbSet<LawReport> LawReports => Set<LawReport>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -192,6 +198,15 @@ public class ApplicationDbContext : DbContext
         modelBuilder.Entity<InstitutionSubscriptionAudit>()
             .HasIndex(a => new { a.SubscriptionId, a.CreatedAt });
 
+        modelBuilder.Entity<UserProductSubscription>()
+                      .HasIndex(x => new { x.UserId, x.ContentProductId })
+                      .IsUnique();
+
+        modelBuilder.Entity<UserProductSubscription>()
+                  .HasOne(x => x.GrantedByUser)
+                  .WithMany()
+                  .HasForeignKey(x => x.GrantedByUserId)
+                  .OnDelete(DeleteBehavior.Restrict);
         // =========================================================
         // LegalDocument
         // =========================================================
@@ -404,6 +419,41 @@ public class ApplicationDbContext : DbContext
             b.HasIndex(x => x.CheckoutRequestId);
             b.HasIndex(x => x.InvoiceId);
         });
+
+
+        //LawReports
+
+        modelBuilder.Entity<LegalDocument>()
+                    .Property(x => x.Kind)
+                    .HasConversion<int>()
+                    .HasDefaultValue(LegalDocumentKind.Standard);
+
+            modelBuilder.Entity<LawReport>(entity =>
+            {
+                entity.ToTable("LawReports");
+                entity.HasKey(x => x.Id);
+
+                // 1:1 unique FK
+                entity.HasOne(x => x.LegalDocument)
+                    .WithOne(d => d.LawReport)
+                    .HasForeignKey<LawReport>(x => x.LegalDocumentId)
+                    .OnDelete(DeleteBehavior.Cascade);
+
+                entity.HasIndex(x => x.LegalDocumentId).IsUnique();
+
+                // Dedupe indexes
+                entity.HasIndex(x => x.Citation);
+                entity.HasIndex(x => new { x.ReportNumber, x.Year, x.CaseNumber }).IsUnique();
+
+                entity.Property(x => x.ReportNumber).IsRequired().HasMaxLength(30);
+                entity.Property(x => x.Citation).HasMaxLength(120);
+                entity.Property(x => x.CaseNumber).HasMaxLength(120);
+                entity.Property(x => x.Court).HasMaxLength(200);
+                entity.Property(x => x.Parties).HasMaxLength(200);
+                entity.Property(x => x.Judges).HasMaxLength(2000);
+
+                entity.Property(x => x.ContentText).IsRequired();
+            });
 
         // =========================================================
         // InstitutionMembership
