@@ -75,6 +75,7 @@ namespace LawAfrica.API.Controllers
                     Id = d.Id,
                     Title = d.Title,
                     Description = d.Description,
+                    Kind = d.Kind,
                     Author = d.Author,
                     Publisher = d.Publisher,
                     Edition = d.Edition,
@@ -93,6 +94,7 @@ namespace LawAfrica.API.Controllers
                     CoverImagePath = d.CoverImagePath,
                     AllowPublicPurchase = d.AllowPublicPurchase,
                     PublicPrice = d.PublicPrice,
+                    
                     PublicCurrency = d.PublicCurrency
                 })
                 .FirstOrDefaultAsync();
@@ -230,7 +232,7 @@ namespace LawAfrica.API.Controllers
             doc.PublicCurrency = request.PublicCurrency;
             doc.PublicPrice = request.PublicPrice;
             doc.PageCount = request.PageCount;
-
+            doc.Kind = request.Kind;
             doc.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();

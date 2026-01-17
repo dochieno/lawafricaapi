@@ -1,4 +1,6 @@
-﻿namespace LawAfrica.API.Models.DTOs.LegalDocuments
+﻿using LawAfrica.API.Models.LawReports.Enums;
+
+namespace LawAfrica.API.Models.DTOs.LegalDocuments
 {
     public class LegalDocumentListDto
     {
@@ -28,9 +30,13 @@
 
         public string? CoverImagePath { get; set; }
 
+        public LegalDocumentKind Kind { get; set; }
+
         // ✅ NEW
         public bool AllowPublicPurchase { get; set; }
         public decimal? PublicPrice { get; set; }
         public string? PublicCurrency { get; set; }
+
+        public LegalDocumentKind Kind { get; set; }
     }
 }

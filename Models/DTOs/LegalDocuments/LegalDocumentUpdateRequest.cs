@@ -1,4 +1,5 @@
 ﻿using LawAfrica.API.Models;
+using LawAfrica.API.Models.LawReports.Enums;
 
 namespace LawAfrica.API.Models.DTOs
 {
@@ -26,5 +27,7 @@ namespace LawAfrica.API.Models.DTOs
         public bool AllowPublicPurchase { get; set; } = false;
         public decimal? PublicPrice { get; set; }
         public string? PublicCurrency { get; set; } = "KES";
+
+        public LegalDocumentKind Kind { get; set; } 
     }
 }
