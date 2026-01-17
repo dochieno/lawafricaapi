@@ -36,7 +36,6 @@ namespace LawAfrica.API.Models.DTOs.LegalDocuments
         public bool AllowPublicPurchase { get; set; }
         public decimal? PublicPrice { get; set; }
         public string? PublicCurrency { get; set; }
-
-        public LegalDocumentKind Kind { get; set; }
+       
     }
 }
