@@ -114,44 +114,83 @@ namespace LawAfrica.API.Controllers
             if (!countryExists)
                 return BadRequest("Invalid countryId.");
 
+            // Optional product mapping validity check
+            if (request.ContentProductId.HasValue)
+            {
+                var productExists = await _db.ContentProducts.AnyAsync(p => p.Id == request.ContentProductId.Value);
+                if (!productExists)
+                    return BadRequest("Invalid ContentProductId.");
+            }
+
             var title = (request.Title ?? "").Trim();
             var description = (request.Description ?? "").Trim();
             var author = (request.Author ?? "").Trim();
             var publisher = (request.Publisher ?? "").Trim();
             var edition = (request.Edition ?? "").Trim();
-            var filePath = (request.FilePath ?? "").Trim();
-            var fileType = (request.FileType ?? "").Trim();
+
+            // For reports, we store no file info and block uploads later
+            var isReport = request.Kind == LawAfrica.API.Models.LawReports.Enums.LegalDocumentKind.Report;
+
+            var filePath = isReport ? "" : (request.FilePath ?? "").Trim();
+            var fileType = isReport ? "report" : (request.FileType ?? "pdf").Trim();
             var version = (request.Version ?? "").Trim();
             var publicCurrency = (request.PublicCurrency ?? "").Trim();
 
             var document = new LegalDocument
             {
                 Title = title,
-                Description = description,
-                Author = author,
-                Publisher = publisher,
-                Edition = edition,
+                Description = string.IsNullOrWhiteSpace(description) ? null : description,
+                Author = string.IsNullOrWhiteSpace(author) ? null : author,
+                Publisher = string.IsNullOrWhiteSpace(publisher) ? null : publisher,
+                Edition = string.IsNullOrWhiteSpace(edition) ? null : edition,
 
                 Category = request.Category,
-
                 CountryId = request.CountryId,
+
                 FilePath = filePath,
-                FileType = fileType,
-                FileSizeBytes = request.FileSizeBytes,
+                FileType = string.IsNullOrWhiteSpace(fileType) ? "pdf" : fileType,
+                FileSizeBytes = isReport ? 0 : request.FileSizeBytes,
                 PageCount = request.PageCount,
                 ChapterCount = request.ChapterCount,
+
                 IsPremium = request.IsPremium,
-                Version = version,
+                Version = string.IsNullOrWhiteSpace(version) ? "1.0" : version,
                 Status = request.Status,
                 PublishedAt = request.PublishedAt,
+
                 PublicPrice = request.PublicPrice,
                 AllowPublicPurchase = request.AllowPublicPurchase,
-                PublicCurrency = publicCurrency,
+                PublicCurrency = string.IsNullOrWhiteSpace(publicCurrency) ? "KES" : publicCurrency,
+
+                // ✅ NEW: store kind
+                Kind = request.Kind,
+
                 CreatedAt = DateTime.UtcNow
             };
 
             _db.LegalDocuments.Add(document);
             await _db.SaveChangesAsync();
+
+            // ✅ Optional: map to product so it shows up in DOCS immediately
+            if (request.ContentProductId.HasValue)
+            {
+                var already = await _db.ContentProductLegalDocuments.AnyAsync(x =>
+                    x.ContentProductId == request.ContentProductId.Value &&
+                    x.LegalDocumentId == document.Id);
+
+                if (!already)
+                {
+                    _db.ContentProductLegalDocuments.Add(new ContentProductLegalDocument
+                    {
+                        ContentProductId = request.ContentProductId.Value,
+                        LegalDocumentId = document.Id,
+                        SortOrder = 0,
+                        CreatedAt = DateTime.UtcNow
+                    });
+
+                    await _db.SaveChangesAsync();
+                }
+            }
 
             return Ok(new
             {
@@ -159,6 +198,7 @@ namespace LawAfrica.API.Controllers
                 id = document.Id
             });
         }
+
 
         [Authorize(Roles = "Admin")]
         [HttpPut("{id}")]
@@ -220,7 +260,8 @@ namespace LawAfrica.API.Controllers
                 var doc = await _db.LegalDocuments.FindAsync(id);
                 if (doc == null)
                     return NotFound("Document not found.");
-
+                if (doc.Kind == LawAfrica.API.Models.LawReports.Enums.LegalDocumentKind.Report)
+                    return BadRequest("File uploads are not allowed for Report documents.");
                 var f = request?.File ?? file ?? File;
                 if (f == null || f.Length == 0)
                     return BadRequest(new
