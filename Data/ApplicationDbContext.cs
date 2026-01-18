@@ -466,13 +466,10 @@ public class ApplicationDbContext : DbContext
                     .WithOne(d => d.LawReport)
                     .HasForeignKey<LawReport>(x => x.LegalDocumentId)
                     .OnDelete(DeleteBehavior.Cascade);
-
                 entity.HasIndex(x => x.LegalDocumentId).IsUnique();
-
-                // Dedupe indexes
-                entity.HasIndex(x => x.Citation);
-                entity.HasIndex(x => new { x.ReportNumber, x.Year, x.CaseNumber }).IsUnique();
-
+                // ✅ Citation unique (NULLs allowed multiple times in Postgres)
+                entity.HasIndex(x => x.Citation).IsUnique();
+                entity.HasIndex(x => new { x.ReportNumber, x.Year, x.CaseNumber });
                 entity.Property(x => x.ReportNumber).IsRequired().HasMaxLength(30);
                 entity.Property(x => x.Citation).HasMaxLength(120);
                 entity.Property(x => x.CaseNumber).HasMaxLength(120);
