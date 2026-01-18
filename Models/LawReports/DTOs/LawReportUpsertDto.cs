@@ -51,6 +51,12 @@ namespace LawAfrica.API.DTOs.Reports
         [Required]
         public string ContentText { get; set; } = string.Empty;
 
+        [Range(1, int.MaxValue)]
+        public int? TownId { get; set; }
+
+        [MaxLength(20)]
+        public string? TownPostCode { get; set; }
+
         // ✅ Read-only; NEVER assign to it in controller
         public LegalDocumentCategory Category => LegalDocumentCategory.LLRServices;
 
@@ -69,6 +75,15 @@ namespace LawAfrica.API.DTOs.Reports
 
             if (CourtType <= 0)
                 yield return new ValidationResult("CourtType is required.", new[] { nameof(CourtType) });
+
+            // ✅ Optional: allow TownId OR TownPostCode OR Town text
+            if (TownId.HasValue && TownId.Value <= 0)
+                yield return new ValidationResult("TownId must be a positive number.", new[] { nameof(TownId) });
+
+            var pc = (TownPostCode ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(pc) && pc.Length > 20)
+                yield return new ValidationResult("TownPostCode is too long.", new[] { nameof(TownPostCode) });
         }
+
     }
 }

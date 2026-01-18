@@ -3,6 +3,7 @@ using LawAfrica.API.Models;
 using LawAfrica.API.Models.Authorization;
 using LawAfrica.API.Models.Institutions;
 using LawAfrica.API.Models.LawReports.Enums;
+using LawAfrica.API.Models.Locations;
 using LawAfrica.API.Models.Payments;
 using LawAfrica.API.Models.Reports;
 using LawAfrica.API.Models.Usage;
@@ -97,6 +98,7 @@ public class ApplicationDbContext : DbContext
 
     //LawReports
     public DbSet<LawReport> LawReports => Set<LawReport>();
+    public DbSet<Town> Towns => Set<Town>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -132,6 +134,32 @@ public class ApplicationDbContext : DbContext
 
             entity.Property(c => c.IsoCode).HasMaxLength(3);
             entity.Property(c => c.PhoneCode).HasMaxLength(10);
+        });
+
+        modelBuilder.Entity<Town>(b =>
+        {
+            b.ToTable("Towns");
+            b.Property(x => x.PostCode).HasMaxLength(20).IsRequired();
+            b.Property(x => x.Name).HasMaxLength(120).IsRequired();
+
+            // ✅ Uniqueness per country
+            b.HasIndex(x => new { x.CountryId, x.PostCode }).IsUnique();
+            b.HasIndex(x => new { x.CountryId, x.Name }); // NOT unique
+            b.HasOne(x => x.Country)
+                .WithMany()
+                .HasForeignKey(x => x.CountryId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // ✅ LawReport -> Town optional relationship (NO breaking)
+        modelBuilder.Entity<LawReport>(b =>
+        {
+            b.HasOne(x => x.TownRef)
+                .WithMany()
+                .HasForeignKey(x => x.TownId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            b.HasIndex(x => x.TownId);
         });
 
         // =========================================================

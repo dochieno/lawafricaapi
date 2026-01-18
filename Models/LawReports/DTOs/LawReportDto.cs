@@ -41,5 +41,9 @@ namespace LawAfrica.API.DTOs.Reports
         public string? CourtTypeLabel { get; set; }
         public string? DecisionTypeLabel { get; set; }
         public string? CaseTypeLabel { get; set; }
+
+        public int? TownId { get; set; }
+        public string? TownPostCode { get; set; }
+
     }
 }

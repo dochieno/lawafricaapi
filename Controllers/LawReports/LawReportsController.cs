@@ -31,6 +31,7 @@ namespace LawAfrica.API.Controllers
         {
             var r = await _db.LawReports
                 .Include(x => x.LegalDocument)
+                .Include(x => x.TownRef) // ✅ NEW: return TownId + TownPostCode
                 .FirstOrDefaultAsync(x => x.Id == id);
 
             if (r == null) return NotFound();
@@ -52,6 +53,7 @@ namespace LawAfrica.API.Controllers
                 var query = _db.LawReports
                     .AsNoTracking()
                     .Include(x => x.LegalDocument)
+                    .Include(x => x.TownRef) // ✅ NEW: list includes TownId + TownPostCode
                     .AsQueryable();
 
                 if (!string.IsNullOrWhiteSpace(q))
@@ -62,7 +64,7 @@ namespace LawAfrica.API.Controllers
                         (r.CaseNumber != null && r.CaseNumber.Contains(q)) ||
                         (r.Parties != null && r.Parties.Contains(q)) ||
                         (r.Court != null && r.Court.Contains(q)) ||
-                        (r.Town != null && r.Town.Contains(q)) ||
+                        (r.Town != null && r.Town.Contains(q)) || // ✅ keep existing behavior
                         (r.Judges != null && r.Judges.Contains(q)) ||
                         (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.Contains(q))
                     );
@@ -100,11 +102,22 @@ namespace LawAfrica.API.Controllers
             // ✅ Ensure CourtType int maps to enum
             var courtType = (CourtType)dto.CourtType;
 
-            var existing = await FindExistingByDedupe(dto);
+            // ✅ NEW: resolve TownId/TownPostCode/Town text (backward compatible)
+            (int? townId, string? townName, string? postCode) resolvedTown;
+            try
+            {
+                resolvedTown = await ResolveTownAsync(dto);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+
+            var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName);
             if (existing != null)
                 return Conflict(new { message = "Duplicate report exists.", existingLawReportId = existing.Id });
 
-            var title = BuildReportTitle(dto);
+            var title = BuildReportTitle(dto, resolvedTown.townName);
 
             var doc = new LegalDocument
             {
@@ -139,7 +152,10 @@ namespace LawAfrica.API.Controllers
                 CountryId = dto.CountryId,
                 Service = dto.Service,
 
-                Town = TrimOrNull(dto.Town),
+                // ✅ NEW: store TownId and normalize Town string to Town name (keeps search/display stable)
+                TownId = resolvedTown.townId,
+                Town = resolvedTown.townName,
+
                 Citation = TrimOrNull(dto.Citation),
                 ReportNumber = dto.ReportNumber.Trim(),
                 Year = dto.Year,
@@ -167,6 +183,12 @@ namespace LawAfrica.API.Controllers
             // Reload with doc for DTO mapping consistency
             report.LegalDocument = doc;
 
+            // ✅ NEW: attach TownRef for DTO (optional, avoid extra DB work if not needed)
+            if (report.TownId.HasValue)
+            {
+                report.TownRef = await _db.Towns.AsNoTracking().FirstOrDefaultAsync(t => t.Id == report.TownId.Value);
+            }
+
             return CreatedAtAction(nameof(Get), new { id = report.Id }, ToDto(report, includeContent: true));
         }
 
@@ -181,11 +203,23 @@ namespace LawAfrica.API.Controllers
 
             var r = await _db.LawReports
                 .Include(x => x.LegalDocument)
+                .Include(x => x.TownRef) // ✅ NEW
                 .FirstOrDefaultAsync(x => x.Id == id);
 
             if (r == null) return NotFound();
 
-            var existing = await FindExistingByDedupe(dto);
+            // ✅ NEW: resolve TownId/TownPostCode/Town text (backward compatible)
+            (int? townId, string? townName, string? postCode) resolvedTown;
+            try
+            {
+                resolvedTown = await ResolveTownAsync(dto);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+
+            var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName);
             if (existing != null && existing.Id != id)
                 return Conflict(new { message = "Duplicate report exists.", existingLawReportId = existing.Id });
 
@@ -202,7 +236,10 @@ namespace LawAfrica.API.Controllers
 
             r.CourtType = (CourtType)dto.CourtType;
             r.Court = TrimOrNull(dto.Court);
-            r.Town = TrimOrNull(dto.Town);
+
+            // ✅ NEW: Town linkage + normalized display string
+            r.TownId = resolvedTown.townId;
+            r.Town = resolvedTown.townName;
 
             r.Parties = TrimOrNull(dto.Parties);
             r.Judges = TrimOrNull(dto.Judges);
@@ -213,7 +250,7 @@ namespace LawAfrica.API.Controllers
 
             if (r.LegalDocument != null)
             {
-                r.LegalDocument.Title = BuildReportTitle(dto);
+                r.LegalDocument.Title = BuildReportTitle(dto, resolvedTown.townName);
                 r.LegalDocument.Description = $"Law Report {dto.ReportNumber} ({dto.Year})";
 
                 r.LegalDocument.Category = LLR_CATEGORY;
@@ -250,12 +287,68 @@ namespace LawAfrica.API.Controllers
         // -------------------------
         // helpers
         // -------------------------
-        private async Task<LawReport?> FindExistingByDedupe(LawReportUpsertDto dto)
+
+        /// <summary>
+        /// ✅ NEW: Resolve town input without breaking old clients
+        /// Accepts (priority order):
+        /// 1) dto.TownId
+        /// 2) dto.TownPostCode (Country scoped)
+        /// 3) dto.Town (free text fallback)
+        ///
+        /// Returns:
+        /// - townId: nullable FK
+        /// - townName: string saved to LawReport.Town (for display/search/back-compat)
+        /// - postCode: optional
+        /// </summary>
+        private async Task<(int? townId, string? townName, string? postCode)> ResolveTownAsync(LawReportUpsertDto dto)
+        {
+            // 1) TownId
+            if (dto.TownId.HasValue)
+            {
+                if (dto.TownId.Value <= 0)
+                    throw new InvalidOperationException("TownId must be a positive number.");
+
+                var t = await _db.Towns.AsNoTracking().FirstOrDefaultAsync(x => x.Id == dto.TownId.Value);
+                if (t == null)
+                    throw new InvalidOperationException("Selected TownId does not exist.");
+
+                if (t.CountryId != dto.CountryId)
+                    throw new InvalidOperationException("Selected town does not match the selected country.");
+
+                return (t.Id, t.Name, t.PostCode);
+            }
+
+            // 2) TownPostCode
+            var pc = TrimOrNull(dto.TownPostCode);
+            if (!string.IsNullOrWhiteSpace(pc))
+            {
+                var t = await _db.Towns.AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.CountryId == dto.CountryId && x.PostCode == pc);
+
+                if (t == null)
+                    throw new InvalidOperationException($"Town not found for PostCode '{pc}' in the selected country.");
+
+                return (t.Id, t.Name, t.PostCode);
+            }
+
+            // 3) free text fallback (old behavior)
+            var townText = TrimOrNull(dto.Town);
+            return (null, townText, null);
+        }
+
+        /// <summary>
+        /// ✅ Updated: dedupe can use TownId if present; otherwise uses Town string.
+        /// This preserves behavior for legacy reports where TownId is null.
+        /// </summary>
+        private async Task<LawReport?> FindExistingByDedupe(
+            LawReportUpsertDto dto,
+            int? resolvedTownId,
+            string? resolvedTownName
+        )
         {
             var citation = TrimOrNull(dto.Citation);
             var reportNumber = dto.ReportNumber.Trim();
             var caseNo = TrimOrNull(dto.CaseNumber);
-            var town = TrimOrNull(dto.Town);
             var courtType = (CourtType)dto.CourtType;
 
             // ✅ If citation exists, use it as strongest identity
@@ -265,20 +358,35 @@ namespace LawAfrica.API.Controllers
                 if (byCitation != null) return byCitation;
             }
 
-            // ✅ composite identity (now includes courtType + town)
+            // ✅ composite identity:
+            // Prefer TownId when available; fallback to Town string for old records.
+            if (resolvedTownId.HasValue)
+            {
+                return await _db.LawReports.FirstOrDefaultAsync(x =>
+                    x.ReportNumber == reportNumber &&
+                    x.Year == dto.Year &&
+                    x.CaseNumber == caseNo &&
+                    x.CourtType == courtType &&
+                    x.TownId == resolvedTownId.Value
+                );
+            }
+
+            var town = resolvedTownName; // already trimmed
             return await _db.LawReports.FirstOrDefaultAsync(x =>
                 x.ReportNumber == reportNumber &&
                 x.Year == dto.Year &&
                 x.CaseNumber == caseNo &&
-                x.Town == town &&
-                x.CourtType == courtType
+                x.CourtType == courtType &&
+                x.TownId == null &&
+                x.Town == town
             );
         }
 
         /// <summary>
         /// ✅ Title includes court + town to produce consistent "High Court — Kakamega" feel.
+        /// ✅ NEW: town passed in from resolver (TownRef.Name or fallback town string)
         /// </summary>
-        private static string BuildReportTitle(LawReportUpsertDto dto)
+        private static string BuildReportTitle(LawReportUpsertDto dto, string? resolvedTownName)
         {
             var parts = new List<string> { $"{dto.ReportNumber.Trim()} ({dto.Year})" };
 
@@ -289,7 +397,7 @@ namespace LawAfrica.API.Controllers
                 parts.Add(dto.Citation.Trim());
 
             var courtLabel = CourtTypeLabel((CourtType)dto.CourtType);
-            var town = TrimOrNull(dto.Town);
+            var town = TrimOrNull(resolvedTownName);
 
             if (!string.IsNullOrWhiteSpace(courtLabel))
             {
@@ -332,7 +440,13 @@ namespace LawAfrica.API.Controllers
                 CaseType = r.CaseType,
 
                 Court = r.Court,
+
+                // ✅ Keep old field
                 Town = r.Town,
+
+                // ✅ NEW: structured town info
+                TownId = r.TownId,
+                TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
 
                 Parties = r.Parties,
                 Judges = r.Judges,

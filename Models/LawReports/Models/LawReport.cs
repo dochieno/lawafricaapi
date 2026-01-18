@@ -1,5 +1,6 @@
-﻿using System.ComponentModel.DataAnnotations;
-using LawAfrica.API.Models.LawReports.Enums;
+﻿using LawAfrica.API.Models.LawReports.Enums;
+using LawAfrica.API.Models.Locations;
+using System.ComponentModel.DataAnnotations;
 
 namespace LawAfrica.API.Models.Reports
 {
@@ -88,5 +89,9 @@ namespace LawAfrica.API.Models.Reports
         // -------------------
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public DateTime? UpdatedAt { get; set; }
+
+        // ✅ NEW (optional FK) — preferred way
+        public int? TownId { get; set; }
+        public Town? TownRef { get; set; }
     }
 }
