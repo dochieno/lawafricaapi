@@ -84,5 +84,7 @@ namespace LawAfrica.API.Models.Reports
         // -------------------
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public DateTime? UpdatedAt { get; set; }
+        public string? Town { get; set; }
+
     }
 }

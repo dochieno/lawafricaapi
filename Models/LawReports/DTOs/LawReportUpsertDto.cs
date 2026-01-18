@@ -45,6 +45,7 @@ namespace LawAfrica.API.DTOs.Reports
 
         [Required]
         public string ContentText { get; set; } = string.Empty;
+        public string? Town { get; set; }
 
         // ✅ Read-only is fine; just NEVER assign to it in controller
         public LegalDocumentCategory Category => LegalDocumentCategory.LLRServices;

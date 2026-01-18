@@ -33,5 +33,7 @@ namespace LawAfrica.API.DTOs.Reports
 
         // ✅ Always LLR Services
         public LegalDocumentCategory Category => LegalDocumentCategory.LLRServices;
+        public string? Town { get; set; }
+
     }
 }

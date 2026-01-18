@@ -43,7 +43,6 @@ namespace LawAfrica.API.Controllers
 
                 CountryId = r.CountryId,
                 Service = r.Service,
-
                 ReportNumber = r.ReportNumber,
                 Year = r.Year,
                 CaseNumber = r.CaseNumber,
@@ -51,6 +50,7 @@ namespace LawAfrica.API.Controllers
                 DecisionType = r.DecisionType,
                 CaseType = r.CaseType,
                 Court = r.Court,
+                Town = r.Town,
                 Parties = r.Parties,
                 Judges = r.Judges,
                 DecisionDate = r.DecisionDate,
@@ -109,7 +109,7 @@ namespace LawAfrica.API.Controllers
                         Parties = r.Parties,
                         Judges = r.Judges,
                         DecisionDate = r.DecisionDate,
-
+                        Town = r.Town,
                         ContentText = "",
 
                         // ✅ avoid NullReference
@@ -180,7 +180,7 @@ namespace LawAfrica.API.Controllers
 
                 CountryId = dto.CountryId,
                 Service = dto.Service,
-
+                Town = TrimOrNull(dto.Town),
                 Citation = TrimOrNull(dto.Citation),
                 ReportNumber = dto.ReportNumber.Trim(),
                 Year = dto.Year,
@@ -205,7 +205,7 @@ namespace LawAfrica.API.Controllers
 
                 CountryId = report.CountryId,
                 Service = report.Service,
-
+                Town = report.Town,
                 ReportNumber = report.ReportNumber,
                 Year = report.Year,
                 CaseNumber = report.CaseNumber,
@@ -251,6 +251,7 @@ namespace LawAfrica.API.Controllers
             r.CaseType = dto.CaseType;
             r.Court = TrimOrNull(dto.Court);
             r.Parties = TrimOrNull(dto.Parties);
+            r.Town = TrimOrNull(dto.Town);
             r.Judges = TrimOrNull(dto.Judges);
             r.DecisionDate = dto.DecisionDate;
             r.ContentText = dto.ContentText;
