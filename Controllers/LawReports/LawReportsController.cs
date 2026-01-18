@@ -31,7 +31,7 @@ namespace LawAfrica.API.Controllers
         {
             var r = await _db.LawReports
                 .Include(x => x.LegalDocument)
-                .Include(x => x.TownRef) // ✅ NEW: return TownId + TownPostCode
+                .Include(x => x.TownRef)
                 .FirstOrDefaultAsync(x => x.Id == id);
 
             if (r == null) return NotFound();
@@ -53,7 +53,7 @@ namespace LawAfrica.API.Controllers
                 var query = _db.LawReports
                     .AsNoTracking()
                     .Include(x => x.LegalDocument)
-                    .Include(x => x.TownRef) // ✅ NEW: list includes TownId + TownPostCode
+                    .Include(x => x.TownRef)
                     .AsQueryable();
 
                 if (!string.IsNullOrWhiteSpace(q))
@@ -64,7 +64,7 @@ namespace LawAfrica.API.Controllers
                         (r.CaseNumber != null && r.CaseNumber.Contains(q)) ||
                         (r.Parties != null && r.Parties.Contains(q)) ||
                         (r.Court != null && r.Court.Contains(q)) ||
-                        (r.Town != null && r.Town.Contains(q)) || // ✅ keep existing behavior
+                        (r.Town != null && r.Town.Contains(q)) ||
                         (r.Judges != null && r.Judges.Contains(q)) ||
                         (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.Contains(q))
                     );
@@ -75,7 +75,6 @@ namespace LawAfrica.API.Controllers
                     .ThenByDescending(r => r.Id)
                     .ToListAsync();
 
-                // ✅ return compact list (no content)
                 var dtoList = list.Select(r => ToDto(r, includeContent: false)).ToList();
                 return Ok(dtoList);
             }
@@ -99,10 +98,8 @@ namespace LawAfrica.API.Controllers
         {
             if (!ModelState.IsValid) return ValidationProblem(ModelState);
 
-            // ✅ Ensure CourtType int maps to enum
             var courtType = (CourtType)dto.CourtType;
 
-            // ✅ NEW: resolve TownId/TownPostCode/Town text (backward compatible)
             (int? townId, string? townName, string? postCode) resolvedTown;
             try
             {
@@ -113,7 +110,18 @@ namespace LawAfrica.API.Controllers
                 return BadRequest(new { message = ex.Message });
             }
 
-            var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName);
+            if (string.IsNullOrWhiteSpace(TrimOrNull(dto.Citation)) && dto.DecisionDate == null)
+                return BadRequest(new { message = "DecisionDate is required to auto-generate citation year. Provide Citation or DecisionDate." });
+
+            // ✅ Citation: manual OR auto-generate (unique)
+            var citation = TrimOrNull(dto.Citation);
+            if (string.IsNullOrWhiteSpace(citation))
+            {
+                citation = await GenerateUniqueCitationAsync(dto, resolvedTown.townName, excludeReportId: null);
+            }
+
+            // ✅ Dedupe now uses resolved/auto citation too
+            var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName, citationOverride: citation);
             if (existing != null)
                 return Conflict(new { message = "Duplicate report exists.", existingLawReportId = existing.Id });
 
@@ -152,11 +160,10 @@ namespace LawAfrica.API.Controllers
                 CountryId = dto.CountryId,
                 Service = dto.Service,
 
-                // ✅ NEW: store TownId and normalize Town string to Town name (keeps search/display stable)
                 TownId = resolvedTown.townId,
                 Town = resolvedTown.townName,
 
-                Citation = TrimOrNull(dto.Citation),
+                Citation = citation, // ✅ always set (manual or auto)
                 ReportNumber = dto.ReportNumber.Trim(),
                 Year = dto.Year,
                 CaseNumber = TrimOrNull(dto.CaseNumber),
@@ -166,7 +173,6 @@ namespace LawAfrica.API.Controllers
 
                 CourtType = courtType,
 
-                // legacy/display (optional)
                 Court = TrimOrNull(dto.Court),
 
                 Parties = TrimOrNull(dto.Parties),
@@ -178,15 +184,24 @@ namespace LawAfrica.API.Controllers
             };
 
             _db.LawReports.Add(report);
-            await _db.SaveChangesAsync();
 
-            // Reload with doc for DTO mapping consistency
+            try
+            {
+                await _db.SaveChangesAsync();
+            }
+            catch (DbUpdateException)
+            {
+                // ✅ If unique index hit due to race, regenerate + retry once
+                report.Citation = await GenerateUniqueCitationAsync(dto, resolvedTown.townName, excludeReportId: null);
+                await _db.SaveChangesAsync();
+            }
+
             report.LegalDocument = doc;
 
-            // ✅ NEW: attach TownRef for DTO (optional, avoid extra DB work if not needed)
             if (report.TownId.HasValue)
             {
-                report.TownRef = await _db.Towns.AsNoTracking().FirstOrDefaultAsync(t => t.Id == report.TownId.Value);
+                report.TownRef = await _db.Towns.AsNoTracking()
+                    .FirstOrDefaultAsync(t => t.Id == report.TownId.Value);
             }
 
             return CreatedAtAction(nameof(Get), new { id = report.Id }, ToDto(report, includeContent: true));
@@ -203,12 +218,11 @@ namespace LawAfrica.API.Controllers
 
             var r = await _db.LawReports
                 .Include(x => x.LegalDocument)
-                .Include(x => x.TownRef) // ✅ NEW
+                .Include(x => x.TownRef)
                 .FirstOrDefaultAsync(x => x.Id == id);
 
             if (r == null) return NotFound();
 
-            // ✅ NEW: resolve TownId/TownPostCode/Town text (backward compatible)
             (int? townId, string? townName, string? postCode) resolvedTown;
             try
             {
@@ -219,14 +233,21 @@ namespace LawAfrica.API.Controllers
                 return BadRequest(new { message = ex.Message });
             }
 
-            var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName);
+            // ✅ Citation: manual OR auto-generate (unique)
+            var citation = TrimOrNull(dto.Citation);
+            if (string.IsNullOrWhiteSpace(citation))
+            {
+                citation = await GenerateUniqueCitationAsync(dto, resolvedTown.townName, excludeReportId: id);
+            }
+
+            var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName, citationOverride: citation);
             if (existing != null && existing.Id != id)
                 return Conflict(new { message = "Duplicate report exists.", existingLawReportId = existing.Id });
 
             r.CountryId = dto.CountryId;
             r.Service = dto.Service;
 
-            r.Citation = TrimOrNull(dto.Citation);
+            r.Citation = citation;
             r.ReportNumber = dto.ReportNumber.Trim();
             r.Year = dto.Year;
             r.CaseNumber = TrimOrNull(dto.CaseNumber);
@@ -237,7 +258,6 @@ namespace LawAfrica.API.Controllers
             r.CourtType = (CourtType)dto.CourtType;
             r.Court = TrimOrNull(dto.Court);
 
-            // ✅ NEW: Town linkage + normalized display string
             r.TownId = resolvedTown.townId;
             r.Town = resolvedTown.townName;
 
@@ -263,7 +283,17 @@ namespace LawAfrica.API.Controllers
                 r.LegalDocument.UpdatedAt = DateTime.UtcNow;
             }
 
-            await _db.SaveChangesAsync();
+            try
+            {
+                await _db.SaveChangesAsync();
+            }
+            catch (DbUpdateException)
+            {
+                // ✅ If unique index hit due to race, regenerate + retry once
+                r.Citation = await GenerateUniqueCitationAsync(dto, resolvedTown.townName, excludeReportId: id);
+                await _db.SaveChangesAsync();
+            }
+
             return NoContent();
         }
 
@@ -288,21 +318,8 @@ namespace LawAfrica.API.Controllers
         // helpers
         // -------------------------
 
-        /// <summary>
-        /// ✅ NEW: Resolve town input without breaking old clients
-        /// Accepts (priority order):
-        /// 1) dto.TownId
-        /// 2) dto.TownPostCode (Country scoped)
-        /// 3) dto.Town (free text fallback)
-        ///
-        /// Returns:
-        /// - townId: nullable FK
-        /// - townName: string saved to LawReport.Town (for display/search/back-compat)
-        /// - postCode: optional
-        /// </summary>
         private async Task<(int? townId, string? townName, string? postCode)> ResolveTownAsync(LawReportUpsertDto dto)
         {
-            // 1) TownId
             if (dto.TownId.HasValue)
             {
                 if (dto.TownId.Value <= 0)
@@ -318,7 +335,6 @@ namespace LawAfrica.API.Controllers
                 return (t.Id, t.Name, t.PostCode);
             }
 
-            // 2) TownPostCode
             var pc = TrimOrNull(dto.TownPostCode);
             if (!string.IsNullOrWhiteSpace(pc))
             {
@@ -331,35 +347,32 @@ namespace LawAfrica.API.Controllers
                 return (t.Id, t.Name, t.PostCode);
             }
 
-            // 3) free text fallback (old behavior)
             var townText = TrimOrNull(dto.Town);
             return (null, townText, null);
         }
 
         /// <summary>
         /// ✅ Updated: dedupe can use TownId if present; otherwise uses Town string.
-        /// This preserves behavior for legacy reports where TownId is null.
+        /// ✅ Now also accepts citationOverride (generated citation).
         /// </summary>
         private async Task<LawReport?> FindExistingByDedupe(
             LawReportUpsertDto dto,
             int? resolvedTownId,
-            string? resolvedTownName
+            string? resolvedTownName,
+            string? citationOverride = null
         )
         {
-            var citation = TrimOrNull(dto.Citation);
+            var citation = TrimOrNull(citationOverride) ?? TrimOrNull(dto.Citation);
             var reportNumber = dto.ReportNumber.Trim();
             var caseNo = TrimOrNull(dto.CaseNumber);
             var courtType = (CourtType)dto.CourtType;
 
-            // ✅ If citation exists, use it as strongest identity
             if (!string.IsNullOrWhiteSpace(citation))
             {
                 var byCitation = await _db.LawReports.FirstOrDefaultAsync(x => x.Citation == citation);
                 if (byCitation != null) return byCitation;
             }
 
-            // ✅ composite identity:
-            // Prefer TownId when available; fallback to Town string for old records.
             if (resolvedTownId.HasValue)
             {
                 return await _db.LawReports.FirstOrDefaultAsync(x =>
@@ -371,7 +384,7 @@ namespace LawAfrica.API.Controllers
                 );
             }
 
-            var town = resolvedTownName; // already trimmed
+            var town = resolvedTownName;
             return await _db.LawReports.FirstOrDefaultAsync(x =>
                 x.ReportNumber == reportNumber &&
                 x.Year == dto.Year &&
@@ -383,9 +396,120 @@ namespace LawAfrica.API.Controllers
         }
 
         /// <summary>
-        /// ✅ Title includes court + town to produce consistent "High Court — Kakamega" feel.
-        /// ✅ NEW: town passed in from resolver (TownRef.Name or fallback town string)
+        /// ✅ Citation auto-generator (server-side) + uniqueness enforcement.
+        ///
+        /// Format (matches your examples closely):
+        /// [YEAR] {SERIES} ({COURT}-{TOWNCODE}) {TAIL}
+        ///
+        /// Example:
+        /// [2016] LLR (HCK-K) 045/2013
+        ///
+        /// - SERIES derives from Service (LLR/EALR/ULR etc)
+        /// - COURT derives from CourtType (HCK/CAK/SC/ELRC/ELC...)
+        /// - TOWNCODE is first letter of Town (Kakamega=>K, Malindi=>M) if available
+        /// - TAIL is CaseNumber if present else ReportNumber
+        ///
+        /// Uniqueness:
+        /// - If collision, appends " (2)", " (3)" etc.
+        /// - excludeReportId is used on update to ignore the current row
         /// </summary>
+        private async Task<string> GenerateUniqueCitationAsync(LawReportUpsertDto dto, string? resolvedTownName, int? excludeReportId)
+        {
+            var series = ServiceCode(dto.Service);
+            var court = CourtCode((CourtType)dto.CourtType);
+            var townCode = TownCode(resolvedTownName);
+
+            var tail = TrimOrNull(dto.CaseNumber) ?? dto.ReportNumber.Trim();
+            tail = tail.Trim();
+
+            var citationYear = dto.DecisionDate?.Year ?? dto.Year;
+            var baseCitation = $"[{citationYear}] {series} ({court}{(string.IsNullOrWhiteSpace(townCode) ? "" : "-" + townCode)}) {tail}";
+            baseCitation = NormalizeCitation(baseCitation);
+
+            // Fast path: not taken
+            if (!await CitationExistsAsync(baseCitation, excludeReportId))
+                return baseCitation;
+
+            // Collision: try " (2)", " (3)"...
+            for (var i = 2; i <= 200; i++)
+            {
+                var c = $"{baseCitation} ({i})";
+                if (!await CitationExistsAsync(c, excludeReportId))
+                    return c;
+            }
+
+            // Extremely unlikely fallback
+            return $"{baseCitation} ({Guid.NewGuid().ToString("N")[..8]})";
+        }
+
+        private async Task<bool> CitationExistsAsync(string citation, int? excludeReportId)
+        {
+            var q = _db.LawReports.AsNoTracking().Where(x => x.Citation == citation);
+            if (excludeReportId.HasValue)
+                q = q.Where(x => x.Id != excludeReportId.Value);
+
+            return await q.AnyAsync();
+        }
+
+        private static string NormalizeCitation(string s)
+        {
+            s = (s ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(s)) return s;
+
+            // collapse whitespace
+            while (s.Contains("  "))
+                s = s.Replace("  ", " ");
+
+            return s.Trim();
+        }
+
+        private static string ServiceCode(ReportService service) => service switch
+        {
+            ReportService.LawAfricaLawReports_LLR => "LLR",
+            ReportService.OdungasDigest => "OD",
+            ReportService.UgandaLawReports_ULR => "ULR",
+            ReportService.TanzaniaLawReports_TLR => "TLR",
+            ReportService.SouthernSudanLawReportsAndJournal_SSLRJ => "SSLRJ",
+            ReportService.EastAfricaLawReports_EALR => "EALR",
+            ReportService.EastAfricaCourtOfAppealReports_EACA => "EACA",
+            ReportService.EastAfricaGeneralReports_EAGR => "EAGR",
+            ReportService.EastAfricaProtectorateLawReports_EAPLR => "EAPLR",
+            ReportService.ZanzibarProtectorateLawReports_ZPLR => "ZPLR",
+            ReportService.CompanyRegistrySearch => "CRS",
+            ReportService.UgandaLawSocietyReports_ULSR => "ULSR",
+            ReportService.KenyaIndustrialPropertyInstitute => "KIPI",
+            _ => "—"
+        };
+
+        private static string CourtCode(CourtType ct) => ct switch
+        {
+            CourtType.SupremeCourt => "SCK",
+            CourtType.CourtOfAppeal => "CAK",
+            CourtType.HighCourt => "HCK",
+            CourtType.EmploymentAndLabourRelationsCourt => "ELRC",
+            CourtType.EnvironmentAndLandCourt => "ELC",
+            CourtType.MagistratesCourts => "MC",
+            CourtType.KadhisCourts => "KC",
+            CourtType.CourtsMartial => "CM",
+            CourtType.SmallClaimsCourt => "SCC",
+            CourtType.Tribunals => "TRIB",
+            _ => "—"
+        };
+
+        private static string TownCode(string? town)
+        {
+            var t = TrimOrNull(town);
+            if (string.IsNullOrWhiteSpace(t)) return "";
+
+            // get first alphabetic character
+            foreach (var ch in t.ToUpperInvariant())
+            {
+                if (ch >= 'A' && ch <= 'Z')
+                    return ch.ToString();
+            }
+            return "";
+        }
+
         private static string BuildReportTitle(LawReportUpsertDto dto, string? resolvedTownName)
         {
             var parts = new List<string> { $"{dto.ReportNumber.Trim()} ({dto.Year})" };
@@ -441,10 +565,8 @@ namespace LawAfrica.API.Controllers
 
                 Court = r.Court,
 
-                // ✅ Keep old field
                 Town = r.Town,
 
-                // ✅ NEW: structured town info
                 TownId = r.TownId,
                 TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
 
@@ -456,7 +578,6 @@ namespace LawAfrica.API.Controllers
 
                 Title = r.LegalDocument?.Title ?? "",
 
-                // ✅ Labels (frontend can render without guessing)
                 ServiceLabel = ServiceLabel(r.Service),
                 CourtTypeLabel = CourtTypeLabel(r.CourtType),
                 DecisionTypeLabel = DecisionTypeLabel(r.DecisionType),
