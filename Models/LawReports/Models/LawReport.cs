@@ -1,5 +1,5 @@
 ﻿using System.ComponentModel.DataAnnotations;
-using LawAfrica.API.Models;
+using LawAfrica.API.Models.LawReports.Enums;
 
 namespace LawAfrica.API.Models.Reports
 {
@@ -59,11 +59,15 @@ namespace LawAfrica.API.Models.Reports
         public ReportDecisionType DecisionType { get; set; }
         public ReportCaseType CaseType { get; set; }
 
+        public CourtType CourtType { get; set; } = CourtType.HighCourt;
+
         // -------------------
         // METADATA
         // -------------------
         [MaxLength(200)]
-        public string? Court { get; set; }
+        public string? Court { get; set; } // optional legacy/display string
+
+        public string? Town { get; set; }
 
         [MaxLength(200)]
         public string? Parties { get; set; }
@@ -84,7 +88,5 @@ namespace LawAfrica.API.Models.Reports
         // -------------------
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public DateTime? UpdatedAt { get; set; }
-        public string? Town { get; set; }
-
     }
 }

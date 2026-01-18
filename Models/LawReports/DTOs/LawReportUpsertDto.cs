@@ -10,7 +10,7 @@ namespace LawAfrica.API.DTOs.Reports
         [Range(1, int.MaxValue)]
         public int CountryId { get; set; }
 
-        // ✅ New required
+        // ✅ Required enum
         [Required]
         public ReportService Service { get; set; } = ReportService.LawAfricaLawReports_LLR;
 
@@ -32,8 +32,13 @@ namespace LawAfrica.API.DTOs.Reports
         [Required]
         public ReportCaseType CaseType { get; set; }
 
+        // Optional legacy/display
         [MaxLength(200)]
         public string? Court { get; set; }
+
+        public int CourtType { get; set; } // 1..10
+
+        public string? Town { get; set; }
 
         [MaxLength(200)]
         public string? Parties { get; set; }
@@ -45,9 +50,8 @@ namespace LawAfrica.API.DTOs.Reports
 
         [Required]
         public string ContentText { get; set; } = string.Empty;
-        public string? Town { get; set; }
 
-        // ✅ Read-only is fine; just NEVER assign to it in controller
+        // ✅ Read-only; NEVER assign to it in controller
         public LegalDocumentCategory Category => LegalDocumentCategory.LLRServices;
 
         public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
@@ -62,6 +66,9 @@ namespace LawAfrica.API.DTOs.Reports
 
             if (string.IsNullOrWhiteSpace(ContentText))
                 yield return new ValidationResult("ContentText is required.", new[] { nameof(ContentText) });
+
+            if (CourtType <= 0)
+                yield return new ValidationResult("CourtType is required.", new[] { nameof(CourtType) });
         }
     }
 }

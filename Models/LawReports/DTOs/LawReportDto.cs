@@ -16,7 +16,11 @@ namespace LawAfrica.API.DTOs.Reports
         public ReportDecisionType DecisionType { get; set; }
         public ReportCaseType CaseType { get; set; }
 
-        public string? Court { get; set; }
+        public string? Court { get; set; }     // optional legacy/display
+        public int CourtType { get; set; }     // enum as int
+
+        public string? Town { get; set; }
+
         public string? Parties { get; set; }
         public string? Judges { get; set; }
         public DateTime? DecisionDate { get; set; }
@@ -25,15 +29,17 @@ namespace LawAfrica.API.DTOs.Reports
 
         public string Title { get; set; } = "";
 
-        // ✅ Needed
         public int CountryId { get; set; }
 
-        // ✅ New
         public ReportService Service { get; set; }
 
         // ✅ Always LLR Services
         public LegalDocumentCategory Category => LegalDocumentCategory.LLRServices;
-        public string? Town { get; set; }
 
+        // ✅ Labels (NEW)
+        public string? ServiceLabel { get; set; }
+        public string? CourtTypeLabel { get; set; }
+        public string? DecisionTypeLabel { get; set; }
+        public string? CaseTypeLabel { get; set; }
     }
 }

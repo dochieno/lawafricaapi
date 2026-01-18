@@ -24,6 +24,10 @@
         public int? ExistingLawReportId { get; set; }
         public int? ExistingLegalDocumentId { get; set; }
         public string? DuplicateReason { get; set; }
+
+        public int CourtType { get; set; } // 1..10
+
+        public string? Town { get; set; }
     }
 
     public class ReportImportPreviewDto
