@@ -168,6 +168,7 @@ namespace LawAfrica.API.Controllers
                 PublicPrice = 0,
                 CreatedAt = DateTime.UtcNow,
                 PublishedAt = DateTime.UtcNow
+
             };
 
             _db.LegalDocuments.Add(doc);
