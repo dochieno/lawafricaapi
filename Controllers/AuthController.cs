@@ -193,6 +193,48 @@ namespace LawAfrica.API.Controllers
             }
 
 
+        // =========================================================
+        // ✅ NEW: TwoFactor setup link redirect (used in 2FA emails)
+        // GET: /api/auth/twofactor-setup?token=xxxx
+        // - Redirects to frontend TwoFactor setup page with token appended
+        // - Does NOT verify the token (verification happens in POST /api/security/verify-2fa-setup)
+        // =========================================================
+        [AllowAnonymous]
+        [HttpGet("twofactor-setup")]
+        public IActionResult TwoFactorSetupLink([FromQuery] string token)
+        {
+            token = (token ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(token))
+                return BadRequest("Token is required.");
+
+            var config = HttpContext.RequestServices.GetService(typeof(IConfiguration)) as IConfiguration;
+
+            // ✅ Prefer explicit URL:
+            // FrontendTwoFactorSetupUrl = https://lawafricadigitalhub.vercel.app/twofactor-setup
+            var frontend2FaUrl = (config?["FrontendTwoFactorSetupUrl"] ?? "").Trim();
+
+            // Fallback to FrontendUrl / FrontendBaseUrl
+            if (string.IsNullOrWhiteSpace(frontend2FaUrl))
+            {
+                var frontendUrl = (config?["FrontendUrl"] ?? "").Trim().TrimEnd('/');
+                var frontendBaseUrl = (config?["FrontendBaseUrl"] ?? "").Trim().TrimEnd('/');
+                var baseUrl = !string.IsNullOrWhiteSpace(frontendUrl) ? frontendUrl : frontendBaseUrl;
+
+                if (!string.IsNullOrWhiteSpace(baseUrl))
+                    frontend2FaUrl = $"{baseUrl}/twofactor-setup";
+            }
+
+            // If we can't redirect (misconfigured env vars), return token in HTML so user can copy.
+            if (string.IsNullOrWhiteSpace(frontend2FaUrl))
+                return Content($"Setup token: {System.Net.WebUtility.HtmlEncode(token)}", "text/plain");
+
+            // ✅ Safe append token whether url has ? already or not
+            var separator = frontend2FaUrl.Contains("?") ? "&" : "?";
+            var url = $"{frontend2FaUrl}{separator}token={Uri.EscapeDataString(token)}";
+
+            return Redirect(url);
+        }
+
 
         // =========================================================
         // EMAIL VERIFICATION

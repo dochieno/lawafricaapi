@@ -96,6 +96,36 @@ namespace LawAfrica.API.Services
         }
 
         // =========================================================
+        // ✅ NEW: Central "2FA setup link" builder
+        // =========================================================
+        // Change: adds a single source of truth for the 2FA email link with token appended.
+        // Env/appsettings: FrontendTwoFactorSetupUrl = https://lawafricadigitalhub.vercel.app/twofactor-setup
+        private string BuildTwoFactorSetupLink(string rawSetupToken)
+        {
+            if (string.IsNullOrWhiteSpace(rawSetupToken))
+                return string.Empty;
+
+            // Preferred explicit page:
+            var baseUrl = (_configuration["FrontendTwoFactorSetupUrl"] ?? "").Trim();
+
+            // Fallback: build from FrontendUrl if you prefer that pattern
+            if (string.IsNullOrWhiteSpace(baseUrl))
+            {
+                var frontendUrl = (_configuration["FrontendUrl"] ?? "").Trim().TrimEnd('/');
+                if (!string.IsNullOrWhiteSpace(frontendUrl))
+                    baseUrl = $"{frontendUrl}/twofactor-setup";
+            }
+
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                return string.Empty;
+
+            baseUrl = baseUrl.TrimEnd('/');
+
+            var sep = baseUrl.Contains("?") ? "&" : "?";
+            return $"{baseUrl}{sep}token={Uri.EscapeDataString(rawSetupToken)}";
+        }
+
+        // =========================================================
         // CANONICAL 2FA HELPERS (FIXED)
         // =========================================================
 
@@ -173,14 +203,14 @@ namespace LawAfrica.API.Services
             // ✅ normalize inputs early
             var username = (request.Username ?? "").Trim();
             var normalizedUsername = username.ToUpperInvariant();
+
             if (IsValid(request.Username))
                 throw new ArgumentException(
                     "Username may contain letters and dots only (e.g. d.ochieno). Numbers and spaces are not allowed."
                 );
 
-
             var email = (request.Email ?? "").Trim();
-            var normalizedEmail = email; // keep as-is; DB uniqueness handles casing depending on collation
+            var normalizedEmail = email;
 
             var password = request.Password ?? "";
 
@@ -197,7 +227,6 @@ namespace LawAfrica.API.Services
             if (usernameTaken)
                 return null;
 
-            // ✅ Email uniqueness (trimmed). Keep your logic but normalize trimming.
             if (!string.IsNullOrWhiteSpace(normalizedEmail))
             {
                 var emailTaken = await _db.Users.AnyAsync(u => u.Email == normalizedEmail);
@@ -209,8 +238,8 @@ namespace LawAfrica.API.Services
 
             var user = new User
             {
-                Username = username,                 // trimmed
-                NormalizedUsername = normalizedUsername, // ✅ set explicitly (also set by SaveChanges, but safe)
+                Username = username,
+                NormalizedUsername = normalizedUsername,
                 Email = normalizedEmail,
                 PhoneNumber = request.PhoneNumber,
                 FirstName = request.FirstName,
@@ -250,12 +279,10 @@ namespace LawAfrica.API.Services
             return ToUserResponse(user);
         }
 
-
-
-    // =========================================================
-    // ✅ Send verification email for ANY user (used by registration intent flow)
-    // =========================================================
-    public async Task<bool> SendEmailVerificationAsync(int userId)
+        // =========================================================
+        // ✅ Send verification email for ANY user (used by registration intent flow)
+        // =========================================================
+        public async Task<bool> SendEmailVerificationAsync(int userId)
         {
             var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId);
             if (user == null) return false;
@@ -293,7 +320,6 @@ namespace LawAfrica.API.Services
 
             var identLower = identifier.ToLower();
 
-            // ✅ Allow login using Username OR Email (case-insensitive)
             var user = await _db.Users.FirstOrDefaultAsync(u =>
                 u.Username.ToLower() == identLower ||
                 (u.Email != null && u.Email.ToLower() == identLower)
@@ -324,13 +350,11 @@ namespace LawAfrica.API.Services
                 return LoginResult.Failed("Invalid credentials.");
             }
 
-            // ✅ Preserve your existing 2FA behavior
             if (string.IsNullOrWhiteSpace(user.TwoFactorSecret) || !user.TwoFactorEnabled)
                 return LoginResult.TwoFactorSetupRequired(user.Id);
 
             return LoginResult.TwoFactorRequired(user.Id);
         }
-
 
         // ----------------------- GENERATE TOKEN -----------------------
         private string GenerateJwtToken(User user)
@@ -404,68 +428,55 @@ namespace LawAfrica.API.Services
         // =========================================================
         // ✅ Branded template-based verification email
         // =========================================================
-            private async Task SendVerificationEmail(User user)
-            {
-                if (string.IsNullOrWhiteSpace(user.Email))
-                    return;
+        private async Task SendVerificationEmail(User user)
+        {
+            if (string.IsNullOrWhiteSpace(user.Email))
+                return;
 
-                var token = (user.EmailVerificationToken ?? "").Trim();
-                if (string.IsNullOrWhiteSpace(token))
-                    return;
+            var token = (user.EmailVerificationToken ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(token))
+                return;
 
-                // ✅ Prefer explicit API base URL (Render) to ensure absolute links in emails
-                // Set on Render:
-                //   ApiBaseUrl = https://lawafricaapi.onrender.com
-                // Optional fallback:
-                //   AppUrl = https://lawafricaapi.onrender.com
-                var apiBaseUrl =
-                    (_configuration["ApiBaseUrl"] ?? "").Trim().TrimEnd('/') ??
-                    "";
+            var apiBaseUrl =
+                (_configuration["ApiBaseUrl"] ?? "").Trim().TrimEnd('/') ??
+                "";
 
-                if (string.IsNullOrWhiteSpace(apiBaseUrl))
-                    apiBaseUrl = (_configuration["AppUrl"] ?? "").Trim().TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(apiBaseUrl))
+                apiBaseUrl = (_configuration["AppUrl"] ?? "").Trim().TrimEnd('/');
 
-                // Hard fallback (safe for prod)
-                if (string.IsNullOrWhiteSpace(apiBaseUrl))
-                    apiBaseUrl = "https://lawafricaapi.onrender.com";
+            if (string.IsNullOrWhiteSpace(apiBaseUrl))
+                apiBaseUrl = "https://lawafricaapi.onrender.com";
 
-                // ✅ Link goes to API verify endpoint (which will redirect to frontend login)
-                var verificationUrl =
-                    $"{apiBaseUrl}/api/auth/verify-email?token={Uri.EscapeDataString(token)}";
+            var verificationUrl =
+                $"{apiBaseUrl}/api/auth/verify-email?token={Uri.EscapeDataString(token)}";
 
-                var subject = "Welcome to LawAfrica — verify your email ✅";
+            var subject = "Welcome to LawAfrica — verify your email ✅";
+            var preheader = "You’re in! Verify your email to unlock your LawAfrica account.";
 
-                // ✅ More thrilling, welcoming copy
-                var preheader = "You’re in! Verify your email to unlock your LawAfrica account.";
+            var rendered = await _emailRenderer.RenderAsync(
+                templateName: "email-verification",
+                subject: subject,
+                model: new
+                {
+                    Subject = subject,
+                    Preheader = preheader,
+                    ProductName = "LawAfrica",
+                    Year = DateTime.UtcNow.Year.ToString(),
+                    SupportEmail = "support@lawafrica.com",
 
-                var rendered = await _emailRenderer.RenderAsync(
-                    templateName: "email-verification",
-                    subject: subject,
-                    model: new
-                    {
-                        Subject = subject,
-                        Preheader = preheader,
-                        ProductName = "LawAfrica",
-                        Year = DateTime.UtcNow.Year.ToString(),
-                        SupportEmail = "support@lawafrica.com",
+                    DisplayName = (user.FirstName ?? user.Username),
+                    VerificationUrl = verificationUrl,
 
-                        DisplayName = (user.FirstName ?? user.Username),
+                    WelcomeTitle = "Welcome to LawAfrica 🎉",
+                    WelcomeBody =
+                        "You’re one step away from getting full access. Verify your email to activate your account, then sign in and start exploring legal resources, updates, and your personal library."
+                },
+                inlineImages: null,
+                ct: CancellationToken.None
+            );
 
-                        // ✅ the correct absolute link
-                        VerificationUrl = verificationUrl,
-
-                        // ✅ new optional template tokens (safe even if template ignores them)
-                        WelcomeTitle = "Welcome to LawAfrica 🎉",
-                        WelcomeBody =
-                            "You’re one step away from getting full access. Verify your email to activate your account, then sign in and start exploring legal resources, updates, and your personal library."
-                    },
-                    inlineImages: null,
-                    ct: CancellationToken.None
-                );
-
-                await _emailService.SendEmailAsync(user.Email, rendered.Subject ?? subject, rendered.Html);
-            }
-
+            await _emailService.SendEmailAsync(user.Email, rendered.Subject ?? subject, rendered.Html);
+        }
 
         // =========================================================
         // ✅ Branded template-based password reset email
@@ -644,6 +655,9 @@ namespace LawAfrica.API.Services
 
             var subject = "LawAfrica – Two-Factor Authentication Setup";
 
+            // ✅ NEW: include a link to frontend setup page with token appended
+            var setupLink = BuildTwoFactorSetupLink(rawSetupToken); // ✅ CHANGED
+
             var rendered = await _emailRenderer.RenderAsync(
                 templateName: "twofactor-setup",
                 subject: subject,
@@ -659,6 +673,7 @@ namespace LawAfrica.API.Services
                     QrCid = cid,
                     SecretKey = secretKey,
                     SetupToken = rawSetupToken,
+                    SetupLink = setupLink, // ✅ NEW (use in template)
                     SetupTokenExpiryUtc = $"{expiryUtc:yyyy-MM-dd HH:mm} UTC"
                 },
                 inlineImages: null,
@@ -703,29 +718,29 @@ namespace LawAfrica.API.Services
             user.TwoFactorEnabled = true;
             user.TwoFactorSetupTokenHash = null;
             user.TwoFactorSetupTokenExpiry = null;
+
+            // ✅ Since the QR/setup token was delivered to this email, treat email as verified now.
+            user.IsEmailVerified = true;
+            user.EmailVerificationToken = null;
+            user.EmailVerificationTokenExpiry = null;
+
             user.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
             return true;
         }
 
-
         public async Task<(bool ok, string? token, string? error)> VerifyTwoFactorLoginAsync(string username, string code)
         {
-            // ✅ Normalize inputs
             var ident = (username ?? "").Trim();
             var cleanCode = (code ?? "").Trim();
 
             if (string.IsNullOrWhiteSpace(ident) || string.IsNullOrWhiteSpace(cleanCode))
                 return (false, null, "Username or email and code are required.");
 
-            // ✅ Prefer normalized username match (fast, consistent), but also allow email
             var identUpper = ident.ToUpperInvariant();
             var identLower = ident.ToLowerInvariant();
 
-            // ✅ Username OR Email lookup (case-insensitive)
-            // - Username: via NormalizedUsername (recommended)
-            // - Email: compare lowercased (safe cross-db)
             var user = await _db.Users.FirstOrDefaultAsync(u =>
                 (!string.IsNullOrWhiteSpace(u.NormalizedUsername) && u.NormalizedUsername == identUpper) ||
                 (!string.IsNullOrWhiteSpace(u.Email) && u.Email.Trim().ToLower() == identLower)
@@ -757,8 +772,6 @@ namespace LawAfrica.API.Services
 
             return (true, GenerateJwtToken(user), null);
         }
-
-
 
         public async Task<SecurityStatusResponse?> GetSecurityStatusAsync(int userId)
         {
@@ -831,6 +844,9 @@ namespace LawAfrica.API.Services
 
             var subject = "LawAfrica – Two-Factor Authentication Setup";
 
+            // ✅ NEW: include a link to frontend setup page with token appended
+            var setupLink = BuildTwoFactorSetupLink(rawSetupToken); // ✅ CHANGED
+
             var rendered = await _emailRenderer.RenderAsync(
                 templateName: "twofactor-setup",
                 subject: subject,
@@ -846,6 +862,7 @@ namespace LawAfrica.API.Services
                     QrCid = cid,
                     SecretKey = user.TwoFactorSecret!,
                     SetupToken = rawSetupToken,
+                    SetupLink = setupLink, // ✅ NEW (use in template)
                     SetupTokenExpiryUtc = $"{expiryUtc:yyyy-MM-dd HH:mm} UTC"
                 },
                 inlineImages: null,
@@ -989,6 +1006,9 @@ namespace LawAfrica.API.Services
 
             var subject = "LawAfrica – Two-Factor Authentication Setup";
 
+            // ✅ NEW: same logic as Enable/Regenerate — append token to setup page link
+            var setupLink = BuildTwoFactorSetupLink(rawSetupToken); // ✅ CHANGED
+
             var rendered = await _emailRenderer.RenderAsync(
                 templateName: "twofactor-setup",
                 subject: subject,
@@ -1004,6 +1024,7 @@ namespace LawAfrica.API.Services
                     QrCid = cid,
                     SecretKey = user.TwoFactorSecret!,
                     SetupToken = rawSetupToken,
+                    SetupLink = setupLink, // ✅ NEW (use in template)
                     SetupTokenExpiryUtc = $"{expiryUtc:yyyy-MM-dd HH:mm} UTC"
                 },
                 inlineImages: null,
@@ -1044,7 +1065,6 @@ namespace LawAfrica.API.Services
             if (string.IsNullOrWhiteSpace(password)) return false;
             if (password.Length < 8) return false;
 
-            // at least one upper, one lower, one digit, one special
             bool hasUpper = password.Any(char.IsUpper);
             bool hasLower = password.Any(char.IsLower);
             bool hasDigit = password.Any(char.IsDigit);
@@ -1058,7 +1078,6 @@ namespace LawAfrica.API.Services
             if (string.IsNullOrWhiteSpace(username))
                 return false;
 
-            // No leading/trailing whitespace
             if (!string.Equals(username, username.Trim(), StringComparison.Ordinal))
                 return false;
 
