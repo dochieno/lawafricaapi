@@ -915,44 +915,400 @@ namespace LawAfrica.API.Controllers
             ReportCaseType.Constitutional => "Constitutional",
             _ => "—"
         };
-    }
 
-    // ============================================================
-    // ✅ Bulk import DTOs (keep here or move to DTOs folder)
-    // ============================================================
-    public class LawReportBulkImportRequest
-    {
-        public List<LawReportUpsertDto>? Items { get; set; } = new();
-        public int? BatchSize { get; set; } = 200;
-        public bool? StopOnError { get; set; } = false;
-        public bool? DryRun { get; set; } = false;
-    }
 
-    public class LawReportBulkImportResponse
-    {
-        public int Total { get; set; }
-        public int BatchSize { get; set; }
-        public bool DryRun { get; set; }
-        public bool StopOnError { get; set; }
 
-        public int Created { get; set; }
-        public int Duplicates { get; set; }
-        public int Failed { get; set; }
+        //Additional controllers:
 
-        public List<LawReportImportItemResult> Items { get; set; } = new();
-    }
+        // ✅ NEW: END-USER LIST/SEARCH (Paged)  ✅ Step 4A
+        // GET /api/law-reports/search?...filters...
+        //
+        // Returns lightweight list items + PreviewText from ContentText.
+        // Does NOT return full ContentText.
+        // ============================================================
+        [Authorize]
+        [HttpGet("search")]
+        public async Task<ActionResult<LawReportSearchResponse>> Search(
+            [FromQuery] string? q = null,
+            [FromQuery] string? reportNumber = null,
+            [FromQuery] string? parties = null,
+            [FromQuery] string? citation = null,
+            [FromQuery] int? year = null,
+            [FromQuery] string? courtType = null,
+            [FromQuery] string? townOrPostCode = null,
+            [FromQuery] string? caseType = null,
+            [FromQuery] string? sort = "year_desc",
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 18,
+            CancellationToken ct = default
+        )
+        {
+            // Defensive paging
+            page = page < 1 ? 1 : page;
+            pageSize = Math.Clamp(pageSize, 1, 50);
 
-    public class LawReportImportItemResult
-    {
-        public int Index { get; set; }                  // 0-based index in submitted array
-        public string Status { get; set; } = "pending"; // created | duplicate | failed | pending | ready
-        public string Message { get; set; } = "";
-        public string? Detail { get; set; }
+            // Normalize strings
+            q = (q ?? "").Trim();
+            reportNumber = (reportNumber ?? "").Trim();
+            parties = (parties ?? "").Trim();
+            citation = (citation ?? "").Trim();
+            courtType = (courtType ?? "").Trim();
+            townOrPostCode = (townOrPostCode ?? "").Trim();
+            caseType = (caseType ?? "").Trim();
 
-        public int? LawReportId { get; set; }
-        public int? LegalDocumentId { get; set; }
-        public int? ExistingLawReportId { get; set; }
+            // Start query: only LLRServices reports
+            var query = _db.LawReports
+                .AsNoTracking()
+                .Include(x => x.LegalDocument)
+                .Include(x => x.TownRef)
+                .Where(r =>
+                    r.LegalDocument != null &&
+                    r.LegalDocument.Category == LLR_CATEGORY &&
+                    r.LegalDocument.Kind == LegalDocumentKind.Report &&
+                    r.LegalDocument.FileType == "report" &&
+                    r.LegalDocument.Status == LegalDocumentStatus.Published
+                )
+                .AsQueryable();
 
-        public string? Citation { get; set; }
+            // ---------- Quick search ----------
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                var qLower = q.ToLower();
+
+                query = query.Where(r =>
+                    (r.ReportNumber != null && r.ReportNumber.ToLower().Contains(qLower)) ||
+                    (r.Citation != null && r.Citation.ToLower().Contains(qLower)) ||
+                    (r.CaseNumber != null && r.CaseNumber.ToLower().Contains(qLower)) ||
+                    (r.Parties != null && r.Parties.ToLower().Contains(qLower)) ||
+                    (r.Court != null && r.Court.ToLower().Contains(qLower)) ||
+                    (r.Town != null && r.Town.ToLower().Contains(qLower)) ||
+                    (r.Judges != null && r.Judges.ToLower().Contains(qLower)) ||
+                    (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.ToLower().Contains(qLower)) ||
+                    (r.TownRef != null && r.TownRef.PostCode != null && r.TownRef.PostCode.ToLower().Contains(qLower))
+                );
+            }
+
+            // ---------- Specific filters ----------
+            if (!string.IsNullOrWhiteSpace(reportNumber))
+            {
+                var v = reportNumber.ToLower();
+                query = query.Where(r => r.ReportNumber != null && r.ReportNumber.ToLower().Contains(v));
+            }
+
+            if (!string.IsNullOrWhiteSpace(parties))
+            {
+                var v = parties.ToLower();
+                query = query.Where(r => r.Parties != null && r.Parties.ToLower().Contains(v));
+            }
+
+            if (!string.IsNullOrWhiteSpace(citation))
+            {
+                var v = citation.ToLower();
+                query = query.Where(r => r.Citation != null && r.Citation.ToLower().Contains(v));
+            }
+
+            if (year.HasValue)
+            {
+                query = query.Where(r => r.Year == year.Value);
+            }
+
+            // CourtType: prefer enum matching if client sends int/name; fallback to Court text contains
+            if (!string.IsNullOrWhiteSpace(courtType))
+            {
+                if (TryParseCourtType(courtType, out var ctEnum))
+                {
+                    query = query.Where(r => r.CourtType == ctEnum);
+                }
+                else
+                {
+                    var v = courtType.ToLower();
+                    query = query.Where(r =>
+                        (r.Court != null && r.Court.ToLower().Contains(v)) ||
+                        (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.ToLower().Contains(v))
+                    );
+                }
+            }
+
+            // Town / PostCode
+            if (!string.IsNullOrWhiteSpace(townOrPostCode))
+            {
+                var v = townOrPostCode.ToLower();
+
+                query = query.Where(r =>
+                    (r.Town != null && r.Town.ToLower().Contains(v)) ||
+                    (r.TownRef != null && r.TownRef.PostCode != null && r.TownRef.PostCode.ToLower().Contains(v))
+                );
+            }
+
+            // CaseType: prefer enum matching if client sends int/name
+            if (!string.IsNullOrWhiteSpace(caseType))
+            {
+                if (TryParseCaseType(caseType, out var caseEnum))
+                {
+                    query = query.Where(r => r.CaseType == caseEnum);
+                }
+                else
+                {
+                    // If not parseable, we don't apply filter (avoid false negatives).
+                    // Frontend should send int or enum name (Civil/Criminal/...).
+                }
+            }
+
+            // Total count BEFORE paging
+            var total = await query.CountAsync(ct);
+
+            // ---------- Sorting ----------
+            // supported:
+            // year_desc, year_asc, date_desc, reportno_asc, parties_asc
+            query = sort switch
+            {
+                "year_asc" => query.OrderBy(r => r.Year).ThenByDescending(r => r.Id),
+                "date_desc" => query.OrderByDescending(r => r.DecisionDate).ThenByDescending(r => r.Id),
+                "reportno_asc" => query.OrderBy(r => r.ReportNumber).ThenByDescending(r => r.Id),
+                "parties_asc" => query.OrderBy(r => r.Parties).ThenByDescending(r => r.Id),
+                _ => query.OrderByDescending(r => r.Year).ThenByDescending(r => r.Id), // year_desc default
+            };
+
+            // Page slice
+            var skip = (page - 1) * pageSize;
+
+            // Pull only page rows; create PreviewText from ContentText (SQL-translatable substring)
+            const int PREVIEW_LEN = 520;
+
+            var items = await query
+                .Skip(skip)
+                .Take(pageSize)
+                .Select(r => new LawReportListItemDto
+                {
+                    Id = r.Id,
+                    LegalDocumentId = r.LegalDocumentId,
+
+                    Title = r.LegalDocument != null ? (r.LegalDocument.Title ?? "") : "",
+                    IsPremium = r.LegalDocument != null && r.LegalDocument.IsPremium,
+
+                    ReportNumber = r.ReportNumber,
+                    Year = r.Year,
+                    CaseNumber = r.CaseNumber,
+                    Citation = r.Citation,
+
+                    CourtType = (int)r.CourtType,
+                    CourtTypeLabel = CourtTypeLabel(r.CourtType),
+
+                    DecisionType = r.DecisionType,
+                    DecisionTypeLabel = DecisionTypeLabel(r.DecisionType),
+
+                    CaseType = r.CaseType,
+                    CaseTypeLabel = CaseTypeLabel(r.CaseType),
+
+                    Court = r.Court,
+
+                    Town = r.Town,
+                    TownId = r.TownId,
+                    TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
+
+                    Parties = r.Parties,
+                    Judges = r.Judges,
+                    DecisionDate = r.DecisionDate,
+
+                    // ✅ Key: preview snippet (not full content)
+                    PreviewText =
+                        r.ContentText == null ? "" :
+                        (r.ContentText.Length <= PREVIEW_LEN ? r.ContentText : r.ContentText.Substring(0, PREVIEW_LEN))
+                })
+                .ToListAsync(ct);
+
+            // Light cleanup for nicer previews (page-only; safe)
+            foreach (var it in items)
+            {
+                it.PreviewText = CleanPreview(it.PreviewText);
+            }
+
+            return Ok(new LawReportSearchResponse
+            {
+                Items = items,
+                Total = total,
+                Page = page,
+                PageSize = pageSize
+            });
+        }
+
+        // ============================================================
+        // ✅ NEW: Case Types (distinct from DB)  ✅ Step 4B
+        // GET /api/law-reports/case-types
+        // Returns only case types that exist in DB (with counts)
+        // ============================================================
+        [Authorize]
+        [HttpGet("case-types")]
+        public async Task<ActionResult<List<LawReportCaseTypeOptionDto>>> GetCaseTypes(CancellationToken ct)
+        {
+            // Only include published LLRServices report documents
+            var data = await _db.LawReports
+                .AsNoTracking()
+                .Where(r =>
+                    r.LegalDocument != null &&
+                    r.LegalDocument.Category == LLR_CATEGORY &&
+                    r.LegalDocument.Kind == LegalDocumentKind.Report &&
+                    r.LegalDocument.FileType == "report" &&
+                    r.LegalDocument.Status == LegalDocumentStatus.Published
+                )
+                .GroupBy(r => r.CaseType)
+                .Select(g => new LawReportCaseTypeOptionDto
+                {
+                    Value = (int)g.Key,
+                    Label = CaseTypeLabel(g.Key),
+                    Count = g.Count()
+                })
+                .OrderBy(x => x.Label)
+                .ToListAsync(ct);
+
+            return Ok(data);
+        }
+
+        // DTO for the dropdown
+        public class LawReportCaseTypeOptionDto
+        {
+            public int Value { get; set; }       // enum int (1..6)
+            public string Label { get; set; } = ""; // "Criminal", "Civil", ...
+            public int Count { get; set; }       // helpful for UI
+        }
+
+
+        private static string CleanPreview(string? s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return "";
+            var t = s.Replace("\r\n", "\n").Replace("\r", "\n").Trim();
+
+            // Collapse excessive whitespace while keeping paragraph breaks
+            // (keeps two newlines, collapses 3+ into 2)
+            while (t.Contains("\n\n\n")) t = t.Replace("\n\n\n", "\n\n");
+
+            return t;
+        }
+
+        private static bool TryParseCaseType(string raw, out ReportCaseType v)
+        {
+            v = default;
+
+            var t = (raw ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(t)) return false;
+
+            if (int.TryParse(t, out var n))
+            {
+                if (Enum.IsDefined(typeof(ReportCaseType), n))
+                {
+                    v = (ReportCaseType)n;
+                    return true;
+                }
+                return false;
+            }
+
+            // Allow names: "Civil", "Criminal", ...
+            return Enum.TryParse<ReportCaseType>(t, ignoreCase: true, out v);
+        }
+
+        private static bool TryParseCourtType(string raw, out CourtType v)
+        {
+            v = default;
+
+            var t = (raw ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(t)) return false;
+
+            if (int.TryParse(t, out var n))
+            {
+                if (Enum.IsDefined(typeof(CourtType), n))
+                {
+                    v = (CourtType)n;
+                    return true;
+                }
+                return false;
+            }
+
+            // Allow names: "HighCourt", "CourtOfAppeal", ...
+            return Enum.TryParse<CourtType>(t, ignoreCase: true, out v);
+        }
+
+        // ============================================================
+        // ✅ Bulk import DTOs (keep here or move to DTOs folder)
+        // ============================================================
+        public class LawReportBulkImportRequest
+        {
+            public List<LawReportUpsertDto>? Items { get; set; } = new();
+            public int? BatchSize { get; set; } = 200;
+            public bool? StopOnError { get; set; } = false;
+            public bool? DryRun { get; set; } = false;
+        }
+
+        public class LawReportBulkImportResponse
+        {
+            public int Total { get; set; }
+            public int BatchSize { get; set; }
+            public bool DryRun { get; set; }
+            public bool StopOnError { get; set; }
+
+            public int Created { get; set; }
+            public int Duplicates { get; set; }
+            public int Failed { get; set; }
+
+            public List<LawReportImportItemResult> Items { get; set; } = new();
+        }
+
+        public class LawReportImportItemResult
+        {
+            public int Index { get; set; }                  // 0-based index in submitted array
+            public string Status { get; set; } = "pending"; // created | duplicate | failed | pending | ready
+            public string Message { get; set; } = "";
+            public string? Detail { get; set; }
+
+            public int? LawReportId { get; set; }
+            public int? LegalDocumentId { get; set; }
+            public int? ExistingLawReportId { get; set; }
+
+            public string? Citation { get; set; }
+        }
+
+        //To handle searches:
+
+        public class LawReportSearchResponse
+        {
+            public List<LawReportListItemDto> Items { get; set; } = new();
+            public int Total { get; set; }
+            public int Page { get; set; }
+            public int PageSize { get; set; }
+        }
+
+        public class LawReportListItemDto
+        {
+            public int Id { get; set; }
+            public int LegalDocumentId { get; set; }
+
+            public string Title { get; set; } = "";
+            public bool IsPremium { get; set; }
+
+            public string? ReportNumber { get; set; }
+            public int Year { get; set; }
+            public string? CaseNumber { get; set; }
+            public string? Citation { get; set; }
+
+            public int CourtType { get; set; }
+            public string CourtTypeLabel { get; set; } = "";
+
+            public ReportDecisionType DecisionType { get; set; }
+            public string DecisionTypeLabel { get; set; } = "";
+
+            public ReportCaseType CaseType { get; set; }
+            public string CaseTypeLabel { get; set; } = "";
+
+            public string? Court { get; set; }
+
+            public string? Town { get; set; }
+            public int? TownId { get; set; }
+            public string? TownPostCode { get; set; }
+
+            public string? Parties { get; set; }
+            public string? Judges { get; set; }
+            public DateTime? DecisionDate { get; set; }
+
+            public string PreviewText { get; set; } = "";
+        }
     }
 }
