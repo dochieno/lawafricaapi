@@ -1155,8 +1155,8 @@ namespace LawAfrica.API.Controllers
         [HttpGet("case-types")]
         public async Task<ActionResult<List<LawReportCaseTypeOptionDto>>> GetCaseTypes(CancellationToken ct)
         {
-            // Use an explicit join for stable SQL translation
-            var data = await (
+            // 1) Get raw distinct values + counts from SQL (no label mapping here)
+            var raw = await (
                 from r in _db.LawReports.AsNoTracking()
                 join d in _db.LegalDocuments.AsNoTracking() on r.LegalDocumentId equals d.Id
                 where d.Category == LLR_CATEGORY
@@ -1164,24 +1164,44 @@ namespace LawAfrica.API.Controllers
                       && d.FileType == "report"
                       && d.Status == LegalDocumentStatus.Published
                 group r by r.CaseType into g
-                select new LawReportCaseTypeOptionDto
+                select new
                 {
                     Value = (int)g.Key,
-                    Label = CaseTypeLabel(g.Key),
                     Count = g.Count()
                 }
-            )
-            .OrderBy(x => x.Label)
-            .ToListAsync(ct);
+            ).ToListAsync(ct);
+
+            // 2) Map labels in-memory (safe)
+            var data = raw
+                .Where(x => x.Value > 0) // ignore 0 / unknown if present
+                .Select(x =>
+                {
+                    var enumVal = (ReportCaseType)x.Value;
+
+                    // Safe label: never throw
+                    string label;
+                    try { label = CaseTypeLabel(enumVal) ?? enumVal.ToString(); }
+                    catch { label = enumVal.ToString(); }
+
+                    return new LawReportCaseTypeOptionDto
+                    {
+                        Value = x.Value,
+                        Label = label,
+                        Count = x.Count
+                    };
+                })
+                .OrderBy(x => x.Label)
+                .ToList();
 
             return Ok(data);
         }
+
 
         [Authorize]
         [HttpGet("decision-types")]
         public async Task<ActionResult<List<LawReportDecisionTypeOptionDto>>> GetDecisionTypes(CancellationToken ct)
         {
-            var data = await (
+            var raw = await (
                 from r in _db.LawReports.AsNoTracking()
                 join d in _db.LegalDocuments.AsNoTracking() on r.LegalDocumentId equals d.Id
                 where d.Category == LLR_CATEGORY
@@ -1189,15 +1209,32 @@ namespace LawAfrica.API.Controllers
                       && d.FileType == "report"
                       && d.Status == LegalDocumentStatus.Published
                 group r by r.DecisionType into g
-                select new LawReportDecisionTypeOptionDto
+                select new
                 {
                     Value = (int)g.Key,
-                    Label = DecisionTypeLabel(g.Key),
                     Count = g.Count()
                 }
-            )
-            .OrderBy(x => x.Label)
-            .ToListAsync(ct);
+            ).ToListAsync(ct);
+
+            var data = raw
+                .Where(x => x.Value > 0)
+                .Select(x =>
+                {
+                    var enumVal = (ReportDecisionType)x.Value;
+
+                    string label;
+                    try { label = DecisionTypeLabel(enumVal) ?? enumVal.ToString(); }
+                    catch { label = enumVal.ToString(); }
+
+                    return new LawReportDecisionTypeOptionDto
+                    {
+                        Value = x.Value,
+                        Label = label,
+                        Count = x.Count
+                    };
+                })
+                .OrderBy(x => x.Label)
+                .ToList();
 
             return Ok(data);
         }
@@ -1208,6 +1245,7 @@ namespace LawAfrica.API.Controllers
             public string Label { get; set; } = "";
             public int Count { get; set; }
         }
+
 
 
         // DTO for the dropdown
