@@ -258,6 +258,47 @@ namespace LawAfrica.API.Controllers
             return NoContent();
         }
 
+
+        // -------------------------
+        // UPDATE CONTENT ONLY (Admin Report Content screen)
+        // -------------------------
+        [Authorize(Roles = "Admin")]
+        [HttpPut("{id:int}/content")]
+        public async Task<IActionResult> UpdateContent(int id, [FromBody] LawReportContentUpdateDto dto, CancellationToken ct)
+        {
+            if (dto == null) return BadRequest(new { message = "Payload is required." });
+
+            // Only ContentText is required here
+            if (string.IsNullOrWhiteSpace(dto.ContentText))
+                return BadRequest(new { message = "ContentText is required." });
+
+            var r = await _db.LawReports
+                .Include(x => x.LegalDocument)
+                .FirstOrDefaultAsync(x => x.Id == id, ct);
+
+            if (r == null) return NotFound();
+
+            r.ContentText = dto.ContentText;
+            r.UpdatedAt = DateTime.UtcNow;
+
+            // Optional: allow updating these from content page if you want
+            if (dto.DecisionType.HasValue) r.DecisionType = dto.DecisionType.Value;
+            if (dto.CaseType.HasValue) r.CaseType = dto.CaseType.Value;
+
+            await _db.SaveChangesAsync(ct);
+            return NoContent();
+        }
+
+        // Minimal DTO for content updates
+        public class LawReportContentUpdateDto
+        {
+            public string ContentText { get; set; } = "";
+
+            // optional – keep/remove depending on your content screen
+            public ReportDecisionType? DecisionType { get; set; }
+            public ReportCaseType? CaseType { get; set; }
+        }
+
         // ============================================================
         // ✅ NEW: BULK IMPORT ENDPOINT (FAST)
         // POST /api/law-reports/import
