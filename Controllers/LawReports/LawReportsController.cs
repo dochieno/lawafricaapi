@@ -937,6 +937,7 @@ namespace LawAfrica.API.Controllers
             [FromQuery] string? courtType = null,
             [FromQuery] string? townOrPostCode = null,
             [FromQuery] string? caseType = null,
+            [FromQuery] string? decisionType = null, // ✅ NEW
             [FromQuery] string? sort = "year_desc",
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 18,
@@ -954,6 +955,7 @@ namespace LawAfrica.API.Controllers
             citation = (citation ?? "").Trim();
             courtType = (courtType ?? "").Trim();
             townOrPostCode = (townOrPostCode ?? "").Trim();
+            decisionType = (decisionType ?? "").Trim();
             caseType = (caseType ?? "").Trim();
 
             // Start query: only LLRServices reports
@@ -1053,6 +1055,18 @@ namespace LawAfrica.API.Controllers
                     // Frontend should send int or enum name (Civil/Criminal/...).
                 }
             }
+            // DecisionType: prefer enum matching if client sends int/name (Judgment/Ruling/Award/...)
+            if (!string.IsNullOrWhiteSpace(decisionType))
+            {
+                if (TryParseDecisionType(decisionType, out var decEnum))
+                {
+                    query = query.Where(r => r.DecisionType == decEnum);
+                }
+                else
+                {
+                    // If not parseable, do not filter (avoid false negatives)
+                }
+            }
 
             // Total count BEFORE paging
             var total = await query.CountAsync(ct);
@@ -1141,28 +1155,60 @@ namespace LawAfrica.API.Controllers
         [HttpGet("case-types")]
         public async Task<ActionResult<List<LawReportCaseTypeOptionDto>>> GetCaseTypes(CancellationToken ct)
         {
-            // Only include published LLRServices report documents
-            var data = await _db.LawReports
-                .AsNoTracking()
-                .Where(r =>
-                    r.LegalDocument != null &&
-                    r.LegalDocument.Category == LLR_CATEGORY &&
-                    r.LegalDocument.Kind == LegalDocumentKind.Report &&
-                    r.LegalDocument.FileType == "report" &&
-                    r.LegalDocument.Status == LegalDocumentStatus.Published
-                )
-                .GroupBy(r => r.CaseType)
-                .Select(g => new LawReportCaseTypeOptionDto
+            // Use an explicit join for stable SQL translation
+            var data = await (
+                from r in _db.LawReports.AsNoTracking()
+                join d in _db.LegalDocuments.AsNoTracking() on r.LegalDocumentId equals d.Id
+                where d.Category == LLR_CATEGORY
+                      && d.Kind == LegalDocumentKind.Report
+                      && d.FileType == "report"
+                      && d.Status == LegalDocumentStatus.Published
+                group r by r.CaseType into g
+                select new LawReportCaseTypeOptionDto
                 {
                     Value = (int)g.Key,
                     Label = CaseTypeLabel(g.Key),
                     Count = g.Count()
-                })
-                .OrderBy(x => x.Label)
-                .ToListAsync(ct);
+                }
+            )
+            .OrderBy(x => x.Label)
+            .ToListAsync(ct);
 
             return Ok(data);
         }
+
+        [Authorize]
+        [HttpGet("decision-types")]
+        public async Task<ActionResult<List<LawReportDecisionTypeOptionDto>>> GetDecisionTypes(CancellationToken ct)
+        {
+            var data = await (
+                from r in _db.LawReports.AsNoTracking()
+                join d in _db.LegalDocuments.AsNoTracking() on r.LegalDocumentId equals d.Id
+                where d.Category == LLR_CATEGORY
+                      && d.Kind == LegalDocumentKind.Report
+                      && d.FileType == "report"
+                      && d.Status == LegalDocumentStatus.Published
+                group r by r.DecisionType into g
+                select new LawReportDecisionTypeOptionDto
+                {
+                    Value = (int)g.Key,
+                    Label = DecisionTypeLabel(g.Key),
+                    Count = g.Count()
+                }
+            )
+            .OrderBy(x => x.Label)
+            .ToListAsync(ct);
+
+            return Ok(data);
+        }
+
+        public class LawReportDecisionTypeOptionDto
+        {
+            public int Value { get; set; }
+            public string Label { get; set; } = "";
+            public int Count { get; set; }
+        }
+
 
         // DTO for the dropdown
         public class LawReportCaseTypeOptionDto
@@ -1204,6 +1250,35 @@ namespace LawAfrica.API.Controllers
 
             // Allow names: "Civil", "Criminal", ...
             return Enum.TryParse<ReportCaseType>(t, ignoreCase: true, out v);
+        }
+        private static bool TryParseDecisionType(string input, out ReportDecisionType value)
+        {
+            value = default;
+            if (string.IsNullOrWhiteSpace(input)) return false;
+
+            var t = input.Trim();
+
+            // int?
+            if (int.TryParse(t, out var n) && Enum.IsDefined(typeof(ReportDecisionType), n))
+            {
+                value = (ReportDecisionType)n;
+                return true;
+            }
+
+            // name / label (case-insensitive, ignore spaces & punctuation)
+            var norm = new string(t.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+
+            foreach (var v in Enum.GetValues(typeof(ReportDecisionType)).Cast<ReportDecisionType>())
+            {
+                var nameNorm = new string(v.ToString().Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+                if (nameNorm == norm)
+                {
+                    value = v;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static bool TryParseCourtType(string raw, out CourtType v)
