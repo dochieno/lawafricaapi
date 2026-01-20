@@ -18,8 +18,7 @@ namespace LawAfrica.API.Controllers
     {
         private readonly ApplicationDbContext _db;
 
-        // ✅ CHANGE: we no longer send raw HTML via IEmailSender here.
-        // We call AuthService which renders "registration-resume-otp" using your branded email templates.
+        // ✅ Uses AuthService (branded email template: registration-resume-otp)
         private readonly AuthService _authService;
 
         // Tune these as you want
@@ -28,7 +27,6 @@ namespace LawAfrica.API.Controllers
         private const int OtpResendCooldownSeconds = 60;
         private const int SessionExpiryMinutes = 30;
 
-        // ✅ CHANGE: constructor now accepts AuthService instead of IEmailSender
         public RegistrationResumeController(ApplicationDbContext db, AuthService authService)
         {
             _db = db;
@@ -70,9 +68,12 @@ namespace LawAfrica.API.Controllers
 
         // ---------------------------------------------------------
         // 1) Start OTP (Always 200 to avoid leaking account existence)
+        //
+        // ✅ CHANGE (FIX):
+        // Only send OTP if we can find a pending RegistrationIntent for this email.
+        // Still returns 200 OK either way.
         // ---------------------------------------------------------
         [HttpPost("start-otp")]
-        // ✅ CHANGE: accept CancellationToken so we can pass it into SaveChanges + AuthService email call
         public async Task<IActionResult> StartOtp([FromBody] StartResumeOtpRequest req, CancellationToken ct)
         {
             var email = NormalizeEmail(req?.Email ?? "");
@@ -80,6 +81,15 @@ namespace LawAfrica.API.Controllers
                 return Ok(new { ok = true, cooldownSeconds = OtpResendCooldownSeconds, expiresSeconds = OtpExpiryMinutes * 60 });
 
             var now = DateTime.UtcNow;
+
+            // ✅ NEW: Email existence check (pending RegistrationIntent)
+            // If there is no pending registration for this email, do NOT send OTP.
+            // We still return Ok to avoid leaking whether the email exists.
+            var pendingIntent = await FindPendingIntentForEmail(email, ct);
+            if (pendingIntent == null)
+            {
+                return Ok(new { ok = true, cooldownSeconds = OtpResendCooldownSeconds, expiresSeconds = OtpExpiryMinutes * 60 });
+            }
 
             // Reuse latest active challenge if it exists and not expired
             var existing = await _db.RegistrationResumeOtps
@@ -114,11 +124,10 @@ namespace LawAfrica.API.Controllers
 
                 await _db.SaveChangesAsync(ct);
 
-                // ✅ CHANGE: Email sending is done here via AuthService (branded template)
-                // Place: right after we persist the new OTP hash + timestamps.
-                var pendingIntent = await FindPendingIntentForEmail(email, ct);
+                // ✅ CHANGE: Use the pending intent we already fetched above for display name
                 var displayName = DisplayNameFromIntent(pendingIntent);
 
+                // ✅ CHANGE: send branded template email via AuthService
                 await _authService.SendRegistrationResumeOtpEmailAsync(
                     toEmail: email,
                     otpCode: code,
@@ -153,11 +162,10 @@ namespace LawAfrica.API.Controllers
                 _db.RegistrationResumeOtps.Add(challenge);
                 await _db.SaveChangesAsync(ct);
 
-                // ✅ CHANGE: Email sending is done here via AuthService (branded template)
-                // Place: right after we insert the OTP challenge, so the expiry/time is the persisted one.
-                var pendingIntent = await FindPendingIntentForEmail(email, ct);
+                // ✅ CHANGE: Use the pending intent we already fetched above for display name
                 var displayName = DisplayNameFromIntent(pendingIntent);
 
+                // ✅ CHANGE: send branded template email via AuthService
                 await _authService.SendRegistrationResumeOtpEmailAsync(
                     toEmail: email,
                     otpCode: code,
@@ -234,10 +242,7 @@ namespace LawAfrica.API.Controllers
             {
                 ResumeToken = rawToken,
                 Pending = pending == null
-                    ? new PendingRegistrationResumeDto
-                    {
-                        HasPending = false
-                    }
+                    ? new PendingRegistrationResumeDto { HasPending = false }
                     : new PendingRegistrationResumeDto
                     {
                         HasPending = true,
@@ -277,7 +282,6 @@ namespace LawAfrica.API.Controllers
 
         // ---------------------------------------------------------
         // 4) Resend Mpesa prompt (token-based)
-        //    You can internally call your Mpesa initiation logic/service.
         // ---------------------------------------------------------
         [HttpPost("mpesa/resend")]
         public async Task<IActionResult> ResendMpesa(
@@ -298,7 +302,6 @@ namespace LawAfrica.API.Controllers
             if (intent.UserType != UserType.Public)
                 return BadRequest("Mpesa resend is only for public registrations.");
 
-            // If intent is old/expired, extend it when resuming:
             if (intent.ExpiresAt < DateTime.UtcNow)
             {
                 intent.ExpiresAt = DateTime.UtcNow.AddMinutes(60);
@@ -306,10 +309,6 @@ namespace LawAfrica.API.Controllers
                 await _db.SaveChangesAsync(ct);
             }
 
-            // ✅ Call your existing Mpesa endpoint logic.
-            // Best practice: extract your STK initiate logic into a service and call it here.
-            // For now, we just return the intent id so your frontend can call:
-            // POST /payments/mpesa/stk/initiate with registrationIntentId + phone.
             return Ok(new
             {
                 registrationIntentId = intent.Id,
@@ -339,14 +338,13 @@ namespace LawAfrica.API.Controllers
 
         private async Task<RegistrationIntent?> FindPendingIntentForEmail(string emailNormalized, CancellationToken ct)
         {
-            // Note: you currently never delete intents here; missing intent is treated as completed in status endpoint.
-            // We'll return most recent that isn't already "completed by deletion".
-            var intent = await _db.RegistrationIntents
+            // ✅ matches case/whitespace-insensitively
+            return await _db.RegistrationIntents
                 .OrderByDescending(x => x.Id)
-                .FirstOrDefaultAsync(x => x.Email == emailNormalized, ct);
-
-            // If you later add a "CompletedAt" on intent, filter it here.
-            return intent;
+                .FirstOrDefaultAsync(x =>
+                    x.Email != null &&
+                    x.Email.Trim().ToLower() == emailNormalized,
+                    ct);
         }
     }
 }
