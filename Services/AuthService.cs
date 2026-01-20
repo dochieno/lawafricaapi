@@ -1,4 +1,5 @@
-﻿using LawAfrica.API.Data;
+﻿// Services/AuthService.cs
+using LawAfrica.API.Data;
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.DTOs;
 using LawAfrica.API.Models.DTOs.Security;
@@ -24,16 +25,25 @@ namespace LawAfrica.API.Services
         private readonly JwtSettings _jwt;
         private readonly IConfiguration _configuration;
         private readonly EmailService _emailService;
-        private readonly IEmailTemplateRenderer _emailRenderer; // ✅ NEW
+        private readonly IEmailTemplateRenderer _emailRenderer;
         private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly byte[] _keyBytes;
         private readonly SigningCredentials _signingCredentials;
-        private static readonly Regex UsernameRegex = new(@"^[A-Za-z0-9._-]+$", RegexOptions.Compiled);
+
+        // ✅ Username: letters + dots only (e.g. d.ochieno). No digits, no spaces, no underscores/hyphens.
+        // - must start with letter
+        // - dot segments must be letters only
+        private static readonly Regex UsernameRegex =
+            new(@"^[A-Za-z]+(\.[A-Za-z]+)*$", RegexOptions.Compiled);
 
         private const int MAX_FAILED_ATTEMPTS = 2;
         private static readonly TimeSpan LOCKOUT_DURATION = TimeSpan.FromMinutes(15);
 
         private readonly SecurityAlertSettings _alertSettings;
+
+        // ✅ Requirement: do NOT send "verify email" emails.
+        // Users are treated as email-verified after successful 2FA setup verification.
+        private const bool DISABLE_VERIFICATION_EMAILS = true;
 
         public AuthService(
             ApplicationDbContext db,
@@ -42,14 +52,14 @@ namespace LawAfrica.API.Services
             IHttpContextAccessor httpContextAccessor,
             IOptions<SecurityAlertSettings> alertOptions,
             EmailService emailService,
-            IEmailTemplateRenderer emailRenderer // ✅ NEW
+            IEmailTemplateRenderer emailRenderer
         )
         {
             _db = db;
             _jwt = jwtOptions.Value ?? throw new ArgumentNullException(nameof(jwtOptions));
             _configuration = configuration;
             _emailService = emailService;
-            _emailRenderer = emailRenderer; // ✅ NEW
+            _emailRenderer = emailRenderer;
             _httpContextAccessor = httpContextAccessor;
             _alertSettings = alertOptions.Value;
 
@@ -96,19 +106,16 @@ namespace LawAfrica.API.Services
         }
 
         // =========================================================
-        // ✅ NEW: Central "2FA setup link" builder
+        // 2FA setup link builder (single source of truth)
+        // Env/appsettings: FrontendTwoFactorSetupUrl = https://.../twofactor-setup
         // =========================================================
-        // Change: adds a single source of truth for the 2FA email link with token appended.
-        // Env/appsettings: FrontendTwoFactorSetupUrl = https://lawafricadigitalhub.vercel.app/twofactor-setup
         private string BuildTwoFactorSetupLink(string rawSetupToken)
         {
             if (string.IsNullOrWhiteSpace(rawSetupToken))
                 return string.Empty;
 
-            // Preferred explicit page:
             var baseUrl = (_configuration["FrontendTwoFactorSetupUrl"] ?? "").Trim();
 
-            // Fallback: build from FrontendUrl if you prefer that pattern
             if (string.IsNullOrWhiteSpace(baseUrl))
             {
                 var frontendUrl = (_configuration["FrontendUrl"] ?? "").Trim().TrimEnd('/');
@@ -126,13 +133,9 @@ namespace LawAfrica.API.Services
         }
 
         // =========================================================
-        // CANONICAL 2FA HELPERS (FIXED)
+        // CANONICAL 2FA HELPERS
         // =========================================================
-
-        private static string NormalizeTotpCode(string code)
-        {
-            return Regex.Replace(code ?? "", @"\D", "");
-        }
+        private static string NormalizeTotpCode(string code) => Regex.Replace(code ?? "", @"\D", "");
 
         private static string NormalizeBase32Secret(string secret)
         {
@@ -171,14 +174,8 @@ namespace LawAfrica.API.Services
             if (cleanCode.Length != 6) return false;
 
             byte[] secretBytes;
-            try
-            {
-                secretBytes = OtpNet.Base32Encoding.ToBytes(secret);
-            }
-            catch
-            {
-                return false;
-            }
+            try { secretBytes = OtpNet.Base32Encoding.ToBytes(secret); }
+            catch { return false; }
 
             var totp = new Totp(secretBytes, step: 30, totpSize: 6, mode: OtpHashMode.Sha1);
             var window = new VerificationWindow(previous: driftSteps, future: driftSteps);
@@ -193,25 +190,25 @@ namespace LawAfrica.API.Services
         }
 
         // =========================================================
-        // Step 1: Register new user
+        // Step 1: Register new user (direct registration)
+        // ✅ CHANGE: Do NOT send verification email.
+        // ✅ Instead: send 2FA setup email.
         // =========================================================
-
         public async Task<UserResponse?> RegisterAsync(RegisterRequest request)
         {
             if (request == null) return null;
 
-            // ✅ normalize inputs early
             var username = (request.Username ?? "").Trim();
             var normalizedUsername = username.ToUpperInvariant();
 
-            if (IsValid(request.Username))
+            // ✅ FIX: validation was inverted before
+            if (!IsValid(username))
                 throw new ArgumentException(
                     "Username may contain letters and dots only (e.g. d.ochieno). Numbers and spaces are not allowed."
                 );
 
             var email = (request.Email ?? "").Trim();
             var normalizedEmail = email;
-
             var password = request.Password ?? "";
 
             if (string.IsNullOrWhiteSpace(username)) return null;
@@ -221,8 +218,8 @@ namespace LawAfrica.API.Services
                 return null;
 
             var usernameTaken = await _db.Users.AnyAsync(u =>
-                (u.NormalizedUsername != null && u.NormalizedUsername == normalizedUsername) ||
-                (u.NormalizedUsername == null && u.Username.ToUpper() == normalizedUsername));
+                (!string.IsNullOrWhiteSpace(u.NormalizedUsername) && u.NormalizedUsername == normalizedUsername) ||
+                (string.IsNullOrWhiteSpace(u.NormalizedUsername) && u.Username.ToUpper() == normalizedUsername));
 
             if (usernameTaken)
                 return null;
@@ -241,6 +238,7 @@ namespace LawAfrica.API.Services
                 Username = username,
                 NormalizedUsername = normalizedUsername,
                 Email = normalizedEmail,
+
                 PhoneNumber = request.PhoneNumber,
                 FirstName = request.FirstName,
                 LastName = request.LastName,
@@ -251,6 +249,8 @@ namespace LawAfrica.API.Services
                 RoleId = isFirstUser ? 1 : 2,
 
                 IsActive = true,
+
+                // ✅ User becomes verified after successful 2FA setup verification
                 IsEmailVerified = false,
 
                 TwoFactorEnabled = false,
@@ -261,26 +261,37 @@ namespace LawAfrica.API.Services
 
             user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(password);
 
-            user.EmailVerificationToken = GenerateVerificationToken();
-            user.EmailVerificationTokenExpiry = DateTime.UtcNow.AddHours(24);
+            // ✅ Do not generate/send email verification tokens in this flow
+            if (DISABLE_VERIFICATION_EMAILS)
+            {
+                user.EmailVerificationToken = null;
+                user.EmailVerificationTokenExpiry = null;
+            }
+            else
+            {
+                user.EmailVerificationToken = GenerateVerificationToken();
+                user.EmailVerificationTokenExpiry = DateTime.UtcNow.AddHours(24);
+            }
 
             _db.Users.Add(user);
             await _db.SaveChangesAsync();
 
+            // ✅ Send 2FA setup email (this is the onboarding email now)
             try
             {
-                await SendVerificationEmail(user);
+                await EnableTwoFactorAuthAsync(user.Id);
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine("Verification email failed: " + ex.Message);
+                // Do not block registration if email fails
             }
 
             return ToUserResponse(user);
         }
 
         // =========================================================
-        // ✅ Send verification email for ANY user (used by registration intent flow)
+        // ✅ Send verification email (kept for compatibility)
+        // ✅ CHANGE: no-op if verification emails are disabled
         // =========================================================
         public async Task<bool> SendEmailVerificationAsync(int userId)
         {
@@ -288,6 +299,9 @@ namespace LawAfrica.API.Services
             if (user == null) return false;
 
             if (user.IsEmailVerified) return true;
+
+            if (DISABLE_VERIFICATION_EMAILS)
+                return true; // ✅ Do not send
 
             var needsNewToken =
                 string.IsNullOrWhiteSpace(user.EmailVerificationToken) ||
@@ -299,7 +313,6 @@ namespace LawAfrica.API.Services
                 user.EmailVerificationToken = GenerateVerificationToken();
                 user.EmailVerificationTokenExpiry = DateTime.UtcNow.AddHours(24);
                 user.UpdatedAt = DateTime.UtcNow;
-
                 await _db.SaveChangesAsync();
             }
 
@@ -308,7 +321,7 @@ namespace LawAfrica.API.Services
         }
 
         // =========================================================
-        // Login (enforces 2FA before issuing token)
+        // Login (enforces email verification + 2FA before issuing token)
         // =========================================================
         public async Task<LoginResult> LoginAsync(LoginRequest request)
         {
@@ -318,7 +331,7 @@ namespace LawAfrica.API.Services
             if (string.IsNullOrWhiteSpace(identifier) || string.IsNullOrWhiteSpace(password))
                 return LoginResult.Failed("Invalid credentials.");
 
-            var identLower = identifier.ToLower();
+            var identLower = identifier.ToLowerInvariant();
 
             var user = await _db.Users.FirstOrDefaultAsync(u =>
                 u.Username.ToLower() == identLower ||
@@ -335,7 +348,7 @@ namespace LawAfrica.API.Services
                 return LoginResult.Failed("Account not approved.");
 
             if (!user.IsEmailVerified)
-                return LoginResult.Failed("Please verify your email before logging in. Check your inbox (and spam) for the verification link.");
+                return LoginResult.Failed("Please complete 2FA setup from your email before logging in.");
 
             if (user.LockoutEndAt.HasValue && user.LockoutEndAt.Value > DateTime.UtcNow)
                 return LoginResult.Failed("Account temporarily locked due to failed attempts.");
@@ -360,7 +373,6 @@ namespace LawAfrica.API.Services
         private string GenerateJwtToken(User user)
         {
             var role = user.Role ?? "User";
-
             bool isInstitutionAdmin = false;
 
             if (user.InstitutionId.HasValue)
@@ -406,9 +418,7 @@ namespace LawAfrica.API.Services
             };
 
             if (isInstitutionAdmin)
-            {
                 claims.Add(new Claim(ClaimTypes.Role, "InstitutionAdmin"));
-            }
 
             var minutes = _jwt.DurationInMinutes > 0 ? _jwt.DurationInMinutes : 60;
             var now = DateTime.UtcNow;
@@ -426,10 +436,13 @@ namespace LawAfrica.API.Services
         }
 
         // =========================================================
-        // ✅ Branded template-based verification email
+        // Verification Email (kept for compatibility, but disabled)
         // =========================================================
         private async Task SendVerificationEmail(User user)
         {
+            if (DISABLE_VERIFICATION_EMAILS)
+                return;
+
             if (string.IsNullOrWhiteSpace(user.Email))
                 return;
 
@@ -437,18 +450,14 @@ namespace LawAfrica.API.Services
             if (string.IsNullOrWhiteSpace(token))
                 return;
 
-            var apiBaseUrl =
-                (_configuration["ApiBaseUrl"] ?? "").Trim().TrimEnd('/') ??
-                "";
-
+            var apiBaseUrl = (_configuration["ApiBaseUrl"] ?? "").Trim().TrimEnd('/');
             if (string.IsNullOrWhiteSpace(apiBaseUrl))
                 apiBaseUrl = (_configuration["AppUrl"] ?? "").Trim().TrimEnd('/');
 
             if (string.IsNullOrWhiteSpace(apiBaseUrl))
                 apiBaseUrl = "https://lawafricaapi.onrender.com";
 
-            var verificationUrl =
-                $"{apiBaseUrl}/api/auth/verify-email?token={Uri.EscapeDataString(token)}";
+            var verificationUrl = $"{apiBaseUrl}/api/auth/verify-email?token={Uri.EscapeDataString(token)}";
 
             var subject = "Welcome to LawAfrica — verify your email ✅";
             var preheader = "You’re in! Verify your email to unlock your LawAfrica account.";
@@ -479,7 +488,7 @@ namespace LawAfrica.API.Services
         }
 
         // =========================================================
-        // ✅ Branded template-based password reset email
+        // Password reset email (unchanged)
         // =========================================================
         private async Task SendPasswordResetEmail(User user)
         {
@@ -555,6 +564,10 @@ namespace LawAfrica.API.Services
 
         public async Task<bool> VerifyEmailAsync(string token)
         {
+            // ✅ Verification emails disabled; keep endpoint behavior safe
+            if (DISABLE_VERIFICATION_EMAILS)
+                return false;
+
             if (string.IsNullOrWhiteSpace(token))
                 return false;
 
@@ -579,6 +592,9 @@ namespace LawAfrica.API.Services
             var user = await _db.Users.FindAsync(userId);
             if (user == null || user.IsEmailVerified)
                 return false;
+
+            if (DISABLE_VERIFICATION_EMAILS)
+                return true; // ✅ do not send
 
             user.EmailVerificationToken = GenerateVerificationToken();
             user.EmailVerificationTokenExpiry = DateTime.UtcNow.AddHours(24);
@@ -652,11 +668,9 @@ namespace LawAfrica.API.Services
             var cid = "qrcode";
             var expiryUtc = user.TwoFactorSetupTokenExpiry!.Value;
             var secretKey = user.TwoFactorSecret!;
-
             var subject = "LawAfrica – Two-Factor Authentication Setup";
 
-            // ✅ NEW: include a link to frontend setup page with token appended
-            var setupLink = BuildTwoFactorSetupLink(rawSetupToken); // ✅ CHANGED
+            var setupLink = BuildTwoFactorSetupLink(rawSetupToken);
 
             var rendered = await _emailRenderer.RenderAsync(
                 templateName: "twofactor-setup",
@@ -673,7 +687,7 @@ namespace LawAfrica.API.Services
                     QrCid = cid,
                     SecretKey = secretKey,
                     SetupToken = rawSetupToken,
-                    SetupLink = setupLink, // ✅ NEW (use in template)
+                    SetupLink = setupLink,
                     SetupTokenExpiryUtc = $"{expiryUtc:yyyy-MM-dd HH:mm} UTC"
                 },
                 inlineImages: null,
@@ -719,7 +733,7 @@ namespace LawAfrica.API.Services
             user.TwoFactorSetupTokenHash = null;
             user.TwoFactorSetupTokenExpiry = null;
 
-            // ✅ Since the QR/setup token was delivered to this email, treat email as verified now.
+            // ✅ Treat email as verified once user proves access to inbox via setup token
             user.IsEmailVerified = true;
             user.EmailVerificationToken = null;
             user.EmailVerificationTokenExpiry = null;
@@ -732,7 +746,7 @@ namespace LawAfrica.API.Services
 
         public async Task<(bool ok, string? token, string? error)> VerifyTwoFactorLoginAsync(string username, string code)
         {
-            var ident = (username ?? "").Trim();
+            var ident = (username ?? "").Trim(); // username OR email
             var cleanCode = (code ?? "").Trim();
 
             if (string.IsNullOrWhiteSpace(ident) || string.IsNullOrWhiteSpace(cleanCode))
@@ -843,9 +857,7 @@ namespace LawAfrica.API.Services
             var expiryUtc = user.TwoFactorSetupTokenExpiry!.Value;
 
             var subject = "LawAfrica – Two-Factor Authentication Setup";
-
-            // ✅ NEW: include a link to frontend setup page with token appended
-            var setupLink = BuildTwoFactorSetupLink(rawSetupToken); // ✅ CHANGED
+            var setupLink = BuildTwoFactorSetupLink(rawSetupToken);
 
             var rendered = await _emailRenderer.RenderAsync(
                 templateName: "twofactor-setup",
@@ -862,7 +874,7 @@ namespace LawAfrica.API.Services
                     QrCid = cid,
                     SecretKey = user.TwoFactorSecret!,
                     SetupToken = rawSetupToken,
-                    SetupLink = setupLink, // ✅ NEW (use in template)
+                    SetupLink = setupLink,
                     SetupTokenExpiryUtc = $"{expiryUtc:yyyy-MM-dd HH:mm} UTC"
                 },
                 inlineImages: null,
@@ -908,76 +920,21 @@ namespace LawAfrica.API.Services
             await _db.SaveChangesAsync();
         }
 
-        private async Task RegisterSuccessfulLogin(User user)
-        {
-            user.FailedLoginAttempts = 0;
-            user.LockoutEndAt = null;
-            user.LastLoginAt = DateTime.UtcNow;
-
-            _db.LoginAudits.Add(new LoginAudit
-            {
-                UserId = user.Id,
-                IsSuccessful = true,
-                IpAddress = _httpContextAccessor.HttpContext?.Connection?.RemoteIpAddress?.ToString() ?? "Unknown",
-                UserAgent = _httpContextAccessor.HttpContext?.Request?.Headers["User-Agent"].ToString() ?? "Unknown"
-            });
-
-            await _db.SaveChangesAsync();
-        }
-
-        private async Task SendSuspiciousActivityAlert(User user)
-        {
-            var html = $@"
-                <h2>Security Alert</h2>
-                <p>Dear {user.FirstName ?? user.Username},</p>
-                <p>We detected multiple failed login attempts on your account.</p>
-                <p><b>Account:</b> {user.Email}<br/>
-                   <b>Time:</b> {DateTime.UtcNow:u}</p>
-                <p>If this was not you, we strongly recommend changing your password.</p>";
-
-            await _emailService.SendEmailAsync(user.Email, "⚠️ LawAfrica Security Alert", html);
-
-            if (!string.IsNullOrEmpty(_alertSettings.AdminAlertEmail))
-            {
-                await _emailService.SendEmailAsync(
-                    _alertSettings.AdminAlertEmail,
-                    "🚨 Suspicious Login Activity Detected",
-                    $"User {user.Email} has multiple failed login attempts."
-                );
-            }
-        }
-
-        private async Task SendAccountLockoutAlert(User user)
-        {
-            var html = $@"
-                <h2>Account Locked</h2>
-                <p>Hello {user.FirstName ?? user.Username},</p>
-                <p>Your account has been temporarily locked due to multiple failed login attempts.</p>
-                <p><b>Lockout until:</b> {user.LockoutEndAt:u}</p>
-                <p>If this was not you, please contact support immediately.</p>";
-
-            await _emailService.SendEmailAsync(user.Email, "🔒 Your LawAfrica Account Is Locked", html);
-        }
-
         public async Task<TwoFactorSetupResponse?> ResendTwoFactorSetupAsync(string username, string password)
         {
-            var normalized = username.Trim().ToLower();
+            var normalized = (username ?? "").Trim().ToLowerInvariant();
 
             var user = await _db.Users.FirstOrDefaultAsync(u =>
-                u.Username.ToLower() == normalized || u.Email.ToLower() == normalized);
+                u.Username.ToLower() == normalized || (u.Email != null && u.Email.ToLower() == normalized));
 
-            if (user == null)
-                return null;
-
-            if (!user.IsActive)
-                return null;
+            if (user == null) return null;
+            if (!user.IsActive) return null;
 
             if (user.LockoutEndAt.HasValue && user.LockoutEndAt.Value > DateTime.UtcNow)
                 return null;
 
-            var ok = BCrypt.Net.BCrypt.Verify(password, user.PasswordHash);
-            if (!ok)
-                return null;
+            var ok = BCrypt.Net.BCrypt.Verify(password ?? "", user.PasswordHash);
+            if (!ok) return null;
 
             if (string.IsNullOrWhiteSpace(user.TwoFactorSecret))
             {
@@ -1003,11 +960,8 @@ namespace LawAfrica.API.Services
 
             var cid = "qrcode";
             var expiryUtc = user.TwoFactorSetupTokenExpiry!.Value;
-
             var subject = "LawAfrica – Two-Factor Authentication Setup";
-
-            // ✅ NEW: same logic as Enable/Regenerate — append token to setup page link
-            var setupLink = BuildTwoFactorSetupLink(rawSetupToken); // ✅ CHANGED
+            var setupLink = BuildTwoFactorSetupLink(rawSetupToken);
 
             var rendered = await _emailRenderer.RenderAsync(
                 templateName: "twofactor-setup",
@@ -1024,7 +978,7 @@ namespace LawAfrica.API.Services
                     QrCid = cid,
                     SecretKey = user.TwoFactorSecret!,
                     SetupToken = rawSetupToken,
-                    SetupLink = setupLink, // ✅ NEW (use in template)
+                    SetupLink = setupLink,
                     SetupTokenExpiryUtc = $"{expiryUtc:yyyy-MM-dd HH:mm} UTC"
                 },
                 inlineImages: null,
@@ -1046,15 +1000,6 @@ namespace LawAfrica.API.Services
                 SetupToken = rawSetupToken,
                 SetupTokenExpiryUtc = expiryUtc
             };
-        }
-
-        private static string GenerateSetupToken()
-        {
-            var bytes = RandomNumberGenerator.GetBytes(32);
-            return Convert.ToBase64String(bytes)
-                .Replace("+", "-")
-                .Replace("/", "_")
-                .Replace("=", "");
         }
 
         // =========================
@@ -1081,6 +1026,7 @@ namespace LawAfrica.API.Services
             if (!string.Equals(username, username.Trim(), StringComparison.Ordinal))
                 return false;
 
+            // ✅ letters + dots only
             return UsernameRegex.IsMatch(username);
         }
     }

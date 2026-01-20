@@ -9,7 +9,6 @@ namespace LawAfrica.API.Models.DTOs.Registration
     /// </summary>
     public class CreateRegistrationIntentRequest
     {
-
         public string Email { get; set; } = string.Empty;
         public string Username { get; set; } = string.Empty;
         public string Password { get; set; } = string.Empty;
@@ -18,15 +17,23 @@ namespace LawAfrica.API.Models.DTOs.Registration
 
         public string? PhoneNumber { get; set; }
         public int? CountryId { get; set; }
+
         public UserType UserType { get; set; }
+
         public int? InstitutionId { get; set; }
+
         // ================================
         // Institution Verification
         // ================================
         public string? InstitutionAccessCode { get; set; }
+
+        /// <summary>
+        /// OPTIONAL / Legacy.
+        /// Frontend no longer collects this.
+        /// Keep for backward compatibility with any older clients.
+        /// </summary>
         public string? ReferenceNumber { get; set; }
+
         public InstitutionMemberType? InstitutionMemberType { get; set; }
-
-
     }
 }

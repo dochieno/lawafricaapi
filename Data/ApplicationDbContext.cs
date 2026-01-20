@@ -390,8 +390,8 @@ public class ApplicationDbContext : DbContext
                   .IsRequired();
 
             entity.Property(r => r.ReferenceNumber)
-                  .IsRequired()
                   .HasMaxLength(120);
+
 
             // Existing + your added constraints
             entity.HasIndex(r => r.Email).IsUnique();
@@ -399,11 +399,11 @@ public class ApplicationDbContext : DbContext
 
             entity.HasIndex(r => r.ReferenceNumber)
                   .IsUnique()
-                  .HasFilter("\"InstitutionId\" IS NULL");
+                  .HasFilter("\"InstitutionId\" IS NULL AND \"ReferenceNumber\" IS NOT NULL");
 
             entity.HasIndex(r => new { r.InstitutionId, r.ReferenceNumber })
                   .IsUnique()
-                  .HasFilter("\"InstitutionId\" IS NOT NULL");
+                  .HasFilter("\"InstitutionId\" IS NOT NULL AND \"ReferenceNumber\" IS NOT NULL");
 
             entity.HasOne(r => r.Country)
                   .WithMany()

@@ -1,4 +1,5 @@
-﻿using LawAfrica.API.Models.DTOs.Security;
+﻿// Controllers/SecurityController.cs
+using LawAfrica.API.Models.DTOs.Security;
 using LawAfrica.API.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -24,7 +25,6 @@ namespace LawAfrica.API.Controllers
         {
             userId = 0;
 
-            // Your token likely uses NameIdentifier (schema claim)
             var raw =
                 User.FindFirst("userId")?.Value ??
                 User.FindFirst(ClaimTypes.NameIdentifier)?.Value ??
@@ -38,11 +38,6 @@ namespace LawAfrica.API.Controllers
         // =========================================================
         // 0) ONBOARDING FLOW (NO JWT)
         // =========================================================
-
-        /// <summary>
-        /// Verifies the initial 2FA setup without requiring JWT.
-        /// Uses a short-lived, one-time SetupToken that was generated during registration completion.
-        /// </summary>
         [AllowAnonymous]
         [HttpPost("verify-2fa-setup")]
         public async Task<IActionResult> VerifyTwoFactorSetup([FromBody] VerifyTwoFactorSetupRequest request)
@@ -57,11 +52,6 @@ namespace LawAfrica.API.Controllers
         // =========================================================
         // 1) AUTHENTICATED USER MANAGEMENT (JWT REQUIRED)
         // =========================================================
-
-        /// <summary>
-        /// Generates (or re-sends) the 2FA setup email for a logged-in user.
-        /// This is NOT required for onboarding (registration already sends it).
-        /// </summary>
         [Authorize]
         [HttpPost("enable-2fa")]
         public async Task<IActionResult> Enable2FA()
@@ -73,9 +63,6 @@ namespace LawAfrica.API.Controllers
             return Ok(response);
         }
 
-        /// <summary>
-        /// Security status dashboard (JWT required).
-        /// </summary>
         [Authorize]
         [HttpGet("status")]
         public async Task<IActionResult> SecurityStatus()
@@ -90,10 +77,6 @@ namespace LawAfrica.API.Controllers
             return Ok(status);
         }
 
-        /// <summary>
-        /// Disables 2FA for a logged-in user (JWT required).
-        /// NOTE: In production, you may want to require re-auth / 2FA challenge to disable.
-        /// </summary>
         [Authorize]
         [HttpPost("disable-2fa")]
         public async Task<IActionResult> Disable2FA()
@@ -108,9 +91,6 @@ namespace LawAfrica.API.Controllers
             return Ok(new { message = "Two-factor authentication disabled." });
         }
 
-        /// <summary>
-        /// Regenerates a new 2FA secret + QR email for a logged-in user (JWT required).
-        /// </summary>
         [Authorize]
         [HttpPost("regenerate-2fa")]
         public async Task<IActionResult> Regenerate2FA()
@@ -125,7 +105,6 @@ namespace LawAfrica.API.Controllers
         // =========================================================
         // 2) DEPRECATED ENDPOINT (REMOVE/DO NOT USE)
         // =========================================================
-
         [Authorize]
         [HttpPost("verify-2fa")]
         public IActionResult Verify2FA_Deprecated()
@@ -142,11 +121,9 @@ namespace LawAfrica.API.Controllers
         {
             var result = await _auth.ResendTwoFactorSetupAsync(request.Username, request.Password);
 
-            // Production-safe: don’t reveal whether username/password was correct
             if (result == null)
                 return Ok(new { message = "If the account exists and credentials are correct, a new 2FA setup email has been sent." });
 
-            // For dev/swagger: return setup token to avoid checking email
             return Ok(new
             {
                 message = "2FA setup email resent.",
