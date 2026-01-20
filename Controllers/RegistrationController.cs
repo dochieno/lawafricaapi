@@ -54,11 +54,7 @@ namespace LawAfrica.API.Controllers
 
             if (await _db.RegistrationIntents.AnyAsync(r => r.Email == email))
                 return BadRequest("A registration is already in progress for this email.");
-
-            if (request.UserType == UserType.Public && string.IsNullOrWhiteSpace(request.ReferenceNumber))
-                return BadRequest("Identity number is required for public users.");
-
-            // ✅ Institution path: ALWAYS validate BOTH domain + access code
+           // ✅ Institution path: ALWAYS validate BOTH domain + access code
             if (request.InstitutionId.HasValue)
             {
                 var institution = await _db.Institutions
