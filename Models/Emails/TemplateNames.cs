@@ -7,6 +7,7 @@
 
         // Optional next
         public const string PasswordReset = "password-reset";
+        public const string RegistrationResumeOtp = "registration-resume-otp";
 
         // Future-ready
         public const string InviteToInstitution = "invite-to-institution";

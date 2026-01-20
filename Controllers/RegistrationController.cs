@@ -51,10 +51,21 @@ namespace LawAfrica.API.Controllers
             // Use normalized email for uniqueness checks
             if (await _db.Users.AnyAsync(u => u.Email == email))
                 return BadRequest("An account with this email already exists.");
+            var existing = await _db.RegistrationIntents
+                                    .OrderByDescending(r => r.Id)
+                                    .FirstOrDefaultAsync(r => r.Email == email);
+            if (existing != null)
+            {
+                // If it's very old and unpaid, you can choose to delete and recreate instead.
+                // For now: return the existing intent so user can resume.
+                var next = existing.UserType == UserType.Public
+                    ? "PAYMENT_REQUIRED"
+                    : "READY_FOR_ACCOUNT_CREATION";
 
-            if (await _db.RegistrationIntents.AnyAsync(r => r.Email == email))
-                return BadRequest("A registration is already in progress for this email.");
-           // ✅ Institution path: ALWAYS validate BOTH domain + access code
+                return Ok(new { registrationIntentId = existing.Id, nextAction = next });
+            }
+
+            // ✅ Institution path: ALWAYS validate BOTH domain + access code
             if (request.InstitutionId.HasValue)
             {
                 var institution = await _db.Institutions

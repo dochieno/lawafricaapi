@@ -90,5 +90,6 @@ namespace LawAfrica.API.Services.Emails
             // Keep your existing working flow for inline image:
             await _emailService.SendEmailWithInlineImageAsync(user.Email, rendered.Subject, rendered.Html, qrBytes, cid);
         }
+
     }
 }

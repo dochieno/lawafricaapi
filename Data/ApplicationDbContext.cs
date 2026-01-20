@@ -5,6 +5,7 @@ using LawAfrica.API.Models.Institutions;
 using LawAfrica.API.Models.LawReports.Enums;
 using LawAfrica.API.Models.Locations;
 using LawAfrica.API.Models.Payments;
+using LawAfrica.API.Models.Registration;
 using LawAfrica.API.Models.Reports;
 using LawAfrica.API.Models.Usage;
 using Microsoft.EntityFrameworkCore;
@@ -94,6 +95,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<PaymentProviderTransaction> PaymentProviderTransactions => Set<PaymentProviderTransaction>();
     public DbSet<PaymentReconciliationRun> PaymentReconciliationRuns => Set<PaymentReconciliationRun>();
     public DbSet<PaymentReconciliationItem> PaymentReconciliationItems => Set<PaymentReconciliationItem>();
+    public DbSet<RegistrationResumeOtp> RegistrationResumeOtps => Set<RegistrationResumeOtp>();
+    public DbSet<RegistrationResumeSession> RegistrationResumeSessions => Set<RegistrationResumeSession>();
     public DbSet<UserPresence> UserPresences { get; set; } = null!;
 
     //LawReports
@@ -161,6 +164,31 @@ public class ApplicationDbContext : DbContext
 
             b.HasIndex(x => x.TownId);
         });
+
+        modelBuilder.Entity<RegistrationResumeOtp>(b =>
+        {
+            b.ToTable("RegistrationResumeOtps");
+            b.HasKey(x => x.Id);
+
+            b.HasIndex(x => new { x.EmailNormalized, x.ExpiresAtUtc });
+            b.HasIndex(x => new { x.EmailNormalized, x.IsUsed });
+
+            b.Property(x => x.EmailNormalized).HasMaxLength(256).IsRequired();
+            b.Property(x => x.CodeHash).HasMaxLength(200).IsRequired();
+        });
+
+        modelBuilder.Entity<RegistrationResumeSession>(b =>
+        {
+            b.ToTable("RegistrationResumeSessions");
+            b.HasKey(x => x.Id);
+
+            b.HasIndex(x => x.TokenHash).IsUnique();
+            b.HasIndex(x => new { x.EmailNormalized, x.ExpiresAtUtc });
+
+            b.Property(x => x.TokenHash).HasMaxLength(128).IsRequired();
+            b.Property(x => x.EmailNormalized).HasMaxLength(256).IsRequired();
+        });
+
 
         // =========================================================
         // LoginAudit

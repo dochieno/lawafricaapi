@@ -1002,6 +1002,64 @@ namespace LawAfrica.API.Services
             };
         }
 
+        // =========================================================
+        // Resume Registration OTP email (plug into existing system)
+        // =========================================================
+        public async Task SendRegistrationResumeOtpEmailAsync(
+            string toEmail,
+            string otpCode,
+            DateTime otpExpiresAtUtc,
+            string? displayName = null,
+            CancellationToken ct = default)
+        {
+            if (string.IsNullOrWhiteSpace(toEmail))
+                return;
+
+            // ✅ Keep OTP only digits (defensive)
+            var cleanOtp = Regex.Replace(otpCode ?? "", @"\D", "");
+            if (string.IsNullOrWhiteSpace(cleanOtp))
+                return;
+
+            // ✅ Prefer brand/config if present
+            var productName = (_configuration["Brand:ProductName"] ?? _configuration["ProductName"] ?? "LawAfrica").Trim();
+            var supportEmail = (_configuration["Brand:SupportEmail"] ?? _configuration["SupportEmail"] ?? "support@lawafrica.com").Trim();
+
+            var subject = $"{productName} — Your registration code";
+            var preheader = "Use this code to continue your registration.";
+
+            // ✅ Template name should match EmailTemplates/registration-resume-otp.html
+            var templateName = LawAfrica.API.Models.Emails.TemplateNames.RegistrationResumeOtp;
+
+            var rendered = await _emailRenderer.RenderAsync(
+                templateName: templateName,
+                subject: subject,
+                model: new
+                {
+                    // Layout tokens
+                    Subject = subject,
+                    Preheader = preheader,
+                    ProductName = productName,
+                    Year = DateTime.UtcNow.Year.ToString(),
+                    SupportEmail = supportEmail,
+
+                    // Body tokens
+                    DisplayName = string.IsNullOrWhiteSpace(displayName) ? "there" : displayName,
+                    Code = cleanOtp,
+                    ExpiresAtUtc = $"{otpExpiresAtUtc:yyyy-MM-dd HH:mm} UTC"
+                },
+                inlineImages: null,
+                ct: ct
+            );
+
+            await _emailService.SendEmailAsync(
+                toEmail.Trim(),
+                rendered.Subject ?? subject,
+                rendered.Html
+            );
+        }
+
+
+
         // =========================
         // Helpers
         // =========================
