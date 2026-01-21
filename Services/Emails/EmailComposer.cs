@@ -87,9 +87,53 @@ namespace LawAfrica.API.Services.Emails
                 },
                 ct: ct);
 
-            // Keep your existing working flow for inline image:
             await _emailService.SendEmailWithInlineImageAsync(user.Email, rendered.Subject, rendered.Html, qrBytes, cid);
         }
 
+        // ✅ NEW: Institution welcome email (access code)
+        public async Task SendInstitutionWelcomeAsync(
+            string toEmail,
+            string institutionName,
+            string emailDomain,
+            string accessCode,
+            bool requiresUserApproval,
+            CancellationToken ct = default)
+        {
+            if (string.IsNullOrWhiteSpace(toEmail)) return;
+
+            var regUrl = string.IsNullOrWhiteSpace(AppUrl) ? "" : $"{AppUrl.TrimEnd('/')}/register";
+
+            // If your frontend uses a different route, override with config Brand:RegistrationUrl if you want
+            var registrationUrl =
+                _config["Brand:RegistrationUrl"] ??
+                (string.IsNullOrWhiteSpace(regUrl) ? "https://app.lawafrica.example/register" : regUrl);
+
+            var subject = $"Welcome to {ProductName} — Institution access code";
+
+            var model = new
+            {
+                ProductName = ProductName,
+                Year = DateTime.UtcNow.Year.ToString(),
+                SupportEmail = SupportEmail,
+
+                InstitutionName = institutionName,
+                EmailDomain = emailDomain,
+                OfficialEmail = toEmail,
+                AccessCode = accessCode,
+
+                RegistrationUrl = registrationUrl,
+
+                // used in template sentence
+                RequiresUserApproval = requiresUserApproval ? "true" : "false"
+            };
+
+            var rendered = await _renderer.RenderAsync(
+                TemplateNames.InstitutionWelcome,
+                subject,
+                model,
+                ct: ct);
+
+            await _emailService.SendEmailAsync(toEmail, rendered.Subject, rendered.Html);
+        }
     }
 }
