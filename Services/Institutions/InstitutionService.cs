@@ -113,7 +113,7 @@ namespace LawAfrica.API.Services.Institutions
 
             var emailDomain = NormalizeDomain(req.EmailDomain);
 
-            static string NormalizeCode(string s) => (s ?? "").Trim().ToUpperInvariant();
+            static string NormalizeCode(string? s) => (s ?? "").Trim().ToUpperInvariant();
 
             var taxPinNormalized = NormalizeCode(req.TaxPin);
             var hasTaxPin = !string.IsNullOrWhiteSpace(taxPinNormalized);
@@ -325,7 +325,7 @@ namespace LawAfrica.API.Services.Institutions
                 throw new InvalidOperationException("Official email is required.");
         }
 
-        private static string NormalizeDomain(string domain)
+        private static string NormalizeDomain(string? domain)
         {
             domain = (domain ?? "").Trim().ToLowerInvariant();
             domain = domain.Replace("@", "");

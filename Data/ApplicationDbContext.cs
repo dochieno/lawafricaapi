@@ -98,6 +98,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<RegistrationResumeOtp> RegistrationResumeOtps => Set<RegistrationResumeOtp>();
     public DbSet<RegistrationResumeSession> RegistrationResumeSessions => Set<RegistrationResumeSession>();
     public DbSet<UserPresence> UserPresences { get; set; } = null!;
+    public DbSet<InvoiceSettings> InvoiceSettings => Set<InvoiceSettings>();
+
 
     //LawReports
     public DbSet<LawReport> LawReports => Set<LawReport>();
@@ -137,6 +139,31 @@ public class ApplicationDbContext : DbContext
 
             entity.Property(c => c.IsoCode).HasMaxLength(3);
             entity.Property(c => c.PhoneCode).HasMaxLength(10);
+        });
+
+        modelBuilder.Entity<InvoiceSettings>(b =>
+        {
+            b.ToTable("InvoiceSettings");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.CompanyName)
+                .HasMaxLength(200)
+                .IsRequired();
+
+            b.Property(x => x.AddressLine1).HasMaxLength(200);
+            b.Property(x => x.AddressLine2).HasMaxLength(200);
+            b.Property(x => x.City).HasMaxLength(120);
+            b.Property(x => x.Country).HasMaxLength(120);
+            b.Property(x => x.VatOrPin).HasMaxLength(80);
+            b.Property(x => x.Email).HasMaxLength(200);
+            b.Property(x => x.Phone).HasMaxLength(80);
+
+            b.Property(x => x.LogoPath).HasMaxLength(300);
+            b.Property(x => x.FooterNotes).HasMaxLength(2000);
+
+            // keep DB default
+            b.Property(x => x.UpdatedAt)
+                .HasDefaultValueSql("timezone('utc', now())");
         });
 
         modelBuilder.Entity<Town>(b =>

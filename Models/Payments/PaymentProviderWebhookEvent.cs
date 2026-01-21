@@ -14,6 +14,7 @@ namespace LawAfrica.API.Models.Payments
 
         // e.g. "charge.success"
         [MaxLength(100)]
+
         public string EventType { get; set; } = string.Empty;
 
         // Some providers provide a stable event id; Paystack may not.
