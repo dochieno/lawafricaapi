@@ -91,7 +91,7 @@ namespace LawAfrica.API.Controllers.Admin
                 await file.CopyToAsync(fs, ct);
 
             // Saved path stored as "Storage/Invoice/invoice-logo.png" style
-            var storedPath = Path.Combine("Storage", "Invoice", name).Replace("\\", "/");
+            var storedPath = Path.Combine("storage", "invoice", name).Replace("\\", "/");
 
             var s = await _db.InvoiceSettings.FirstOrDefaultAsync(x => x.Id == 1, ct);
             if (s == null)
