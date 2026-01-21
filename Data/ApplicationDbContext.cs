@@ -444,21 +444,9 @@ public class ApplicationDbContext : DbContext
             entity.Property(r => r.PasswordHash)
                   .IsRequired();
 
-            entity.Property(r => r.ReferenceNumber)
-                  .HasMaxLength(120);
-
-
             // Existing + your added constraints
             entity.HasIndex(r => r.Email).IsUnique();
             entity.HasIndex(r => r.Username).IsUnique();
-
-            entity.HasIndex(r => r.ReferenceNumber)
-                  .IsUnique()
-                  .HasFilter("\"InstitutionId\" IS NULL AND \"ReferenceNumber\" IS NOT NULL");
-
-            entity.HasIndex(r => new { r.InstitutionId, r.ReferenceNumber })
-                  .IsUnique()
-                  .HasFilter("\"InstitutionId\" IS NOT NULL AND \"ReferenceNumber\" IS NOT NULL");
 
             entity.HasOne(r => r.Country)
                   .WithMany()
@@ -472,6 +460,13 @@ public class ApplicationDbContext : DbContext
 
             entity.Property(r => r.CreatedAt)
                   .HasDefaultValueSql("timezone('utc', now())");
+
+            // ...keep existing required fields
+
+            entity.Property(r => r.ReferenceNumber)
+                  .HasMaxLength(120);  // nullable by default
+
+
         });
 
         // =========================================================
@@ -553,11 +548,6 @@ public class ApplicationDbContext : DbContext
         modelBuilder.Entity<InstitutionMembership>()
             .HasIndex(m => new { m.UserId, m.InstitutionId })
             .IsUnique();
-
-        modelBuilder.Entity<InstitutionMembership>()
-            .HasIndex(m => new { m.InstitutionId, m.ReferenceNumber })
-            .IsUnique();
-
         modelBuilder.Entity<InstitutionMembership>()
             .HasOne(m => m.ApprovedByUser)
             .WithMany()

@@ -76,6 +76,26 @@ namespace LawAfrica.API.Services
                 var lastName = (dbIntent.LastName ?? "").Trim();
                 var phoneNumber = (dbIntent.PhoneNumber ?? "").Trim();
 
+                // ✅ ReferenceNumber: normalize nullable ("" => null)
+                var referenceNumber = string.IsNullOrWhiteSpace(dbIntent.ReferenceNumber)
+                    ? null
+                    : dbIntent.ReferenceNumber.Trim();
+
+                // ✅ Require ReferenceNumber ONLY for institution users (Student/Staff signups)
+                if (institution != null)
+                {
+                    if (string.IsNullOrWhiteSpace(referenceNumber))
+                        throw new InvalidOperationException("Reference number is required for institution users.");
+
+                    if (referenceNumber.Length < 3)
+                        throw new InvalidOperationException("Reference number looks too short.");
+                }
+                else
+                {
+                    // Public users: never store empty-string reference numbers
+                    referenceNumber = null;
+                }
+
                 var user = new User
                 {
                     Username = username,
@@ -123,7 +143,9 @@ namespace LawAfrica.API.Services
                         InstitutionId = institution.Id,
                         UserId = user.Id,
                         MemberType = memberType,
-                        ReferenceNumber = dbIntent.ReferenceNumber ?? string.Empty,
+
+                        // ✅ Save reference number (nullable in DB, but required for institution path)
+                        ReferenceNumber = referenceNumber ?? string.Empty,
 
                         Status = pending
                             ? MembershipStatus.PendingApproval
@@ -165,5 +187,6 @@ namespace LawAfrica.API.Services
                 throw;
             }
         }
+
     }
 }

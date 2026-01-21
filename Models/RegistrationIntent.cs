@@ -25,23 +25,14 @@ namespace LawAfrica.API.Models
         public bool PaymentCompleted { get; set; } = false;
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public DateTime ExpiresAt { get; set; }
-        // ================================
-        // Institution Verification Inputs
-        // ================================
-
-        /// <summary>
-        /// Institution-provided access code (required for corporate institutions).
-        /// </summary>
         public string? InstitutionAccessCode { get; set; }
-
-        /// <summary>
-        /// Reference number provided by the user (e.g. Student No, Employee No).
-        /// </summary>
-        public string? ReferenceNumber { get; set; }
-
         public bool IsConsumed { get; set; } = false;
         public DateTime? ConsumedAt { get; set; }
         public InstitutionMemberType? InstitutionMemberType { get; set; }
+
+        //For corporate and institutional users
+        public string? ReferenceNumber { get; set; } // nullable
+
 
 
     }

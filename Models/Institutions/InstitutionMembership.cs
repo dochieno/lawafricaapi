@@ -25,8 +25,7 @@ namespace LawAfrica.API.Models.Institutions
         /// Student reference number OR Employee number.
         /// Collected at RegistrationIntent stage to guide approval.
         /// </summary>
-        public string ReferenceNumber { get; set; } = string.Empty;
-
+        public string? ReferenceNumber { get; set; } // nullable
         // -------- Governance --------
         public MembershipStatus Status { get; set; } = MembershipStatus.PendingApproval;
 

@@ -26,14 +26,8 @@ namespace LawAfrica.API.Models.DTOs.Registration
         // Institution Verification
         // ================================
         public string? InstitutionAccessCode { get; set; }
-
-        /// <summary>
-        /// OPTIONAL / Legacy.
-        /// Frontend no longer collects this.
-        /// Keep for backward compatibility with any older clients.
-        /// </summary>
-        public string? ReferenceNumber { get; set; }
-
         public InstitutionMemberType? InstitutionMemberType { get; set; }
+
+        public string? ReferenceNumber   { get; set; }
     }
 }
