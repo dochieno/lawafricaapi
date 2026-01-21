@@ -28,6 +28,7 @@
     <Folder Include="Migrations\" />
     <Folder Include="Storage\LegalDocuments\" />
     <Folder Include="Storage\Covers\" />
+    <Folder Include="Storage\invoice\" />
     <Folder Include="Storage\ProfileImages\" />
   </ItemGroup>
 
