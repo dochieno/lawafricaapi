@@ -113,11 +113,21 @@ namespace LawAfrica.API.Services.Institutions
 
             var emailDomain = NormalizeDomain(req.EmailDomain);
 
+            static string NormalizeCode(string s) => (s ?? "").Trim().ToUpperInvariant();
+
+            var taxPinNormalized = NormalizeCode(req.TaxPin);
+            var hasTaxPin = !string.IsNullOrWhiteSpace(taxPinNormalized);
+
+            // ✅ Only check tax pin uniqueness if provided
             var exists = await _db.Institutions.AnyAsync(i =>
-                i.EmailDomain.ToLower() == emailDomain.ToLower());
+                i.EmailDomain.ToLower() == emailDomain.ToLower()
+                || (hasTaxPin && (i.TaxPin != null && i.TaxPin.Trim().ToUpper() == taxPinNormalized)));
 
             if (exists)
-                throw new InvalidOperationException("An institution with this email domain already exists.");
+                throw new InvalidOperationException(
+                    hasTaxPin
+                        ? "An institution with this email domain or Tax Identification No (PIN) already exists."
+                        : "An institution with this email domain already exists.");
 
             var entity = new Institution
             {
@@ -138,13 +148,19 @@ namespace LawAfrica.API.Services.Institutions
 
                 CountryId = req.CountryId,
 
-                TaxPin = NullIfEmpty(req.TaxPin),
+                // ✅ Store normalized tax pin (or null)
+                TaxPin = hasTaxPin ? taxPinNormalized : null,
 
                 InstitutionType = req.InstitutionType,
 
-                // NOTE: we'll normalize below and ensure it is always set
-                InstitutionAccessCode = req.InstitutionAccessCode,
-                RegistrationNumber = req.RegistrationNumber,
+                InstitutionAccessCode = string.IsNullOrWhiteSpace(req.InstitutionAccessCode)
+                    ? null
+                    : NormalizeCode(req.InstitutionAccessCode),
+
+                RegistrationNumber = string.IsNullOrWhiteSpace(req.RegistrationNumber)
+                    ? null
+                    : req.RegistrationNumber.Trim(),
+
                 RequiresUserApproval = req.RequiresUserApproval,
                 MaxStudentSeats = req.MaxStudentSeats,
                 MaxStaffSeats = req.MaxStaffSeats,
@@ -162,18 +178,10 @@ namespace LawAfrica.API.Services.Institutions
             if (string.IsNullOrWhiteSpace(entity.RegistrationNumber))
                 entity.RegistrationNumber = await _regNoGen.GenerateNextAsync();
 
-            // ✅ Always store a normalized code (never null/empty)
-            static string NormalizeCode(string s) => s.Trim().ToUpperInvariant();
-
-            if (!string.IsNullOrWhiteSpace(entity.InstitutionAccessCode))
-                entity.InstitutionAccessCode = NormalizeCode(entity.InstitutionAccessCode);
-
             _db.Institutions.Add(entity);
 
-            // ✅ Retry a few times if we hit UNIQUE collisions for RegistrationNumber or InstitutionAccessCode
             for (int attempt = 0; attempt < 5; attempt++)
             {
-                // Ensure code exists before every save attempt (important if previous attempt failed)
                 if (string.IsNullOrWhiteSpace(entity.InstitutionAccessCode))
                     entity.InstitutionAccessCode = NormalizeCode(await _accessCodeGen.GenerateUniqueAsync());
 
@@ -184,7 +192,7 @@ namespace LawAfrica.API.Services.Institutions
                 {
                     await _db.SaveChangesAsync();
 
-                    // ✅ Send welcome email AFTER save; never fail creation if it fails
+                    // ✅ Fire-and-forget welcome email (doesn't block creation)
                     _ = Task.Run(async () =>
                     {
                         try
@@ -210,19 +218,15 @@ namespace LawAfrica.API.Services.Institutions
                 }
                 catch (DbUpdateException)
                 {
-                    // We don’t know if it was RegistrationNumber or AccessCode (or something else),
-                    // so regenerate both safely and retry.
                     entity.InstitutionAccessCode = NormalizeCode(await _accessCodeGen.GenerateUniqueAsync());
                     entity.RegistrationNumber = await _regNoGen.GenerateNextAsync();
-
-                    // Important: do NOT call SaveChanges here; loop will retry cleanly.
                 }
             }
 
-            // If we got here, something else is wrong or collisions are extreme
             throw new InvalidOperationException(
                 "Failed to create institution after multiple attempts. Please try again.");
         }
+
 
 
         public async Task UpdateAsync(int id, UpdateInstitutionRequest req)

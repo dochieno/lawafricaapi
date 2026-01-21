@@ -93,6 +93,7 @@ builder.Services.AddScoped<InstitutionService>();
 builder.Services.AddHostedService<LawAfrica.API.Services.InstitutionSubscriptionStatusHostedService>();
 builder.Services.AddScoped<LawAfrica.API.Services.InstitutionAccessService>();
 
+
 // --------------------------------------------------
 // Payment & Subscription Services
 // --------------------------------------------------
@@ -302,6 +303,8 @@ app.UseExceptionHandler(errorApp =>
         await context.Response.WriteAsync("{\"error\":\"Internal server error\"}");
     });
 });
+
+app.UseMiddleware<ApiExceptionMiddleware>();
 
 // --------------------------------------------------
 // ✅ STORAGE (PERSISTENT DISK READY) + deterministic GET /storage/**
