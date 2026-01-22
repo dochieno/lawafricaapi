@@ -56,7 +56,10 @@ namespace LawAfrica.API.Controllers
                     CoverImagePath = d.CoverImagePath,
                     AllowPublicPurchase = d.AllowPublicPurchase,
                     PublicPrice = d.PublicPrice,
-                    PublicCurrency = d.PublicCurrency
+                    PublicCurrency = d.PublicCurrency,
+                    VatRateId = d.VatRateId,
+                    IsTaxInclusive = d.IsTaxInclusive,
+
                 })
                 .ToListAsync();
 
@@ -94,7 +97,8 @@ namespace LawAfrica.API.Controllers
                     CoverImagePath = d.CoverImagePath,
                     AllowPublicPurchase = d.AllowPublicPurchase,
                     PublicPrice = d.PublicPrice,
-                    
+                    VatRateId = d.VatRateId,
+                    IsTaxInclusive = d.IsTaxInclusive,
                     PublicCurrency = d.PublicCurrency
                 })
                 .FirstOrDefaultAsync();
@@ -124,6 +128,16 @@ namespace LawAfrica.API.Controllers
                     return BadRequest("Invalid ContentProductId.");
             }
 
+            int? vatRateId = request.VatRateId;
+
+            if (vatRateId.HasValue)
+            {
+                var vatExists = await _db.VatRates.AnyAsync(v => v.Id == vatRateId.Value);
+                if (!vatExists)
+                    return BadRequest("Invalid VatRateId.");
+            }
+
+
             var title = (request.Title ?? "").Trim();
             var description = (request.Description ?? "").Trim();
             var author = (request.Author ?? "").Trim();
@@ -140,6 +154,9 @@ namespace LawAfrica.API.Controllers
 
             var document = new LegalDocument
             {
+
+                VatRateId = vatRateId,
+                IsTaxInclusive = vatRateId.HasValue ? request.IsTaxInclusive : false,
                 Title = title,
                 Description = string.IsNullOrWhiteSpace(description) ? null : description,
                 Author = string.IsNullOrWhiteSpace(author) ? null : author,
@@ -215,11 +232,23 @@ namespace LawAfrica.API.Controllers
             if (!countryExists)
                 return BadRequest("Invalid countryId.");
 
+            int? vatRateId = request.VatRateId;
+
+            if (vatRateId.HasValue)
+            {
+                var vatExists = await _db.VatRates.AnyAsync(v => v.Id == vatRateId.Value);
+                if (!vatExists)
+                    return BadRequest("Invalid VatRateId.");
+            }
+
             doc.Title = request.Title.Trim();
             doc.Description = request.Description?.Trim();
             doc.Author = request.Author?.Trim();
             doc.Publisher = request.Publisher?.Trim();
             doc.Edition = request.Edition?.Trim();
+
+            doc.VatRateId = vatRateId;
+            doc.IsTaxInclusive = vatRateId.HasValue ? request.IsTaxInclusive : false;
 
             doc.Category = request.Category;
             doc.CountryId = request.CountryId;

@@ -45,5 +45,10 @@ namespace LawAfrica.API.Models.DTOs
         public bool AllowPublicPurchase { get; set; } = false;
         public decimal? PublicPrice { get; set; }
         public string? PublicCurrency { get; set; } = "KES";
+
+        public int? VatRateId { get; set; }
+        public bool IsTaxInclusive { get; set; }
+
+
     }
 }

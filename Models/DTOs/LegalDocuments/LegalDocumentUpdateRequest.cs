@@ -29,5 +29,8 @@ namespace LawAfrica.API.Models.DTOs
         public string? PublicCurrency { get; set; } = "KES";
 
         public LegalDocumentKind Kind { get; set; } 
+
+        public int? VatRateId { get; set; }
+        public bool IsTaxInclusive { get; set; }
     }
 }

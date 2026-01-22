@@ -56,6 +56,11 @@ public class LegalDocument
     public bool AllowPublicPurchase { get; set; } = false; // gate purchase visibility/availability
     public LegalDocumentKind Kind { get; set; } = LegalDocumentKind.Standard;
     public LawAfrica.API.Models.Reports.LawReport? LawReport { get; set; }
+    public int? VatRateId { get; set; }
+    public bool IsTaxInclusive { get; set; }   // true = price includes VAT
+
+    public LawAfrica.API.Models.Tax.VatRate? VatRate { get; set; }
+
     // ✅ 1:1 child (optional)
     public ICollection<ContentProductLegalDocument> ProductDocuments { get; set; } = new List<ContentProductLegalDocument>();
 

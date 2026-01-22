@@ -7,6 +7,7 @@ using LawAfrica.API.Models.Payments;
 using LawAfrica.API.Services;
 using LawAfrica.API.Services.Documents; // ✅ NEW (for DocumentEntitlementService)
 using LawAfrica.API.Services.Payments;
+using LawAfrica.API.Services.Tax; // ✅ VAT math
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -67,11 +68,27 @@ namespace LawAfrica.API.Controllers
                 userId = User.GetUserId();
             }
 
+            // ✅ VAT-aware amount/currency (only for legal doc purchase)
+            var amount = request.Amount;
+            var currency = "KES";
+
+            if (request.Purpose == PaymentPurpose.PublicLegalDocumentPurchase && request.LegalDocumentId.HasValue)
+            {
+                var quote = await QuoteLegalDocumentAsync(request.LegalDocumentId.Value, CancellationToken.None);
+                amount = quote.Gross;
+                currency = quote.Currency;
+            }
+            else
+            {
+                // Preserve existing behavior for other flows.
+                currency = "KES";
+            }
+
             try
             {
                 await _paymentValidation.ValidateStkInitiateAsync(
                     request.Purpose,
-                    request.Amount,
+                    amount, // ✅ use VAT-aware amount
                     request.PhoneNumber,
                     request.RegistrationIntentId,
                     request.ContentProductId,
@@ -82,6 +99,7 @@ namespace LawAfrica.API.Controllers
 
                 if (request.Purpose == PaymentPurpose.PublicLegalDocumentPurchase)
                 {
+                    // Validate policy + amount
                     await ValidatePublicLegalDocumentPurchaseAsync(userId, request);
                 }
             }
@@ -90,27 +108,17 @@ namespace LawAfrica.API.Controllers
                 return BadRequest(ex.Message);
             }
 
-            string currency = "KES";
-            if (request.Purpose == PaymentPurpose.PublicLegalDocumentPurchase && request.LegalDocumentId.HasValue)
-            {
-                var docCurrency = await _db.LegalDocuments
-                    .AsNoTracking()
-                    .Where(d => d.Id == request.LegalDocumentId.Value)
-                    .Select(d => d.PublicCurrency)
-                    .FirstOrDefaultAsync();
-
-                if (!string.IsNullOrWhiteSpace(docCurrency))
-                    currency = docCurrency!;
-            }
-
+            // ✅ Create intent using VAT-aware amount/currency
             var intent = new PaymentIntent
             {
                 Provider = PaymentProvider.Mpesa,
                 Method = PaymentMethod.Mpesa,
                 Purpose = request.Purpose,
                 Status = PaymentStatus.Pending,
-                Amount = request.Amount,
+
+                Amount = amount,
                 Currency = currency,
+
                 PhoneNumber = request.PhoneNumber,
 
                 UserId = userId,
@@ -128,10 +136,11 @@ namespace LawAfrica.API.Controllers
 
             var token = await _mpesa.GetAccessTokenAsync();
 
+            // ✅ Push VAT-aware amount to Mpesa
             var (merchantRequestId, checkoutRequestId, raw) = await _mpesa.InitiateStkPushAsync(
                 token,
                 request.PhoneNumber,
-                request.Amount,
+                amount, // ✅ use VAT-aware amount
                 accountReference: $"LA-{intent.Id}",
                 transactionDesc: $"{request.Purpose}"
             );
@@ -156,7 +165,7 @@ namespace LawAfrica.API.Controllers
         {
             string raw = "";
 
-            // ✅ NEW: webhook audit row created early (idempotent via dedupe hash)
+            // ✅ webhook audit row created early (idempotent via dedupe hash)
             PaymentProviderWebhookEvent? hook = null;
 
             try
@@ -172,7 +181,7 @@ namespace LawAfrica.API.Controllers
                     return Ok();
                 }
 
-                // ✅ NEW: store raw webhook event (append-only + idempotent)
+                // ✅ store raw webhook event (append-only + idempotent)
                 var dedupeHash = ComputeSha256Hex($"mpesa|{raw}");
                 hook = new PaymentProviderWebhookEvent
                 {
@@ -180,7 +189,7 @@ namespace LawAfrica.API.Controllers
                     EventType = "stkCallback",
                     DedupeHash = dedupeHash,
                     RawBody = raw,
-                    SignatureValid = null, // MPesa STK callback typically doesn't include HMAC signature header in this flow
+                    SignatureValid = null,
                     ProcessingStatus = ProviderEventProcessingStatus.Received,
                     ReceivedAt = DateTime.UtcNow
                 };
@@ -235,7 +244,6 @@ namespace LawAfrica.API.Controllers
                     return Ok();
                 }
 
-                // ✅ NEW: store a reference on the hook for easier matching/search
                 hook.Reference = checkoutRequestId;
 
                 var resultCode = stk.TryGetProperty("ResultCode", out var rc) ? rc.GetInt32() : -999;
@@ -261,7 +269,6 @@ namespace LawAfrica.API.Controllers
                 {
                     _logger.LogWarning("[MPESA CALLBACK] Already finalized PaymentIntentId={Id}", intent.Id);
 
-                    // ✅ NEW: mark webhook as processed (idempotent)
                     MarkHook(hook, ProviderEventProcessingStatus.Processed, "Already finalized", checkoutRequestId);
                     await _db.SaveChangesAsync(ct);
 
@@ -293,7 +300,6 @@ namespace LawAfrica.API.Controllers
                         }
                     }
 
-                    // ✅ NEW: set normalized provider transaction fields
                     intent.ProviderTransactionId = !string.IsNullOrWhiteSpace(intent.MpesaReceiptNumber)
                         ? intent.MpesaReceiptNumber
                         : intent.ProviderTransactionId;
@@ -311,12 +317,11 @@ namespace LawAfrica.API.Controllers
                 _logger.LogWarning("[MPESA CALLBACK] Updated PaymentIntentId={Id} Status={Status} Receipt={Receipt}",
                     intent.Id, intent.Status, intent.MpesaReceiptNumber);
 
-                // ✅ NEW: Upsert provider transaction (on success)
                 if (intent.Status == PaymentStatus.Success)
                 {
                     await UpsertMpesaProviderTransactionAsync(intent, checkoutRequestId, raw, ct);
 
-                    // ✅ NEW: Ensure invoice exists (autogen invoice number)
+                    // ✅ Invoice includes VAT breakdown
                     await EnsureInvoiceForIntentAsync(intent, ct);
 
                     await _db.SaveChangesAsync(ct);
@@ -333,7 +338,6 @@ namespace LawAfrica.API.Controllers
 
                 _logger.LogWarning("[MPESA CALLBACK] Finalizer completed for PaymentIntentId={Id}", intent.Id);
 
-                // ✅ NEW: mark webhook event processed
                 MarkHook(hook, ProviderEventProcessingStatus.Processed, null, checkoutRequestId);
                 await _db.SaveChangesAsync(ct);
 
@@ -343,7 +347,6 @@ namespace LawAfrica.API.Controllers
             {
                 _logger.LogError(ex, "[MPESA CALLBACK ERROR] Raw={Raw}", raw);
 
-                // ✅ NEW: record failure on webhook audit row (best-effort)
                 try
                 {
                     if (hook != null)
@@ -376,7 +379,6 @@ namespace LawAfrica.API.Controllers
                 intent.RegistrationIntentId,
                 intent.ContentProductId,
                 intent.InstitutionId,
-
                 intent.LegalDocumentId,
 
                 intent.CheckoutRequestId,
@@ -386,7 +388,6 @@ namespace LawAfrica.API.Controllers
                 intent.MpesaReceiptNumber,
                 intent.UpdatedAt,
 
-                // ✅ NEW (helpful for debugging)
                 intent.InvoiceId,
                 intent.ProviderTransactionId,
                 intent.ProviderPaidAt
@@ -398,7 +399,6 @@ namespace LawAfrica.API.Controllers
         // - Public individual: allowed
         // - Admin: allowed (optional)
         // - Institution user: allowed IF decision.CanPurchaseIndividually == true
-        //   (covers BOTH InstitutionSubscriptionInactive AND InstitutionSeatLimitExceeded, etc.)
         // --------------------------------------------------------------------
         private async Task ValidatePublicLegalDocumentPurchaseAsync(int? userId, InitiateMpesaCheckoutRequest request)
         {
@@ -427,8 +427,10 @@ namespace LawAfrica.API.Controllers
             if (!doc.AllowPublicPurchase || doc.PublicPrice == null || doc.PublicPrice <= 0)
                 throw new InvalidOperationException("This document is not available for purchase.");
 
-            if (request.Amount != doc.PublicPrice.Value)
-                throw new InvalidOperationException("Amount does not match the document price.");
+            // ✅ VAT-aware amount check
+            var quote = await QuoteLegalDocumentAsync(request.LegalDocumentId.Value, CancellationToken.None);
+            if (VatMath.Round2(request.Amount) != quote.Gross)
+                throw new InvalidOperationException($"Amount does not match the document total. Expected {quote.Gross} {quote.Currency}.");
 
             var already = await _db.UserLegalDocumentPurchases
                 .AsNoTracking()
@@ -451,11 +453,9 @@ namespace LawAfrica.API.Controllers
             {
                 var decision = await _entitlement.GetEntitlementDecisionAsync(userId.Value, doc);
 
-                // If subscription is active and user already has full access -> block purchase
                 if (decision.AccessLevel == DocumentAccessLevel.FullAccess)
                     throw new InvalidOperationException("This document is included in your institution subscription.");
 
-                // ✅ Allow purchase if policy allows (covers seat-exceeded + inactive + other restricted states)
                 if (!decision.CanPurchaseIndividually)
                     throw new InvalidOperationException(
                         decision.PurchaseDisabledReason
@@ -465,17 +465,15 @@ namespace LawAfrica.API.Controllers
                 return;
             }
 
-            // Other non-public non-institution accounts => deny
             throw new InvalidOperationException("Only public individual accounts can purchase documents.");
         }
 
         // =======================
-        // ✅ NEW HELPERS (MPESA -> reconciliation tables + invoices)
+        // ✅ HELPERS (MPESA -> reconciliation tables + invoices)
         // =======================
 
         private async Task UpsertMpesaProviderTransactionAsync(PaymentIntent intent, string checkoutRequestId, string rawJson, CancellationToken ct)
         {
-            // We prefer receipt number as ProviderTransactionId, but fall back to checkoutRequestId if missing.
             var providerTxId = !string.IsNullOrWhiteSpace(intent.MpesaReceiptNumber)
                 ? intent.MpesaReceiptNumber!.Trim()
                 : checkoutRequestId;
@@ -514,14 +512,12 @@ namespace LawAfrica.API.Controllers
             }
         }
 
-        //Invoice Creation
+        // ✅ Invoice Creation (VAT-aware for legal document purchase)
         private async Task EnsureInvoiceForIntentAsync(PaymentIntent intent, CancellationToken ct)
         {
-            // Only invoice successful payments
             if (intent.Status != PaymentStatus.Success)
                 return;
 
-            // ✅ If invoice already linked, backfill CustomerName if missing (idempotent)
             if (intent.InvoiceId.HasValue && intent.InvoiceId.Value > 0)
             {
                 var existingInvoice = await _db.Invoices
@@ -539,6 +535,56 @@ namespace LawAfrica.API.Controllers
 
             var invoiceNo = await _invoiceNumberGenerator.GenerateAsync(ct);
 
+            // Default: tax-free, same as old behavior
+            decimal net = VatMath.Round2(intent.Amount);
+            decimal vat = 0m;
+            decimal gross = VatMath.Round2(intent.Amount);
+
+            string? vatCode = null;
+            decimal vatRatePercent = 0m;
+
+            // ✅ VAT breakdown only for legal document purchases (for now)
+            if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase && intent.LegalDocumentId.HasValue)
+            {
+                var doc = await _db.LegalDocuments
+                    .AsNoTracking()
+                    .Include(d => d.VatRate)
+                    .Where(d => d.Id == intent.LegalDocumentId.Value)
+                    .Select(d => new
+                    {
+                        d.PublicPrice,
+                        d.VatRateId,
+                        VatRateCode = d.VatRate != null ? d.VatRate.Code : null,
+                        VatRatePercent = d.VatRate != null ? d.VatRate.RatePercent : 0m,
+                        d.IsTaxInclusive
+                    })
+                    .FirstOrDefaultAsync(ct);
+
+                if (doc != null && doc.PublicPrice.HasValue && doc.PublicPrice.Value > 0 && doc.VatRateId.HasValue && doc.VatRatePercent > 0m)
+                {
+                    vatCode = doc.VatRateCode;
+                    vatRatePercent = doc.VatRatePercent;
+
+                    if (doc.IsTaxInclusive)
+                    {
+                        // PublicPrice is gross
+                        (net, vat, gross) = VatMath.FromGrossInclusive(doc.PublicPrice.Value, vatRatePercent);
+                    }
+                    else
+                    {
+                        // PublicPrice is net
+                        (net, vat, gross) = VatMath.FromNet(doc.PublicPrice.Value, vatRatePercent);
+                    }
+
+                    // Safety: align to actual paid amount if mismatch
+                    if (VatMath.Round2(intent.Amount) != gross)
+                    {
+                        gross = VatMath.Round2(intent.Amount);
+                        (net, vat, _) = VatMath.FromGrossInclusive(gross, vatRatePercent);
+                    }
+                }
+            }
+
             var invoice = new Invoice
             {
                 InvoiceNumber = invoiceNo,
@@ -547,18 +593,18 @@ namespace LawAfrica.API.Controllers
                 Purpose = intent.Purpose,
 
                 Currency = intent.Currency,
-                Subtotal = intent.Amount,
-                TaxTotal = 0m,
-                DiscountTotal = 0m,
-                Total = intent.Amount,
 
-                AmountPaid = intent.Amount,
+                Subtotal = net,
+                TaxTotal = vat,
+                DiscountTotal = 0m,
+                Total = gross,
+
+                AmountPaid = gross,
                 PaidAt = intent.ProviderPaidAt ?? DateTime.UtcNow,
 
                 InstitutionId = intent.InstitutionId,
                 UserId = intent.UserId,
 
-                // ✅ NEW: set customer name (reconciliation)
                 CustomerName = await ResolveInvoiceCustomerNameAsync(intent, ct),
 
                 IssuedAt = DateTime.UtcNow,
@@ -567,14 +613,18 @@ namespace LawAfrica.API.Controllers
 
             invoice.Lines.Add(new InvoiceLine
             {
-                Description = BuildLineDescription(intent),
+                Description = BuildLineDescription(intent) + (vatRatePercent > 0m ? $" | VAT={vatCode ?? "VAT"} {vatRatePercent:0.##}%" : ""),
                 ItemCode = BuildItemCode(intent),
                 Quantity = 1m,
-                UnitPrice = intent.Amount,
-                LineSubtotal = intent.Amount,
-                TaxAmount = 0m,
+
+                // Store NET as unit price for consistency
+                UnitPrice = net,
+
+                LineSubtotal = net,
+                TaxAmount = vat,
                 DiscountAmount = 0m,
-                LineTotal = intent.Amount,
+                LineTotal = gross,
+
                 ContentProductId = intent.ContentProductId,
                 LegalDocumentId = intent.LegalDocumentId
             });
@@ -637,7 +687,6 @@ namespace LawAfrica.API.Controllers
 
         private async Task<string?> ResolveInvoiceCustomerNameAsync(PaymentIntent intent, CancellationToken ct)
         {
-            // Rule 1: Institution subscription invoices -> institution name
             if (intent.Purpose == PaymentPurpose.InstitutionProductSubscription)
             {
                 if (intent.InstitutionId.HasValue && intent.InstitutionId.Value > 0)
@@ -655,7 +704,6 @@ namespace LawAfrica.API.Controllers
                 return "Institution";
             }
 
-            // Rule 2: Public signup fee -> registration intent FirstName + LastName
             if (intent.Purpose == PaymentPurpose.PublicSignupFee)
             {
                 if (intent.RegistrationIntentId.HasValue && intent.RegistrationIntentId.Value > 0)
@@ -676,11 +724,9 @@ namespace LawAfrica.API.Controllers
                     }
                 }
 
-                // fallback (if reg intent missing)
                 return "Public User";
             }
 
-            // Rule 3: All other public purchases -> authenticated user name
             if (intent.UserId.HasValue && intent.UserId.Value > 0)
             {
                 var u = await _db.Users
@@ -699,7 +745,6 @@ namespace LawAfrica.API.Controllers
                 }
             }
 
-            // fallback
             return null;
         }
 
@@ -711,5 +756,54 @@ namespace LawAfrica.API.Controllers
             return string.IsNullOrWhiteSpace(full) ? null : full;
         }
 
+        // ✅ VAT Quote helper (legal docs)
+        private async Task<(decimal Net, decimal Vat, decimal Gross, string Currency)> QuoteLegalDocumentAsync(int legalDocumentId, CancellationToken ct)
+        {
+            var doc = await _db.LegalDocuments
+                .AsNoTracking()
+                .Include(d => d.VatRate)
+                .Where(d => d.Id == legalDocumentId)
+                .Select(d => new
+                {
+                    d.Id,
+                    d.PublicPrice,
+                    d.PublicCurrency,
+                    d.AllowPublicPurchase,
+                    d.Status,
+                    d.VatRateId,
+                    VatRatePercent = d.VatRate != null ? d.VatRate.RatePercent : 0m,
+                    d.IsTaxInclusive
+                })
+                .FirstOrDefaultAsync(ct);
+
+            if (doc == null || doc.Status != LegalDocumentStatus.Published)
+                throw new InvalidOperationException("Document not found or unpublished.");
+
+            if (!doc.AllowPublicPurchase || doc.PublicPrice == null || doc.PublicPrice <= 0)
+                throw new InvalidOperationException("This document is not available for purchase.");
+
+            var price = doc.PublicPrice.Value;
+            var rate = doc.VatRateId.HasValue ? doc.VatRatePercent : 0m;
+
+            decimal net, vat, gross;
+
+            if (rate <= 0m)
+            {
+                net = VatMath.Round2(price);
+                vat = 0m;
+                gross = VatMath.Round2(price);
+            }
+            else if (doc.IsTaxInclusive)
+            {
+                (net, vat, gross) = VatMath.FromGrossInclusive(price, rate);
+            }
+            else
+            {
+                (net, vat, gross) = VatMath.FromNet(price, rate);
+            }
+
+            var currency = string.IsNullOrWhiteSpace(doc.PublicCurrency) ? "KES" : doc.PublicCurrency!.Trim();
+            return (net, vat, gross, currency);
+        }
     }
 }

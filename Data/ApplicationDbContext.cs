@@ -7,6 +7,7 @@ using LawAfrica.API.Models.Locations;
 using LawAfrica.API.Models.Payments;
 using LawAfrica.API.Models.Registration;
 using LawAfrica.API.Models.Reports;
+using LawAfrica.API.Models.Tax;
 using LawAfrica.API.Models.Usage;
 using Microsoft.EntityFrameworkCore;
 using System.Linq;
@@ -99,6 +100,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<RegistrationResumeSession> RegistrationResumeSessions => Set<RegistrationResumeSession>();
     public DbSet<UserPresence> UserPresences { get; set; } = null!;
     public DbSet<InvoiceSettings> InvoiceSettings => Set<InvoiceSettings>();
+    public DbSet<VatRate> VatRates => Set<VatRate>();
+    public DbSet<VatRule> VatRules => Set<VatRule>();
 
 
     //LawReports
@@ -202,6 +205,26 @@ public class ApplicationDbContext : DbContext
 
             b.Property(x => x.EmailNormalized).HasMaxLength(256).IsRequired();
             b.Property(x => x.CodeHash).HasMaxLength(200).IsRequired();
+        });
+
+        modelBuilder.Entity<VatRate>(e =>
+        {
+            e.HasIndex(x => x.Code).IsUnique();
+            e.Property(x => x.RatePercent).HasColumnType("numeric(9,4)");
+            e.Property(x => x.Code).HasMaxLength(32);
+            e.Property(x => x.Name).HasMaxLength(160);
+            e.Property(x => x.CountryScope).HasMaxLength(8);
+        });
+
+        modelBuilder.Entity<VatRule>(e =>
+        {
+            e.HasIndex(x => new { x.Purpose, x.CountryCode, x.Priority });
+            e.Property(x => x.Purpose).HasMaxLength(64);
+            e.Property(x => x.CountryCode).HasMaxLength(8);
+            e.HasOne(x => x.VatRate)
+             .WithMany()
+             .HasForeignKey(x => x.VatRateId)
+             .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<RegistrationResumeSession>(b =>
@@ -310,6 +333,12 @@ public class ApplicationDbContext : DbContext
             .WithMany()
             .HasForeignKey(n => n.LegalDocumentId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<LegalDocument>()
+            .HasOne(x => x.VatRate)
+            .WithMany()
+            .HasForeignKey(x => x.VatRateId)
+            .OnDelete(DeleteBehavior.Restrict);
 
         modelBuilder.Entity<UserLibrary>()
             .HasIndex(x => new { x.UserId, x.LegalDocumentId })
