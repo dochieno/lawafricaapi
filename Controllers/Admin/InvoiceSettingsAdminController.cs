@@ -12,10 +12,26 @@ namespace LawAfrica.API.Controllers.Admin
     public class InvoiceSettingsAdminController : ControllerBase
     {
         private readonly ApplicationDbContext _db;
+        private readonly IConfiguration _config;
 
-        public InvoiceSettingsAdminController(ApplicationDbContext db)
+        private const long MaxLogoBytes = 5_000_000; // 5MB
+
+        private static readonly string[] AllowedLogoTypes =
+        {
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+        };
+
+        private static readonly string[] AllowedExt =
+        {
+            ".png", ".jpg", ".jpeg", ".webp"
+        };
+
+        public InvoiceSettingsAdminController(ApplicationDbContext db, IConfiguration config)
         {
             _db = db;
+            _config = config;
         }
 
         [HttpGet]
@@ -55,8 +71,8 @@ namespace LawAfrica.API.Controllers.Admin
 
             s.FooterNotes = dto.FooterNotes?.Trim();
 
-            // LogoPath is set by the logo upload endpoint OR you can allow here.
-            // Keep safe:
+            // LogoPath is primarily set by UploadLogo.
+            // Keep safe: allow only if provided (so manual set is still possible).
             if (!string.IsNullOrWhiteSpace(dto.LogoPath))
                 s.LogoPath = dto.LogoPath.Trim();
 
@@ -66,33 +82,44 @@ namespace LawAfrica.API.Controllers.Admin
             return Ok(ToDto(s));
         }
 
-        // OPTIONAL: Logo upload (multipart)
-        // POST api/admin/invoice-settings/logo
+        // POST api/admin/invoice-settings/logo (multipart)
         [HttpPost("logo")]
-        [RequestSizeLimit(5_000_000)]
+        [RequestSizeLimit(MaxLogoBytes)]
         public async Task<ActionResult> UploadLogo([FromForm] IFormFile file, CancellationToken ct)
         {
-            if (file == null || file.Length == 0) return BadRequest("File is required.");
-            if (file.Length > 5_000_000) return BadRequest("Max 5MB.");
+            if (file == null || file.Length == 0)
+                return BadRequest("File is required.");
 
-            var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
-            var allowed = new[] { ".png", ".jpg", ".jpeg", ".webp" };
-            if (!allowed.Contains(ext)) return BadRequest("Only png/jpg/webp allowed.");
+            if (file.Length > MaxLogoBytes)
+                return BadRequest("Max 5MB.");
 
-            // NOTE: Plug into your existing storage approach.
-            // Minimal local save example:
-            var folder = Path.Combine(Directory.GetCurrentDirectory(), "Storage", "Invoice");
-            Directory.CreateDirectory(folder);
+            // Prefer MIME validation (browser sets this correctly most times)
+            if (!AllowedLogoTypes.Contains(file.ContentType))
+                return BadRequest("Only JPG, PNG or WEBP allowed.");
 
-            var name = $"invoice-logo{ext}";
-            var fullPath = Path.Combine(folder, name);
+            var ext = Path.GetExtension(file.FileName)?.ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(ext))
+            {
+                ext = file.ContentType switch
+                {
+                    "image/png" => ".png",
+                    "image/webp" => ".webp",
+                    _ => ".jpg"
+                };
+            }
 
-            await using (var fs = new FileStream(fullPath, FileMode.Create))
-                await file.CopyToAsync(fs, ct);
+            if (!AllowedExt.Contains(ext))
+                return BadRequest("Only png/jpg/webp allowed.");
 
-            // Saved path stored as "Storage/Invoice/invoice-logo.png" style
-            var storedPath = Path.Combine("storage", "invoice", name).Replace("\\", "/");
+            // Normalize .jpeg -> .jpg to keep deterministic filename stable
+            if (ext == ".jpeg") ext = ".jpg";
 
+            // ✅ Must match Program.cs /storage mapping (STORAGE_ROOT)
+            var storageRoot = GetStorageRoot();
+            var diskDir = Path.Combine(storageRoot, "Invoice");
+            Directory.CreateDirectory(diskDir);
+
+            // Upsert settings row (Id=1)
             var s = await _db.InvoiceSettings.FirstOrDefaultAsync(x => x.Id == 1, ct);
             if (s == null)
             {
@@ -100,11 +127,79 @@ namespace LawAfrica.API.Controllers.Admin
                 _db.InvoiceSettings.Add(s);
             }
 
+            // Delete old logo file (best-effort)
+            if (!string.IsNullOrWhiteSpace(s.LogoPath))
+            {
+                var oldDisk = ResolveInvoiceLogoDiskPath(storageRoot, s.LogoPath);
+                if (!string.IsNullOrWhiteSpace(oldDisk) && System.IO.File.Exists(oldDisk))
+                {
+                    try { System.IO.File.Delete(oldDisk); } catch { /* ignore */ }
+                }
+            }
+
+            // Deterministic name (overwrites); frontend can cache-bust via ?v=nonce
+            var filename = $"invoice-logo{ext}";
+            var fullPath = Path.Combine(diskDir, filename);
+
+            await using (var fs = new FileStream(fullPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                await file.CopyToAsync(fs, ct);
+            }
+
+            // ✅ Store canonical URL (best for frontend)
+            var storedPath = $"/storage/Invoice/{filename}";
+
             s.LogoPath = storedPath;
             s.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync(ct);
 
             return Ok(new { ok = true, logoPath = storedPath });
+        }
+
+        // -----------------------------
+        // Helpers
+        // -----------------------------
+        private string GetStorageRoot()
+        {
+            // Must match Program.cs logic
+            var root = _config["STORAGE_ROOT"];
+            if (string.IsNullOrWhiteSpace(root))
+                root = Path.Combine(Directory.GetCurrentDirectory(), "Storage");
+            return root;
+        }
+
+        private static string? ResolveInvoiceLogoDiskPath(string storageRoot, string stored)
+        {
+            var s = (stored ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(s)) return null;
+
+            s = s.Replace('\\', '/');
+
+            // URL form: /storage/Invoice/x.png
+            if (s.StartsWith("/storage/", StringComparison.OrdinalIgnoreCase))
+            {
+                var rel = s.Substring("/storage/".Length).TrimStart('/');
+                if (rel.StartsWith("invoice/", StringComparison.OrdinalIgnoreCase))
+                    rel = "Invoice/" + rel.Substring("invoice/".Length);
+
+                return Path.Combine(storageRoot, rel.Replace('/', Path.DirectorySeparatorChar));
+            }
+
+            // Disk-ish form: storage/Invoice/x.png
+            if (s.StartsWith("storage/", StringComparison.OrdinalIgnoreCase))
+            {
+                var rel = s.Substring("storage/".Length).TrimStart('/');
+                if (rel.StartsWith("invoice/", StringComparison.OrdinalIgnoreCase))
+                    rel = "Invoice/" + rel.Substring("invoice/".Length);
+
+                return Path.Combine(storageRoot, rel.Replace('/', Path.DirectorySeparatorChar));
+            }
+
+            // filename-only
+            if (!s.Contains("/"))
+                return Path.Combine(storageRoot, "Invoice", s);
+
+            return Path.Combine(storageRoot, s.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
         }
 
         private static InvoiceSettingsDto ToDto(InvoiceSettings s) => new()
@@ -119,12 +214,14 @@ namespace LawAfrica.API.Controllers.Admin
             Email = s.Email,
             Phone = s.Phone,
             LogoPath = s.LogoPath,
+
             BankName = s.BankName,
             BankAccountName = s.BankAccountName,
             BankAccountNumber = s.BankAccountNumber,
             PaybillNumber = s.PaybillNumber,
             TillNumber = s.TillNumber,
             AccountReference = s.AccountReference,
+
             FooterNotes = s.FooterNotes
         };
     }
