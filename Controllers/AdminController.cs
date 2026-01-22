@@ -6,6 +6,7 @@ using LawAfrica.API.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 
 namespace LawAfrica.API.Controllers
 {
@@ -495,5 +496,86 @@ namespace LawAfrica.API.Controllers
                 RecentLogins = audits
             });
         }
+
+
+        //Additions:
+
+        // =========================================================
+        // USERS - SET / UNSET GLOBAL ADMIN
+        // PUT /api/admin/users/{id}/global-admin
+        // Body: { isGlobalAdmin: true|false }
+        // Notes:
+        // - Only a CURRENT Global Admin can change this flag
+        // - Promoting always ensures Role="Admin"
+        // - Prevent self-demotion for safety
+        // - Institution users cannot become Global Admin (optional but recommended)
+        // =========================================================
+        public class SetGlobalAdminRequest
+        {
+            public bool IsGlobalAdmin { get; set; }
+        }
+
+        private bool CurrentSessionIsGlobalAdmin()
+        {
+            // Claim is set by your backend as "isGlobalAdmin": "true"/"false"
+            var claim = User?.FindFirst("isGlobalAdmin")?.Value;
+            return string.Equals(claim, "true", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(claim, "1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(claim, "yes", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private int? CurrentSessionUserId()
+        {
+            var v =
+                User?.FindFirst("userId")?.Value ??
+                User?.FindFirst(ClaimTypes.NameIdentifier)?.Value ??
+                User?.FindFirst("sub")?.Value;
+
+            return int.TryParse(v, out var id) ? id : (int?)null;
+        }
+
+        [HttpPut("users/{id}/global-admin")]
+        public async Task<IActionResult> SetGlobalAdmin(int id, [FromBody] SetGlobalAdminRequest req)
+        {
+            // ✅ Only Global Admin can promote/demote Global Admin
+            if (!CurrentSessionIsGlobalAdmin())
+                return Forbid("Only a Global Admin can perform this action.");
+
+            var meId = CurrentSessionUserId();
+            if (meId.HasValue && meId.Value == id && req.IsGlobalAdmin == false)
+                return BadRequest("You cannot remove your own global admin access.");
+
+            var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == id);
+            if (user == null) return NotFound("User not found.");
+
+            // ✅ Recommended rule (matches your other rules):
+            // Institution users should NOT become system/global admins
+            if (user.InstitutionId != null && req.IsGlobalAdmin)
+                return BadRequest("Institution users cannot be promoted to Global Admin.");
+
+            // Apply change
+            user.IsGlobalAdmin = req.IsGlobalAdmin;
+
+            // Your requirement: when promoting to Global Admin, also set Role=Admin
+            if (req.IsGlobalAdmin)
+            {
+                user.Role = "Admin";
+                user.IsActive = true; // optional safety, remove if you don't want
+            }
+
+            user.UpdatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+
+            return Ok(new
+            {
+                message = req.IsGlobalAdmin ? "Global Admin granted." : "Global Admin removed.",
+                userId = user.Id,
+                user.Username,
+                user.Email,
+                user.Role,
+                user.IsGlobalAdmin
+            });
+        }
+
     }
 }
