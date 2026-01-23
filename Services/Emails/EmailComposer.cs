@@ -1,5 +1,9 @@
-﻿using LawAfrica.API.Models;
+﻿using LawAfrica.API.Data;
+using LawAfrica.API.Models;
 using LawAfrica.API.Models.Emails;
+using LawAfrica.API.Models.Payments;
+using LawAfrica.API.Services.Payments;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 
 namespace LawAfrica.API.Services.Emails
@@ -9,12 +13,21 @@ namespace LawAfrica.API.Services.Emails
         private readonly IConfiguration _config;
         private readonly EmailService _emailService;
         private readonly IEmailTemplateRenderer _renderer;
+        private readonly ApplicationDbContext _db;
+        private readonly InvoicePdfService _invoicePdf;
 
-        public EmailComposer(IConfiguration config, EmailService emailService, IEmailTemplateRenderer renderer)
+        public EmailComposer(
+            IConfiguration config,
+            EmailService emailService,
+            IEmailTemplateRenderer renderer,
+            ApplicationDbContext db,
+            InvoicePdfService invoicePdf)
         {
             _config = config;
             _emailService = emailService;
             _renderer = renderer;
+            _db = db;
+            _invoicePdf = invoicePdf;
         }
 
         private string ProductName => _config["Brand:ProductName"] ?? "LawAfrica";
@@ -30,6 +43,9 @@ namespace LawAfrica.API.Services.Emails
             return "there";
         }
 
+        // ===========================
+        // Existing methods kept
+        // ===========================
         public async Task SendEmailVerificationAsync(User user, CancellationToken ct = default)
         {
             if (string.IsNullOrWhiteSpace(user.Email)) return;
@@ -90,7 +106,6 @@ namespace LawAfrica.API.Services.Emails
             await _emailService.SendEmailWithInlineImageAsync(user.Email, rendered.Subject, rendered.Html, qrBytes, cid);
         }
 
-        // ✅ NEW: Institution welcome email (access code)
         public async Task SendInstitutionWelcomeAsync(
             string toEmail,
             string institutionName,
@@ -102,8 +117,6 @@ namespace LawAfrica.API.Services.Emails
             if (string.IsNullOrWhiteSpace(toEmail)) return;
 
             var regUrl = string.IsNullOrWhiteSpace(AppUrl) ? "" : $"{AppUrl.TrimEnd('/')}/register";
-
-            // If your frontend uses a different route, override with config Brand:RegistrationUrl if you want
             var registrationUrl =
                 _config["Brand:RegistrationUrl"] ??
                 (string.IsNullOrWhiteSpace(regUrl) ? "https://app.lawafrica.example/register" : regUrl);
@@ -122,8 +135,6 @@ namespace LawAfrica.API.Services.Emails
                 AccessCode = accessCode,
 
                 RegistrationUrl = registrationUrl,
-
-                // used in template sentence
                 RequiresUserApproval = requiresUserApproval ? "true" : "false"
             };
 
@@ -134,6 +145,82 @@ namespace LawAfrica.API.Services.Emails
                 ct: ct);
 
             await _emailService.SendEmailAsync(toEmail, rendered.Subject, rendered.Html);
+        }
+
+        // ===========================
+        // ✅ NEW: Invoice PDF email
+        // ===========================
+        public async Task SendInvoiceEmailAsync(int invoiceId, CancellationToken ct = default)
+        {
+            // Load invoice + email target
+            var invoice = await _db.Invoices
+                .AsNoTracking()
+                .Include(i => i.User)
+                .Include(i => i.Institution)
+                .FirstOrDefaultAsync(i => i.Id == invoiceId, ct);
+
+            if (invoice == null) return;
+
+            var toEmail = invoice.User?.Email?.Trim();
+            if (string.IsNullOrWhiteSpace(toEmail))
+                return; // No recipient email available
+
+            // Display name
+            var displayName =
+                !string.IsNullOrWhiteSpace(invoice.CustomerName) ? invoice.CustomerName!.Trim() :
+                invoice.User != null ? DisplayNameFor(invoice.User) :
+                "there";
+
+            var (pdfBytes, fileName) = await _invoicePdf.GenerateInvoicePdfWithFileNameAsync(invoice.Id, ct);
+            var invNo = string.IsNullOrWhiteSpace(invoice.InvoiceNumber) ? $"INV-{invoice.Id}" : invoice.InvoiceNumber.Trim();
+
+            var subject = $"{ProductName} Invoice {invNo}";
+
+            // Build a “paid” line as plain token (since renderer is token-only)
+            var paidLine = invoice.PaidAt.HasValue && invoice.AmountPaid > 0
+                ? $"{invoice.Currency} {invoice.AmountPaid:0,0.00} on {invoice.PaidAt.Value:dd-MMM-yyyy HH:mm}"
+                : "—";
+
+            var model = new
+            {
+                ProductName = ProductName,
+                Year = DateTime.UtcNow.Year.ToString(),
+                SupportEmail = SupportEmail,
+
+                DisplayName = displayName,
+
+                InvoiceNumber = invNo,
+                InvoiceStatus = invoice.Status.ToString(),
+                IssuedAt = invoice.IssuedAt.ToString("dd-MMM-yyyy"),
+                Currency = (invoice.Currency ?? "KES").Trim(),
+
+                Subtotal = invoice.Subtotal.ToString("0,0.00"),
+                TaxTotal = invoice.TaxTotal.ToString("0,0.00"),
+                Total = invoice.Total.ToString("0,0.00"),
+
+                PaidLine = paidLine // use in template
+            };
+
+            var rendered = await _renderer.RenderAsync(
+                TemplateNames.InvoiceEmail,
+                subject,
+                model,
+                ct: ct);
+
+            await _emailService.SendEmailWithAttachmentsAsync(
+                toEmail,
+                rendered.Subject,
+                rendered.Html,
+                attachments: new[]
+                {
+                    new EmailAttachment
+                    {
+
+                        FileName = fileName,
+                        Bytes = pdfBytes,
+                        ContentType = "application/pdf"
+                    }
+                });
         }
     }
 }

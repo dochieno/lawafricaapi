@@ -13,7 +13,9 @@
         public const string InviteToInstitution = "invite-to-institution";
         public const string PaymentReceipt = "payment-receipt";
         public const string SubscriptionRenewal = "subscription-renewal";
-        // ✅ NEW
         public const string InstitutionWelcome = "institution-welcome";
+
+        // ✅ NEW: Invoice email (PDF attachment)
+        public const string InvoiceEmail = "invoice-email";
     }
 }

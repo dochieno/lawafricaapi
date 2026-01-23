@@ -56,6 +56,9 @@ namespace LawAfrica.API.Models.Payments
 
         public List<InvoiceLine> Lines { get; set; } = new();
 
+        public DateTime? PdfEmailedAt { get; set; }
+        public string? PdfEmailedTo { get; set; }
+
 
     }
 }

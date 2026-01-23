@@ -1,0 +1,60 @@
+﻿<!-- Title -->
+<div style="font-size:22px; line-height:28px; font-weight:800; color:#111827; margin:0; padding:0;">
+    Your invoice from {{ProductName}} 🧾
+</div>
+
+<div style="height:10px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Greeting -->
+<div style="font-size:15px; line-height:22px; color:#111827;">
+    Hello <strong>{{DisplayName}}</strong>,
+</div>
+
+<div style="height:10px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Copy -->
+<div style="font-size:15px; line-height:22px; color:#374151;">
+    Please find attached your invoice <strong>{{InvoiceNumber}}</strong>.
+</div>
+
+<div style="height:14px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Summary card -->
+<div style="
+  border:1px solid #e5e7eb;
+  border-radius:12px;
+  padding:14px 14px;
+  background:#f8fafc;
+  font-family:Arial, Helvetica, sans-serif;
+">
+    <div style="font-size:13px; line-height:18px; color:#6b7280; margin:0 0 6px 0;">Invoice summary</div>
+
+    <div style="font-size:14px; line-height:20px; color:#111827;">
+        <div><strong>Status:</strong> {{InvoiceStatus}}</div>
+        <div><strong>Issued:</strong> {{IssuedAt}}</div>
+        <div><strong>Currency:</strong> {{Currency}}</div>
+    </div>
+
+    <div style="height:10px; font-size:0; line-height:0;">&nbsp;</div>
+
+    <div style="font-size:14px; line-height:20px; color:#111827;">
+        <div><strong>Subtotal:</strong> {{Currency}} {{Subtotal}}</div>
+        <div><strong>VAT:</strong> {{Currency}} {{TaxTotal}}</div>
+        <div><strong>Total:</strong> {{Currency}} {{Total}}</div>
+    </div>
+
+    {{#PaidBlock}}
+    <div style="height:10px; font-size:0; line-height:0;">&nbsp;</div>
+    <div style="font-size:13px; line-height:18px; color:#065f46;">
+        <strong>Paid:</strong> {{Currency}} {{AmountPaid}} on {{PaidAt}}
+    </div>
+    {{/PaidBlock}}
+</div>
+
+<div style="height:14px; font-size:0; line-height:0;">&nbsp;</div>
+
+<!-- Help -->
+<div style="font-size:13px; line-height:18px; color:#6b7280;">
+    If you have any questions about this invoice, reply to our support team:
+    <a href="mailto:{{SupportEmail}}" style="color:#1d4ed8; text-decoration:underline;">{{SupportEmail}}</a>.
+</div>

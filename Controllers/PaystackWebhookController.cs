@@ -5,6 +5,7 @@ using LawAfrica.API.Models.Documents;           // ✅ Needed for LegalDocumentS
 using LawAfrica.API.Models.Payments;
 using LawAfrica.API.Services;
 using LawAfrica.API.Services.Documents;         // ✅ LegalDocumentPurchaseFulfillmentService
+using LawAfrica.API.Services.Emails;
 using LawAfrica.API.Services.Payments;
 using LawAfrica.API.Services.Tax;               // ✅ VatMath
 using Microsoft.AspNetCore.Authorization;
@@ -29,6 +30,7 @@ namespace LawAfrica.API.Controllers
         private readonly InvoiceNumberGenerator _invoiceNumberGenerator;
         private readonly LegalDocumentPurchaseFulfillmentService _legalDocFulfillment; // ✅ NEW
         private readonly ILogger<PaystackWebhookController> _logger;
+        private readonly EmailComposer _emailComposer;
 
         public PaystackWebhookController(
             ApplicationDbContext db,
@@ -37,7 +39,9 @@ namespace LawAfrica.API.Controllers
             PaymentFinalizerService finalizer,
             InvoiceNumberGenerator invoiceNumberGenerator,
             LegalDocumentPurchaseFulfillmentService legalDocFulfillment, // ✅ NEW
-            ILogger<PaystackWebhookController> logger)
+            ILogger<PaystackWebhookController> logger,
+            EmailComposer emailComposer)
+
         {
             _db = db;
             _opts = opts.Value;
@@ -46,6 +50,7 @@ namespace LawAfrica.API.Controllers
             _invoiceNumberGenerator = invoiceNumberGenerator;
             _legalDocFulfillment = legalDocFulfillment; // ✅ NEW
             _logger = logger;
+            _emailComposer = emailComposer;
         }
 
         /// <summary>
@@ -238,6 +243,20 @@ namespace LawAfrica.API.Controllers
                 await EnsureInvoiceForIntentAsync(intent, ct);
 
                 await _db.SaveChangesAsync(ct);
+                if (intent.InvoiceId.HasValue)
+                {
+                    try
+                    {
+                        await _emailComposer.SendInvoiceEmailAsync(intent.InvoiceId.Value, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Invoice email failed for InvoiceId={InvoiceId}", intent.InvoiceId.Value);
+                        // Do NOT fail webhook
+                    }
+                }
+
+
 
                 // ✅ Legal document fulfillment (Paystack parity with MPesa)
                 if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase)
@@ -439,7 +458,6 @@ namespace LawAfrica.API.Controllers
 
             _db.Invoices.Add(invoice);
             await _db.SaveChangesAsync(ct);
-
             intent.InvoiceId = invoice.Id;
             intent.UpdatedAt = DateTime.UtcNow;
         }

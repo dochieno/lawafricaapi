@@ -143,6 +143,11 @@ builder.Services.AddSingleton<IEmailTemplateStore, FileEmailTemplateStore>();
 builder.Services.AddSingleton<IEmailTemplateRenderer, SimpleTokenEmailTemplateRenderer>();
 builder.Services.AddScoped<EmailComposer>();
 
+QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
+
+// DI
+builder.Services.AddScoped<InvoicePdfService>();
+
 // --------------------------------------------------
 // Authorization
 // --------------------------------------------------
@@ -190,6 +195,10 @@ builder.Services.AddScoped<IAuthorizationHandler, InstitutionAdminHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, CanApproveInstitutionUsersHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, GlobalAdminHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
+
+// QuestPDF license (Community is fine for most cases)
+
+
 
 // --------------------------------------------------
 // JWT Authentication

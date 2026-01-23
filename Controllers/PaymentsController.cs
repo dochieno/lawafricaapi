@@ -6,6 +6,7 @@ using LawAfrica.API.Models.DTOs.Payments;
 using LawAfrica.API.Models.Payments;
 using LawAfrica.API.Services;
 using LawAfrica.API.Services.Documents; // ✅ NEW (for DocumentEntitlementService)
+using LawAfrica.API.Services.Emails;
 using LawAfrica.API.Services.Payments;
 using LawAfrica.API.Services.Tax; // ✅ VAT math
 using Microsoft.AspNetCore.Authorization;
@@ -28,6 +29,7 @@ namespace LawAfrica.API.Controllers
         private readonly PaymentValidationService _paymentValidation;
         private readonly LegalDocumentPurchaseFulfillmentService _legalDocFulfillment;
         private readonly ILogger<PaymentsController> _logger;
+        private readonly EmailComposer _emailComposer;
 
         private readonly DocumentEntitlementService _entitlement; // ✅ NEW
         private readonly InvoiceNumberGenerator _invoiceNumberGenerator; // ✅ NEW
@@ -40,7 +42,8 @@ namespace LawAfrica.API.Controllers
             LegalDocumentPurchaseFulfillmentService legalDocFulfillment,
             ILogger<PaymentsController> logger,
             DocumentEntitlementService entitlement, // ✅ NEW
-            InvoiceNumberGenerator invoiceNumberGenerator // ✅ NEW
+            InvoiceNumberGenerator invoiceNumberGenerator,// ✅ NEW
+            EmailComposer emailComposer // ✅ NEW
         )
         {
             _db = db;
@@ -52,6 +55,7 @@ namespace LawAfrica.API.Controllers
 
             _entitlement = entitlement; // ✅ NEW
             _invoiceNumberGenerator = invoiceNumberGenerator; // ✅ NEW
+            _emailComposer = emailComposer; // ✅ NEW
         }
 
         [AllowAnonymous]
@@ -325,6 +329,20 @@ namespace LawAfrica.API.Controllers
                     await EnsureInvoiceForIntentAsync(intent, ct);
 
                     await _db.SaveChangesAsync(ct);
+
+                    if (intent.InvoiceId.HasValue)
+                    {
+                        try
+                        {
+                            await _emailComposer.SendInvoiceEmailAsync(intent.InvoiceId.Value, ct);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Invoice email failed for InvoiceId={InvoiceId}", intent.InvoiceId.Value);
+                            // Do NOT fail webhook
+                        }
+                    }
+
                 }
 
                 if (intent.Status == PaymentStatus.Success &&
