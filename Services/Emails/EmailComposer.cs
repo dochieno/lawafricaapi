@@ -176,8 +176,7 @@ namespace LawAfrica.API.Services.Emails
             }
 
             // 2) (Optional) If you have institution billing email field, use it here
-            // مثال: invoice.InstitutionId -> Institutions.BillingEmail / Email
-            // if still empty, try institution email (adjust field name to your schema)
+            // If still empty, try institution email (adjust field name to your schema)
             if (string.IsNullOrWhiteSpace(toEmail) && invoice.InstitutionId.HasValue && invoice.InstitutionId.Value > 0)
             {
                 toEmail = await _db.Institutions
@@ -189,13 +188,33 @@ namespace LawAfrica.API.Services.Emails
                 toEmail = toEmail?.Trim();
             }
 
-            // ✅ If still missing, log and stop (NO silent return)
+            // ✅ 3) PublicSignupFee path: invoice often has no UserId.
+            // Resolve email from the PaymentIntent -> RegistrationIntentId -> RegistrationIntents.Email
             if (string.IsNullOrWhiteSpace(toEmail))
             {
-                // If you don't have ILogger here, add one to EmailComposer like you did elsewhere
-                // For now this prevents "silent fail" behavior:
-                throw new InvalidOperationException($"Invoice email skipped: no recipient email found. InvoiceId={invoice.Id}, UserId={invoice.UserId}, InstitutionId={invoice.InstitutionId}");
+                var regId = await _db.PaymentIntents
+                    .AsNoTracking()
+                    .Where(p => p.InvoiceId == invoice.Id && p.RegistrationIntentId != null)
+                    .OrderByDescending(p => p.Id)
+                    .Select(p => p.RegistrationIntentId)
+                    .FirstOrDefaultAsync(ct);
+
+                if (regId.HasValue && regId.Value > 0)
+                {
+                    toEmail = await _db.RegistrationIntents
+                        .AsNoTracking()
+                        .Where(r => r.Id == regId.Value)
+                        .Select(r => r.Email)
+                        .FirstOrDefaultAsync(ct);
+
+                    toEmail = toEmail?.Trim();
+                }
             }
+
+            // ✅ If still missing, throw (so you see it in logs) instead of silent return
+            if (string.IsNullOrWhiteSpace(toEmail))
+                throw new InvalidOperationException(
+                    $"Invoice email skipped: no recipient email found. InvoiceId={invoice.Id}, UserId={invoice.UserId}, InstitutionId={invoice.InstitutionId}");
 
             // Display name
             var displayName = !string.IsNullOrWhiteSpace(invoice.CustomerName)
@@ -208,7 +227,7 @@ namespace LawAfrica.API.Services.Emails
             var subject = $"{ProductName} Invoice {invNo}";
 
             var paidLine = invoice.PaidAt.HasValue && invoice.AmountPaid > 0
-                ? $"{invoice.Currency} {invoice.AmountPaid:0,0.00} on {invoice.PaidAt.Value:dd-MMM-yyyy HH:mm}"
+                ? $"{(invoice.Currency ?? "KES").Trim()} {invoice.AmountPaid:0,0.00} on {invoice.PaidAt.Value:dd-MMM-yyyy HH:mm}"
                 : "—";
 
             // ✅ If template missing, fall back to simple HTML instead of failing silently
@@ -241,15 +260,17 @@ namespace LawAfrica.API.Services.Emails
             {
                 outSubject = subject;
                 html = $@"
-                <div style='font-family:Arial,sans-serif;font-size:14px;line-height:1.5'>
-                  <p>Hi {System.Net.WebUtility.HtmlEncode(displayName)},</p>
-                  <p>Please find your invoice attached.</p>
-                  <p><b>Invoice:</b> {System.Net.WebUtility.HtmlEncode(invNo)}<br/>
-                     <b>Status:</b> {System.Net.WebUtility.HtmlEncode(invoice.Status.ToString())}<br/>
-                     <b>Total:</b> {System.Net.WebUtility.HtmlEncode(invoice.Currency ?? "KES")} {invoice.Total:0,0.00}<br/>
-                     <b>Paid:</b> {System.Net.WebUtility.HtmlEncode(paidLine)}</p>
-                  <p>Support: {System.Net.WebUtility.HtmlEncode(SupportEmail)}</p>
-                </div>";
+                    <div style='font-family:Arial,sans-serif;font-size:14px;line-height:1.5'>
+                      <p>Hi {System.Net.WebUtility.HtmlEncode(displayName)},</p>
+                      <p>Please find your invoice attached.</p>
+                      <p>
+                        <b>Invoice:</b> {System.Net.WebUtility.HtmlEncode(invNo)}<br/>
+                        <b>Status:</b> {System.Net.WebUtility.HtmlEncode(invoice.Status.ToString())}<br/>
+                        <b>Total:</b> {System.Net.WebUtility.HtmlEncode((invoice.Currency ?? "KES").Trim())} {invoice.Total:0,0.00}<br/>
+                        <b>Paid:</b> {System.Net.WebUtility.HtmlEncode(paidLine)}
+                      </p>
+                      <p>Support: {System.Net.WebUtility.HtmlEncode(SupportEmail)}</p>
+                    </div>";
             }
 
             await _emailService.SendEmailWithAttachmentsAsync(
@@ -266,6 +287,7 @@ namespace LawAfrica.API.Services.Emails
             }
                 });
         }
+
 
     }
 }

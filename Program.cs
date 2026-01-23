@@ -239,19 +239,33 @@ builder.Services
 // --------------------------------------------------
 // ✅ CORS (FIXED)
 // --------------------------------------------------
-builder.Services.AddCors(options =>
-{
-    options.AddPolicy("ViteDev", policy =>
+// --------------------------------------------------
+// ✅ CORS (Cloudflare Pages + local dev)
+// --------------------------------------------------
+    builder.Services.AddCors(options =>
     {
-        policy.WithOrigins(
-                "http://localhost:5173",
-                "https://lawafricadigitalhub.vercel.app",
-                "https://www.lawafricadigitalhub.vercel.app"
-              )
-              .AllowAnyHeader()
-              .AllowAnyMethod();
+        options.AddPolicy("ViteDev", policy =>
+        {
+            policy.WithOrigins(
+                    // Local dev
+                    "http://localhost:5173",
+
+                    // ✅ Cloudflare Pages (your deployed frontend)
+                    "https://lawafricadigitalhub.pages.dev",
+
+                    // (Optional) If you later add a custom domain, add it here too:
+                    // "https://lawafrica.co.ke",
+                    // "https://www.lawafrica.co.ke",
+
+                    // Old (keep if still used anywhere, safe to leave)
+                    "https://lawafricadigitalhub.vercel.app",
+                    "https://www.lawafricadigitalhub.vercel.app"
+                  )
+                  .AllowAnyHeader()
+                  .AllowAnyMethod();
+        });
     });
-});
+
 
 // --------------------------------------------------
 // Swagger
