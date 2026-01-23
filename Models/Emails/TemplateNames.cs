@@ -1,21 +1,20 @@
-﻿namespace LawAfrica.API.Models.Emails
+﻿// Models/Emails/TemplateNames.cs
+namespace LawAfrica.API.Models.Emails
 {
     public static class TemplateNames
     {
         public const string EmailVerification = "email-verification";
         public const string TwoFactorSetup = "twofactor-setup";
 
-        // Optional next
         public const string PasswordReset = "password-reset";
         public const string RegistrationResumeOtp = "registration-resume-otp";
 
-        // Future-ready
         public const string InviteToInstitution = "invite-to-institution";
         public const string PaymentReceipt = "payment-receipt";
         public const string SubscriptionRenewal = "subscription-renewal";
         public const string InstitutionWelcome = "institution-welcome";
 
-        // ✅ NEW: Invoice email (PDF attachment)
+        // ✅ Invoice email template (PDF attachment)
         public const string InvoiceEmail = "invoice-email";
     }
 }

@@ -530,30 +530,18 @@ namespace LawAfrica.API.Controllers
             }
         }
 
-        // ✅ Invoice Creation (VAT-aware for legal document purchase)
         private async Task EnsureInvoiceForIntentAsync(PaymentIntent intent, CancellationToken ct)
         {
             if (intent.Status != PaymentStatus.Success)
                 return;
 
+            // If invoice already linked, do nothing (prevents duplicates)
             if (intent.InvoiceId.HasValue && intent.InvoiceId.Value > 0)
-            {
-                var existingInvoice = await _db.Invoices
-                    .FirstOrDefaultAsync(x => x.Id == intent.InvoiceId.Value, ct);
-
-                if (existingInvoice != null && string.IsNullOrWhiteSpace(existingInvoice.CustomerName))
-                {
-                    existingInvoice.CustomerName = await ResolveInvoiceCustomerNameAsync(intent, ct);
-                    existingInvoice.UpdatedAt = DateTime.UtcNow;
-                    await _db.SaveChangesAsync(ct);
-                }
-
                 return;
-            }
 
             var invoiceNo = await _invoiceNumberGenerator.GenerateAsync(ct);
 
-            // Default: tax-free, same as old behavior
+            // Default: tax-free
             decimal net = VatMath.Round2(intent.Amount);
             decimal vat = 0m;
             decimal gross = VatMath.Round2(intent.Amount);
@@ -561,7 +549,7 @@ namespace LawAfrica.API.Controllers
             string? vatCode = null;
             decimal vatRatePercent = 0m;
 
-            // ✅ VAT breakdown only for legal document purchases (for now)
+            // ✅ VAT breakdown for legal document purchases
             if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase && intent.LegalDocumentId.HasValue)
             {
                 var doc = await _db.LegalDocuments
@@ -578,19 +566,21 @@ namespace LawAfrica.API.Controllers
                     })
                     .FirstOrDefaultAsync(ct);
 
-                if (doc != null && doc.PublicPrice.HasValue && doc.PublicPrice.Value > 0 && doc.VatRateId.HasValue && doc.VatRatePercent > 0m)
+                if (doc != null &&
+                    doc.PublicPrice.HasValue &&
+                    doc.PublicPrice.Value > 0 &&
+                    doc.VatRateId.HasValue &&
+                    doc.VatRatePercent > 0m)
                 {
                     vatCode = doc.VatRateCode;
                     vatRatePercent = doc.VatRatePercent;
 
                     if (doc.IsTaxInclusive)
                     {
-                        // PublicPrice is gross
                         (net, vat, gross) = VatMath.FromGrossInclusive(doc.PublicPrice.Value, vatRatePercent);
                     }
                     else
                     {
-                        // PublicPrice is net
                         (net, vat, gross) = VatMath.FromNet(doc.PublicPrice.Value, vatRatePercent);
                     }
 
@@ -606,7 +596,6 @@ namespace LawAfrica.API.Controllers
             var invoice = new Invoice
             {
                 InvoiceNumber = invoiceNo,
-
                 Status = InvoiceStatus.Paid,
                 Purpose = intent.Purpose,
 
@@ -635,9 +624,7 @@ namespace LawAfrica.API.Controllers
                 ItemCode = BuildItemCode(intent),
                 Quantity = 1m,
 
-                // Store NET as unit price for consistency
                 UnitPrice = net,
-
                 LineSubtotal = net,
                 TaxAmount = vat,
                 DiscountAmount = 0m,
@@ -648,11 +635,28 @@ namespace LawAfrica.API.Controllers
             });
 
             _db.Invoices.Add(invoice);
+
+            // ✅ Save invoice to get Id
             await _db.SaveChangesAsync(ct);
 
+            // ✅ Link intent -> invoice
             intent.InvoiceId = invoice.Id;
             intent.UpdatedAt = DateTime.UtcNow;
+
+            await _db.SaveChangesAsync(ct);
+
+            // ✅ Send invoice email ONCE right after creation (safe)
+            try
+            {
+                await _emailComposer.SendInvoiceEmailAsync(intent.InvoiceId.Value, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Invoice email failed for InvoiceId={InvoiceId}", intent.InvoiceId.Value);
+            }
+
         }
+
 
         private static string BuildLineDescription(PaymentIntent intent)
         {

@@ -1,10 +1,4 @@
-﻿// Services/EmailService.cs
-// Microsoft Graph (app-only) email sender.
-// ✅ Updated to support: SendEmailWithAttachmentsAsync (PDF invoices etc.)
-// ✅ Keeps existing public methods/signatures unchanged
-// ✅ Adds a small EmailAttachment model (non-breaking)
-
-using LawAfrica.API.Models;
+﻿using LawAfrica.API.Models;
 using LawAfrica.API.Models.Emails;
 using Microsoft.Extensions.Options;
 using System.Net.Http.Headers;
@@ -13,13 +7,7 @@ using System.Text.Json;
 
 namespace LawAfrica.API.Services
 {
-    /// <summary>
-    /// Microsoft Graph (app-only) email sender.
-    /// Supports:
-    /// - HTML email
-    /// - Inline images via CID (isInline=true)
-    /// - Attachments (e.g., PDF invoice)
-    /// </summary>
+
     public class EmailService
     {
         private readonly EmailSettings _settings;
@@ -79,7 +67,7 @@ namespace LawAfrica.API.Services
             var fromUser = GetFromUserOrThrow();
             var accessToken = await GetGraphAccessTokenAsync();
 
-            // ✅ Graph requires "@odata.type" (exact key) for attachments.
+            // ✅ Graph requires "@odata.type" for attachments
             var attachment = new Dictionary<string, object?>
             {
                 ["@odata.type"] = "#microsoft.graph.fileAttachment",
@@ -152,93 +140,6 @@ namespace LawAfrica.API.Services
                     ["name"] = fileName,
                     ["contentType"] = contentType,
                     ["contentBytes"] = Convert.ToBase64String(bytes),
-                    ["isInline"] = false
-                });
-            }
-
-            var payload = new Dictionary<string, object?>
-            {
-                ["message"] = new Dictionary<string, object?>
-                {
-                    ["subject"] = subject ?? "",
-                    ["body"] = new Dictionary<string, object?>
-                    {
-                        ["contentType"] = "HTML",
-                        ["content"] = htmlBody ?? ""
-                    },
-                    ["toRecipients"] = new object[]
-                    {
-                        new Dictionary<string, object?>
-                        {
-                            ["emailAddress"] = new Dictionary<string, object?>
-                            {
-                                ["address"] = toEmail.Trim()
-                            }
-                        }
-                    },
-                    // Only include attachments if any exist (Graph is okay either way, but cleaner)
-                    ["attachments"] = attList.Count > 0 ? attList.ToArray() : Array.Empty<object>()
-                },
-                ["saveToSentItems"] = true
-            };
-
-            await SendMailViaGraphAsync(accessToken, fromUser, payload, ct);
-        }
-
-        /// <summary>
-        /// Optional helper: Send HTML email with attachments + inline images together.
-        /// (Not required now, but useful if you ever attach PDF + include inline logo)
-        /// </summary>
-        public async Task SendEmailWithAttachmentsAndInlineImagesAsync(
-            string toEmail,
-            string subject,
-            string htmlBody,
-            IEnumerable<EmailAttachment>? attachments,
-            IEnumerable<EmailInlineImage>? inlineImages,
-            CancellationToken ct = default)
-        {
-            if (string.IsNullOrWhiteSpace(toEmail))
-                return;
-
-            var fromUser = GetFromUserOrThrow();
-            var accessToken = await GetGraphAccessTokenAsync();
-
-            var attList = new List<object>();
-
-            // Inline images
-            foreach (var img in inlineImages ?? Array.Empty<EmailInlineImage>())
-            {
-                if (img?.Bytes == null || img.Bytes.Length == 0) continue;
-
-                var cid = string.IsNullOrWhiteSpace(img.ContentId) ? "inline" : img.ContentId.Trim();
-                var fileName = string.IsNullOrWhiteSpace(img.FileName) ? $"{cid}.png" : img.FileName!.Trim();
-                var contentType = string.IsNullOrWhiteSpace(img.ContentType) ? "image/png" : img.ContentType.Trim();
-
-                attList.Add(new Dictionary<string, object?>
-                {
-                    ["@odata.type"] = "#microsoft.graph.fileAttachment",
-                    ["name"] = fileName,
-                    ["contentType"] = contentType,
-                    ["contentBytes"] = Convert.ToBase64String(img.Bytes),
-                    ["isInline"] = true,
-                    ["contentId"] = cid
-                });
-            }
-
-            // Regular attachments
-            foreach (var a in attachments ?? Array.Empty<EmailAttachment>())
-            {
-                if (a?.Bytes == null || a.Bytes.Length == 0) continue;
-
-                var fileName = string.IsNullOrWhiteSpace(a.FileName) ? "attachment" : a.FileName.Trim();
-                var contentType = string.IsNullOrWhiteSpace(a.ContentType) ? "application/octet-stream" : a.ContentType.Trim();
-
-                attList.Add(new Dictionary<string, object?>
-                {
-                    ["@odata.type"] = "#microsoft.graph.fileAttachment",
-                    ["name"] = fileName,
-                    ["contentType"] = contentType,
-                    ["contentBytes"] = Convert.ToBase64String(a.Bytes),
                     ["isInline"] = false
                 });
             }
@@ -343,16 +244,5 @@ namespace LawAfrica.API.Services
             if ((int)resp.StatusCode < 200 || (int)resp.StatusCode >= 300)
                 throw new InvalidOperationException($"Graph sendMail failed: {(int)resp.StatusCode}. {respBody}");
         }
-    }
-
-    /// <summary>
-    /// ✅ NEW: Attachment model for Graph email sending.
-    /// Keep it simple: used by Invoice emailing.
-    /// </summary>
-    public class EmailAttachment
-    {
-        public string FileName { get; set; } = "attachment";
-        public string ContentType { get; set; } = "application/octet-stream";
-        public byte[] Bytes { get; set; } = Array.Empty<byte>();
     }
 }

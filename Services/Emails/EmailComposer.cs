@@ -1,7 +1,6 @@
 ﻿using LawAfrica.API.Data;
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.Emails;
-using LawAfrica.API.Models.Payments;
 using LawAfrica.API.Services.Payments;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -148,22 +147,25 @@ namespace LawAfrica.API.Services.Emails
         }
 
         // ===========================
-        // ✅ NEW: Invoice PDF email
+        // ✅ Invoice PDF email (SEND-ONCE + TEMPLATE-FIX)
         // ===========================
         public async Task SendInvoiceEmailAsync(int invoiceId, CancellationToken ct = default)
         {
-            // Load invoice
+            // ✅ Tracked invoice (we must update PdfEmailedAt/PdfEmailedTo)
             var invoice = await _db.Invoices
-                .AsNoTracking()
                 .FirstOrDefaultAsync(i => i.Id == invoiceId, ct);
 
             if (invoice == null)
                 return;
 
+            // ✅ Send-once guarantee
+            if (invoice.PdfEmailedAt.HasValue)
+                return;
+
             // ✅ Resolve recipient email robustly
             string? toEmail = null;
 
-            // 1) If invoice has UserId, fetch user's email (don't rely on navigation)
+            // 1) User email
             if (invoice.UserId.HasValue && invoice.UserId.Value > 0)
             {
                 toEmail = await _db.Users
@@ -175,21 +177,19 @@ namespace LawAfrica.API.Services.Emails
                 toEmail = toEmail?.Trim();
             }
 
-            // 2) (Optional) If you have institution billing email field, use it here
-            // If still empty, try institution email (adjust field name to your schema)
+            // 2) Institution official email (adjust if you later add BillingEmail)
             if (string.IsNullOrWhiteSpace(toEmail) && invoice.InstitutionId.HasValue && invoice.InstitutionId.Value > 0)
             {
                 toEmail = await _db.Institutions
                     .AsNoTracking()
                     .Where(x => x.Id == invoice.InstitutionId.Value)
-                    .Select(x => x.OfficialEmail) // <-- change to BillingEmail/ContactEmail if that's what you have
+                    .Select(x => x.OfficialEmail)
                     .FirstOrDefaultAsync(ct);
 
                 toEmail = toEmail?.Trim();
             }
 
-            // ✅ 3) PublicSignupFee path: invoice often has no UserId.
-            // Resolve email from the PaymentIntent -> RegistrationIntentId -> RegistrationIntents.Email
+            // 3) PublicSignupFee path: PaymentIntent -> RegistrationIntent
             if (string.IsNullOrWhiteSpace(toEmail))
             {
                 var regId = await _db.PaymentIntents
@@ -211,12 +211,10 @@ namespace LawAfrica.API.Services.Emails
                 }
             }
 
-            // ✅ If still missing, throw (so you see it in logs) instead of silent return
             if (string.IsNullOrWhiteSpace(toEmail))
                 throw new InvalidOperationException(
                     $"Invoice email skipped: no recipient email found. InvoiceId={invoice.Id}, UserId={invoice.UserId}, InstitutionId={invoice.InstitutionId}");
 
-            // Display name
             var displayName = !string.IsNullOrWhiteSpace(invoice.CustomerName)
                 ? invoice.CustomerName!.Trim()
                 : "there";
@@ -226,30 +224,34 @@ namespace LawAfrica.API.Services.Emails
             var invNo = string.IsNullOrWhiteSpace(invoice.InvoiceNumber) ? $"INV-{invoice.Id}" : invoice.InvoiceNumber.Trim();
             var subject = $"{ProductName} Invoice {invNo}";
 
-            var paidLine = invoice.PaidAt.HasValue && invoice.AmountPaid > 0
-                ? $"{(invoice.Currency ?? "KES").Trim()} {invoice.AmountPaid:0,0.00} on {invoice.PaidAt.Value:dd-MMM-yyyy HH:mm}"
-                : "—";
+            var isPaid = invoice.PaidAt.HasValue && invoice.AmountPaid > 0m;
+            var currency = (invoice.Currency ?? "KES").Trim();
 
-            // ✅ If template missing, fall back to simple HTML instead of failing silently
             string html;
             string outSubject;
 
             try
             {
+                // ✅ Matches your invoice-email template placeholders
                 var model = new
                 {
                     ProductName = ProductName,
                     Year = DateTime.UtcNow.Year.ToString(),
                     SupportEmail = SupportEmail,
                     DisplayName = displayName,
+
                     InvoiceNumber = invNo,
                     InvoiceStatus = invoice.Status.ToString(),
                     IssuedAt = invoice.IssuedAt.ToString("dd-MMM-yyyy"),
-                    Currency = (invoice.Currency ?? "KES").Trim(),
+
+                    Currency = currency,
                     Subtotal = invoice.Subtotal.ToString("0,0.00"),
                     TaxTotal = invoice.TaxTotal.ToString("0,0.00"),
                     Total = invoice.Total.ToString("0,0.00"),
-                    PaidLine = paidLine
+
+                    PaidBlock = isPaid,
+                    AmountPaid = invoice.AmountPaid.ToString("0,0.00"),
+                    PaidAt = isPaid ? invoice.PaidAt!.Value.ToString("dd-MMM-yyyy HH:mm") : ""
                 };
 
                 var rendered = await _renderer.RenderAsync(TemplateNames.InvoiceEmail, subject, model, ct: ct);
@@ -259,6 +261,11 @@ namespace LawAfrica.API.Services.Emails
             catch
             {
                 outSubject = subject;
+
+                var paidLine = isPaid
+                    ? $"{currency} {invoice.AmountPaid:0,0.00} on {invoice.PaidAt!.Value:dd-MMM-yyyy HH:mm}"
+                    : "—";
+
                 html = $@"
                     <div style='font-family:Arial,sans-serif;font-size:14px;line-height:1.5'>
                       <p>Hi {System.Net.WebUtility.HtmlEncode(displayName)},</p>
@@ -266,28 +273,34 @@ namespace LawAfrica.API.Services.Emails
                       <p>
                         <b>Invoice:</b> {System.Net.WebUtility.HtmlEncode(invNo)}<br/>
                         <b>Status:</b> {System.Net.WebUtility.HtmlEncode(invoice.Status.ToString())}<br/>
-                        <b>Total:</b> {System.Net.WebUtility.HtmlEncode((invoice.Currency ?? "KES").Trim())} {invoice.Total:0,0.00}<br/>
+                        <b>Total:</b> {System.Net.WebUtility.HtmlEncode(currency)} {invoice.Total:0,0.00}<br/>
                         <b>Paid:</b> {System.Net.WebUtility.HtmlEncode(paidLine)}
                       </p>
                       <p>Support: {System.Net.WebUtility.HtmlEncode(SupportEmail)}</p>
                     </div>";
             }
 
+            // ✅ Send email (throws if Graph fails)
             await _emailService.SendEmailWithAttachmentsAsync(
                 toEmail,
                 outSubject,
                 html,
                 attachments: new[]
                 {
-            new EmailAttachment
-            {
-                FileName = fileName,
-                Bytes = pdfBytes,
-                ContentType = "application/pdf"
-            }
-                });
+                    new EmailAttachment
+                    {
+                        FileName = fileName,
+                        Bytes = pdfBytes,
+                        ContentType = "application/pdf"
+                    }
+                },
+                ct: ct);
+
+            // ✅ Mark as emailed (send-once durable)
+            invoice.PdfEmailedAt = DateTime.UtcNow;
+            invoice.PdfEmailedTo = toEmail;
+
+            await _db.SaveChangesAsync(ct);
         }
-
-
     }
 }

@@ -347,33 +347,15 @@ namespace LawAfrica.API.Controllers
             intent.ProviderTransactionId = providerTxId;
         }
 
-        /// <summary>
-        /// ✅ UPDATED: stores VAT breakdown on invoice for PublicLegalDocumentPurchase
-        /// - Subtotal = Net
-        /// - TaxTotal = VAT
-        /// - Total = Gross (should equal intent.Amount verified by Paystack)
-        /// </summary>
         private async Task EnsureInvoiceForIntentAsync(PaymentIntent intent, CancellationToken ct)
         {
             // Only invoice successful payments
             if (intent.Status != PaymentStatus.Success)
                 return;
 
-            // ✅ If invoice already linked, backfill CustomerName if missing (idempotent)
+            // If invoice already linked, do nothing (prevents duplicates)
             if (intent.InvoiceId.HasValue && intent.InvoiceId.Value > 0)
-            {
-                var existingInvoice = await _db.Invoices
-                    .FirstOrDefaultAsync(x => x.Id == intent.InvoiceId.Value, ct);
-
-                if (existingInvoice != null && string.IsNullOrWhiteSpace(existingInvoice.CustomerName))
-                {
-                    existingInvoice.CustomerName = await ResolveInvoiceCustomerNameAsync(intent, ct);
-                    existingInvoice.UpdatedAt = DateTime.UtcNow;
-                    await _db.SaveChangesAsync(ct);
-                }
-
                 return;
-            }
 
             // -----------------------------
             // ✅ Compute VAT-aware totals
@@ -384,7 +366,6 @@ namespace LawAfrica.API.Controllers
             var currency = string.IsNullOrWhiteSpace(intent.Currency) ? "KES" : intent.Currency.Trim().ToUpperInvariant();
             decimal ratePercent = 0m;
 
-            // Only legal document purchases get VAT breakdown here
             if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase && intent.LegalDocumentId.HasValue)
             {
                 var quote = await QuoteLegalDocumentAsync(intent.LegalDocumentId.Value, ct);
@@ -397,13 +378,10 @@ namespace LawAfrica.API.Controllers
                 // Safety: invoice total must reconcile to verified payment amount
                 if (VatMath.Round2(intent.Amount) != VatMath.Round2(gross))
                 {
-                    // Use verified gross (intent.Amount) as truth; re-split inclusive if VAT exists
                     gross = intent.Amount;
 
                     if (ratePercent > 0m)
-                    {
                         (net, vat, _) = VatMath.FromGrossInclusive(gross, ratePercent);
-                    }
                     else
                     {
                         net = gross;
@@ -445,7 +423,6 @@ namespace LawAfrica.API.Controllers
                 ItemCode = BuildItemCode(intent),
                 Quantity = 1m,
 
-                // ✅ store NET as unit price when VAT is tracked
                 UnitPrice = VatMath.Round2(net),
                 LineSubtotal = VatMath.Round2(net),
                 TaxAmount = VatMath.Round2(vat),
@@ -457,10 +434,30 @@ namespace LawAfrica.API.Controllers
             });
 
             _db.Invoices.Add(invoice);
+
+            // ✅ Save invoice to get Id
             await _db.SaveChangesAsync(ct);
+
+            // ✅ Link intent -> invoice
             intent.InvoiceId = invoice.Id;
             intent.UpdatedAt = DateTime.UtcNow;
+
+            await _db.SaveChangesAsync(ct);
+
+            // ✅ Send invoice email ONCE right after creation (safe: do not fail webhook)
+            // After intent.InvoiceId is set and saved:
+            try
+            {
+                await _emailComposer.SendInvoiceEmailAsync(intent.InvoiceId.Value, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Invoice email failed for InvoiceId={InvoiceId}", intent.InvoiceId.Value);
+                // Do not fail webhook
+            }
+
         }
+
 
         // ✅ VAT quote helper (same logic as your MPesa controller)
         private async Task<(decimal Net, decimal Vat, decimal Gross, string Currency, decimal RatePercent)> QuoteLegalDocumentAsync(int legalDocumentId, CancellationToken ct)
