@@ -152,75 +152,120 @@ namespace LawAfrica.API.Services.Emails
         // ===========================
         public async Task SendInvoiceEmailAsync(int invoiceId, CancellationToken ct = default)
         {
-            // Load invoice + email target
+            // Load invoice
             var invoice = await _db.Invoices
                 .AsNoTracking()
-                .Include(i => i.User)
-                .Include(i => i.Institution)
                 .FirstOrDefaultAsync(i => i.Id == invoiceId, ct);
 
-            if (invoice == null) return;
+            if (invoice == null)
+                return;
 
-            var toEmail = invoice.User?.Email?.Trim();
+            // ✅ Resolve recipient email robustly
+            string? toEmail = null;
+
+            // 1) If invoice has UserId, fetch user's email (don't rely on navigation)
+            if (invoice.UserId.HasValue && invoice.UserId.Value > 0)
+            {
+                toEmail = await _db.Users
+                    .AsNoTracking()
+                    .Where(u => u.Id == invoice.UserId.Value)
+                    .Select(u => u.Email)
+                    .FirstOrDefaultAsync(ct);
+
+                toEmail = toEmail?.Trim();
+            }
+
+            // 2) (Optional) If you have institution billing email field, use it here
+            // مثال: invoice.InstitutionId -> Institutions.BillingEmail / Email
+            // if still empty, try institution email (adjust field name to your schema)
+            if (string.IsNullOrWhiteSpace(toEmail) && invoice.InstitutionId.HasValue && invoice.InstitutionId.Value > 0)
+            {
+                toEmail = await _db.Institutions
+                    .AsNoTracking()
+                    .Where(x => x.Id == invoice.InstitutionId.Value)
+                    .Select(x => x.OfficialEmail) // <-- change to BillingEmail/ContactEmail if that's what you have
+                    .FirstOrDefaultAsync(ct);
+
+                toEmail = toEmail?.Trim();
+            }
+
+            // ✅ If still missing, log and stop (NO silent return)
             if (string.IsNullOrWhiteSpace(toEmail))
-                return; // No recipient email available
+            {
+                // If you don't have ILogger here, add one to EmailComposer like you did elsewhere
+                // For now this prevents "silent fail" behavior:
+                throw new InvalidOperationException($"Invoice email skipped: no recipient email found. InvoiceId={invoice.Id}, UserId={invoice.UserId}, InstitutionId={invoice.InstitutionId}");
+            }
 
             // Display name
-            var displayName =
-                !string.IsNullOrWhiteSpace(invoice.CustomerName) ? invoice.CustomerName!.Trim() :
-                invoice.User != null ? DisplayNameFor(invoice.User) :
-                "there";
+            var displayName = !string.IsNullOrWhiteSpace(invoice.CustomerName)
+                ? invoice.CustomerName!.Trim()
+                : "there";
 
             var (pdfBytes, fileName) = await _invoicePdf.GenerateInvoicePdfWithFileNameAsync(invoice.Id, ct);
-            var invNo = string.IsNullOrWhiteSpace(invoice.InvoiceNumber) ? $"INV-{invoice.Id}" : invoice.InvoiceNumber.Trim();
 
+            var invNo = string.IsNullOrWhiteSpace(invoice.InvoiceNumber) ? $"INV-{invoice.Id}" : invoice.InvoiceNumber.Trim();
             var subject = $"{ProductName} Invoice {invNo}";
 
-            // Build a “paid” line as plain token (since renderer is token-only)
             var paidLine = invoice.PaidAt.HasValue && invoice.AmountPaid > 0
                 ? $"{invoice.Currency} {invoice.AmountPaid:0,0.00} on {invoice.PaidAt.Value:dd-MMM-yyyy HH:mm}"
                 : "—";
 
-            var model = new
+            // ✅ If template missing, fall back to simple HTML instead of failing silently
+            string html;
+            string outSubject;
+
+            try
             {
-                ProductName = ProductName,
-                Year = DateTime.UtcNow.Year.ToString(),
-                SupportEmail = SupportEmail,
+                var model = new
+                {
+                    ProductName = ProductName,
+                    Year = DateTime.UtcNow.Year.ToString(),
+                    SupportEmail = SupportEmail,
+                    DisplayName = displayName,
+                    InvoiceNumber = invNo,
+                    InvoiceStatus = invoice.Status.ToString(),
+                    IssuedAt = invoice.IssuedAt.ToString("dd-MMM-yyyy"),
+                    Currency = (invoice.Currency ?? "KES").Trim(),
+                    Subtotal = invoice.Subtotal.ToString("0,0.00"),
+                    TaxTotal = invoice.TaxTotal.ToString("0,0.00"),
+                    Total = invoice.Total.ToString("0,0.00"),
+                    PaidLine = paidLine
+                };
 
-                DisplayName = displayName,
-
-                InvoiceNumber = invNo,
-                InvoiceStatus = invoice.Status.ToString(),
-                IssuedAt = invoice.IssuedAt.ToString("dd-MMM-yyyy"),
-                Currency = (invoice.Currency ?? "KES").Trim(),
-
-                Subtotal = invoice.Subtotal.ToString("0,0.00"),
-                TaxTotal = invoice.TaxTotal.ToString("0,0.00"),
-                Total = invoice.Total.ToString("0,0.00"),
-
-                PaidLine = paidLine // use in template
-            };
-
-            var rendered = await _renderer.RenderAsync(
-                TemplateNames.InvoiceEmail,
-                subject,
-                model,
-                ct: ct);
+                var rendered = await _renderer.RenderAsync(TemplateNames.InvoiceEmail, subject, model, ct: ct);
+                outSubject = rendered.Subject;
+                html = rendered.Html;
+            }
+            catch
+            {
+                outSubject = subject;
+                html = $@"
+                <div style='font-family:Arial,sans-serif;font-size:14px;line-height:1.5'>
+                  <p>Hi {System.Net.WebUtility.HtmlEncode(displayName)},</p>
+                  <p>Please find your invoice attached.</p>
+                  <p><b>Invoice:</b> {System.Net.WebUtility.HtmlEncode(invNo)}<br/>
+                     <b>Status:</b> {System.Net.WebUtility.HtmlEncode(invoice.Status.ToString())}<br/>
+                     <b>Total:</b> {System.Net.WebUtility.HtmlEncode(invoice.Currency ?? "KES")} {invoice.Total:0,0.00}<br/>
+                     <b>Paid:</b> {System.Net.WebUtility.HtmlEncode(paidLine)}</p>
+                  <p>Support: {System.Net.WebUtility.HtmlEncode(SupportEmail)}</p>
+                </div>";
+            }
 
             await _emailService.SendEmailWithAttachmentsAsync(
                 toEmail,
-                rendered.Subject,
-                rendered.Html,
+                outSubject,
+                html,
                 attachments: new[]
                 {
-                    new EmailAttachment
-                    {
-
-                        FileName = fileName,
-                        Bytes = pdfBytes,
-                        ContentType = "application/pdf"
-                    }
+            new EmailAttachment
+            {
+                FileName = fileName,
+                Bytes = pdfBytes,
+                ContentType = "application/pdf"
+            }
                 });
         }
+
     }
 }
