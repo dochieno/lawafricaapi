@@ -409,33 +409,53 @@ namespace LawAfrica.API.Controllers
             // ✅ DO NOT mess signup flow
             if (purpose == PaymentPurpose.PublicSignupFee)
             {
-                var fallbackFrontendReturn = "https://lawafricadigitalhub.vercel.app/payments/paystack/return";
+                var fallbackFrontendReturn = "https://lawafricadigitalhub.pages.dev/payments/paystack/return";
 
                 var configured = (_opts.CallbackUrl ?? "").Trim();
                 if (string.IsNullOrWhiteSpace(configured)) return fallbackFrontendReturn;
 
-                // Guard against the exact failure you hit (misconfigured to /return-visit)
                 if (configured.Contains("return-visit", StringComparison.OrdinalIgnoreCase))
                     return fallbackFrontendReturn;
 
-                // Guard against mistakenly pointing signup callback to API proxy (not desired)
                 if (configured.Contains("/api/payments/paystack/return", StringComparison.OrdinalIgnoreCase))
+                    return fallbackFrontendReturn;
+
+                // ✅ Guard against outdated Vercel domain
+                if (configured.Contains("vercel.app", StringComparison.OrdinalIgnoreCase))
                     return fallbackFrontendReturn;
 
                 return configured;
             }
 
-            // ✅ Non-signup purchases: always go through API proxy return
+            // ✅ Non-signup purchases: go through API proxy return
+            // Ensure the proxy URL is built from the *API* base, not the frontend.
             return BuildApiReturnProxyUrl();
         }
 
         private string BuildApiReturnProxyUrl()
         {
+            // ✅ Preferred: always build from configured public API base URL
+            // (prevents “whatever proxy host the request came through”)
+            var apiPublicBase = (_opts.ApiPublicBaseUrl ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(apiPublicBase))
+            {
+                apiPublicBase = apiPublicBase.TrimEnd('/');
+                return $"{apiPublicBase}/api/payments/paystack/return";
+            }
+
+            // Fallback: derive from request headers (kept for safety)
             var forwardedProto = Request.Headers["X-Forwarded-Proto"].ToString();
             var forwardedHost = Request.Headers["X-Forwarded-Host"].ToString();
 
-            var scheme = !string.IsNullOrWhiteSpace(forwardedProto) ? forwardedProto : Request.Scheme;
-            var host = !string.IsNullOrWhiteSpace(forwardedHost) ? forwardedHost : Request.Host.Value;
+            // Some proxies send comma-separated values: "https, http"
+            string FirstHeaderValue(string v)
+                => string.IsNullOrWhiteSpace(v) ? "" : v.Split(',')[0].Trim();
+
+            var scheme = FirstHeaderValue(forwardedProto);
+            var host = FirstHeaderValue(forwardedHost);
+
+            if (string.IsNullOrWhiteSpace(scheme)) scheme = Request.Scheme;
+            if (string.IsNullOrWhiteSpace(host)) host = Request.Host.Value;
 
             return $"{scheme}://{host}/api/payments/paystack/return";
         }

@@ -8,5 +8,7 @@
         // ✅ NEW: canonical public URL of the API (Render)
         // Example: https://lawafricaapi.onrender.com
         public string? PublicBaseUrl { get; set; }
+
+        public string ApiPublicBaseUrl { get; set; } = "";
     }
 }
