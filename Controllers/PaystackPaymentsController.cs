@@ -53,7 +53,7 @@ namespace LawAfrica.API.Controllers
         {
             var r = (reference ?? trxref ?? "").Trim();
 
-            var frontendReturn = "https://lawafricadigitalhub.vercel.app/payments/paystack/return";
+            var frontendReturn = "https://lawafricadigitalhub.pages.dev//payments/paystack/return";
 
             if (string.IsNullOrWhiteSpace(r))
                 return Redirect(frontendReturn);
@@ -421,7 +421,7 @@ namespace LawAfrica.API.Controllers
                     return fallbackFrontendReturn;
 
                 // ✅ Guard against outdated Vercel domain
-                if (configured.Contains("vercel.app", StringComparison.OrdinalIgnoreCase))
+                if (configured.Contains("pages.dev", StringComparison.OrdinalIgnoreCase))
                     return fallbackFrontendReturn;
 
                 return configured;

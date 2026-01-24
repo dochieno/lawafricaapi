@@ -51,23 +51,20 @@ namespace LawAfrica.API.Services.Payments
 
             phoneNumber = phoneNumber.Trim().Replace(" ", "");
 
-            // ✅ Accept: 07xxxxxxxx, 01xxxxxxxx, 2547xxxxxxxx, 2541xxxxxxxx
-            // ✅ Normalize all to: 2547xxxxxxxx or 2541xxxxxxxx (12 digits)
-            if (phoneNumber.StartsWith("07") && phoneNumber.Length == 10)
-            {
-                phoneNumber = "254" + phoneNumber.Substring(1); // 07.. -> 2547..
-            }
-            else if (phoneNumber.StartsWith("01") && phoneNumber.Length == 10)
-            {
-                phoneNumber = "254" + phoneNumber.Substring(1); // 01.. -> 2541..
-            }
 
-            // Final strict check (both sandbox + production prefer 254XXXXXXXXX 12 digits)
-            // ✅ allow both 2547 and 2541 ranges
-            if (!Regex.IsMatch(phoneNumber, @"^254(7|1)\d{8}$"))
+            try
+            {
+                phoneNumber = FormatToMpesaStandard(phoneNumber);
+                // at this point, phoneNumber is guaranteed to be like: 2547XXXXXXXX or 2541XXXXXXXX
+            }
+            catch (ArgumentException ex)
+            {
+                // Keep the existing error contract for this method
                 throw new InvalidOperationException(
-                    "PhoneNumber must be in format 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or 2541XXXXXXXX."
+                    "PhoneNumber must be in format 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or 2541XXXXXXXX.",
+                    ex
                 );
+            }
 
             // -------------------------------
             // Purpose-specific validation
@@ -243,5 +240,20 @@ namespace LawAfrica.API.Services.Payments
             if (!productExists)
                 throw new InvalidOperationException("Content product not found.");
         }
+
+
+        public static string FormatToMpesaStandard(string phoneNumber)
+        {
+
+            if (phoneNumber is null)
+                throw new ArgumentNullException(nameof(phoneNumber), "Please provide a phone number to make this payment.");
+                 phoneNumber = phoneNumber.Trim();
+                 var match = Regex.Match(phoneNumber, @"^(?:254|\+254|0)?((?:7|1)[0-9]{8})$");
+                 if (!match.Success)
+                    throw new ArgumentException("Invalid phone number format. Expected a Kenyan mobile number (e.g., 07XXXXXXXX, 01XXXXXXXX, +2547XXXXXXXX).", nameof(phoneNumber));
+            // M-PESA Daraja API requires 2547XXXXXXXX / 2541XXXXXXXX
+                  return "254" + match.Groups[1].Value;
+        }
+
+        }
     }
-}

@@ -251,15 +251,12 @@ builder.Services
                     "http://localhost:5173",
 
                     // ✅ Cloudflare Pages (your deployed frontend)
-                    "https://lawafricadigitalhub.pages.dev",
+                    "https://lawafricadigitalhub.pages.dev"
 
                     // (Optional) If you later add a custom domain, add it here too:
                     // "https://lawafrica.co.ke",
                     // "https://www.lawafrica.co.ke",
 
-                    // Old (keep if still used anywhere, safe to leave)
-                    "https://lawafricadigitalhub.vercel.app",
-                    "https://www.lawafricadigitalhub.vercel.app"
                   )
                   .AllowAnyHeader()
                   .AllowAnyMethod();
