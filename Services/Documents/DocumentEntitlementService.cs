@@ -9,20 +9,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LawAfrica.API.Services.Documents
 {
-    /// <summary>
-    /// SINGLE SOURCE OF TRUTH for document entitlement.
-    ///
-    /// This service decides whether a user has:
-    /// - FullAccess (read all pages)
-    /// - PreviewOnly (limited pages in UI)
-    ///
-    /// It also encodes "hard block" cases using DenyReason, e.g.:
-    /// - InstitutionSubscriptionInactive
-    /// - InstitutionSeatLimitExceeded
-    ///
-    /// Controllers and authorization handlers should rely on THIS service
-    /// to avoid "works locally but fails in production" mismatches.
-    /// </summary>
+
     public class DocumentEntitlementService
     {
         private readonly ApplicationDbContext _db;

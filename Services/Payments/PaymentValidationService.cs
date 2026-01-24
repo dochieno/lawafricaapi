@@ -31,14 +31,14 @@ namespace LawAfrica.API.Services.Payments
         /// NOTE: Controllers should convert exceptions to BadRequest.
         /// </summary>
         public async Task ValidateStkInitiateAsync(
-            PaymentPurpose purpose,
-            decimal amount,
-            string? phoneNumber,
-            int? registrationIntentId,
-            int? contentProductId,
-            int? institutionId,
-            int? durationInMonths,
-            int? legalDocumentId = null) // ✅ NEW (optional, only used for PublicLegalDocumentPurchase)
+      PaymentPurpose purpose,
+      decimal amount,
+      string? phoneNumber,
+      int? registrationIntentId,
+      int? contentProductId,
+      int? institutionId,
+      int? durationInMonths,
+      int? legalDocumentId = null) // ✅ NEW (optional, only used for PublicLegalDocumentPurchase)
         {
             // -------------------------------
             // Basic validation (fail fast)
@@ -49,11 +49,25 @@ namespace LawAfrica.API.Services.Payments
             if (string.IsNullOrWhiteSpace(phoneNumber))
                 throw new InvalidOperationException("PhoneNumber is required.");
 
-            phoneNumber = phoneNumber.Trim();
+            phoneNumber = phoneNumber.Trim().Replace(" ", "");
 
-            // Sandbox + production both prefer 2547XXXXXXXX (12 digits)
-            if (!Regex.IsMatch(phoneNumber, @"^2547\d{8}$"))
-                throw new InvalidOperationException("PhoneNumber must be in format 2547XXXXXXXX (12 digits).");
+            // ✅ Accept: 07xxxxxxxx, 01xxxxxxxx, 2547xxxxxxxx, 2541xxxxxxxx
+            // ✅ Normalize all to: 2547xxxxxxxx or 2541xxxxxxxx (12 digits)
+            if (phoneNumber.StartsWith("07") && phoneNumber.Length == 10)
+            {
+                phoneNumber = "254" + phoneNumber.Substring(1); // 07.. -> 2547..
+            }
+            else if (phoneNumber.StartsWith("01") && phoneNumber.Length == 10)
+            {
+                phoneNumber = "254" + phoneNumber.Substring(1); // 01.. -> 2541..
+            }
+
+            // Final strict check (both sandbox + production prefer 254XXXXXXXXX 12 digits)
+            // ✅ allow both 2547 and 2541 ranges
+            if (!Regex.IsMatch(phoneNumber, @"^254(7|1)\d{8}$"))
+                throw new InvalidOperationException(
+                    "PhoneNumber must be in format 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or 2541XXXXXXXX."
+                );
 
             // -------------------------------
             // Purpose-specific validation
