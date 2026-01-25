@@ -6,15 +6,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LawAfrica.API.Services.Payments
 {
-    /// <summary>
-    /// Centralized business validation for payment flows.
-    /// NOT authorization. Authorization is handled by Policies/Handlers.
-    ///
-    /// Goal:
-    /// - Keep controllers thin
-    /// - Ensure consistent rules across Mpesa and manual approvals
-    /// - Fail fast with clear messages
-    /// </summary>
+
     public class PaymentValidationService
     {
         private readonly ApplicationDbContext _db;
@@ -31,14 +23,14 @@ namespace LawAfrica.API.Services.Payments
         /// NOTE: Controllers should convert exceptions to BadRequest.
         /// </summary>
         public async Task ValidateStkInitiateAsync(
-      PaymentPurpose purpose,
-      decimal amount,
-      string? phoneNumber,
-      int? registrationIntentId,
-      int? contentProductId,
-      int? institutionId,
-      int? durationInMonths,
-      int? legalDocumentId = null) // ✅ NEW (optional, only used for PublicLegalDocumentPurchase)
+            PaymentPurpose purpose,
+            decimal amount,
+            string? phoneNumber,
+            int? registrationIntentId,
+            int? contentProductId,
+            int? institutionId,
+            int? durationInMonths,
+            int? legalDocumentId = null) // optional (only used for PublicLegalDocumentPurchase)
         {
             // -------------------------------
             // Basic validation (fail fast)
@@ -51,7 +43,6 @@ namespace LawAfrica.API.Services.Payments
 
             phoneNumber = phoneNumber.Trim().Replace(" ", "");
 
-
             try
             {
                 phoneNumber = FormatToMpesaStandard(phoneNumber);
@@ -59,7 +50,6 @@ namespace LawAfrica.API.Services.Payments
             }
             catch (ArgumentException ex)
             {
-                // Keep the existing error contract for this method
                 throw new InvalidOperationException(
                     "PhoneNumber must be in format 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or 2541XXXXXXXX.",
                     ex
@@ -122,7 +112,6 @@ namespace LawAfrica.API.Services.Payments
                         throw new InvalidOperationException("LegalDocumentId must be omitted for InstitutionProductSubscription.");
                     break;
 
-                // ✅ NEW PURPOSE: Public legal document purchase (one-off)
                 case PaymentPurpose.PublicLegalDocumentPurchase:
                     if (!legalDocumentId.HasValue || legalDocumentId.Value <= 0)
                         throw new InvalidOperationException("LegalDocumentId is required for PublicLegalDocumentPurchase.");
@@ -147,8 +136,6 @@ namespace LawAfrica.API.Services.Payments
             // -------------------------------
             // Existence validation (DB)
             // -------------------------------
-
-            // Signup fee requires registration intent
             if (purpose == PaymentPurpose.PublicSignupFee)
             {
                 var intentExists = await _db.RegistrationIntents
@@ -158,7 +145,6 @@ namespace LawAfrica.API.Services.Payments
                     throw new InvalidOperationException("Registration intent not found.");
             }
 
-            // Purchase/subscription require product existence
             if (purpose == PaymentPurpose.PublicProductPurchase ||
                 purpose == PaymentPurpose.InstitutionProductSubscription)
             {
@@ -169,7 +155,6 @@ namespace LawAfrica.API.Services.Payments
                     throw new InvalidOperationException("Content product not found.");
             }
 
-            // Subscription requires institution existence + active
             if (purpose == PaymentPurpose.InstitutionProductSubscription)
             {
                 var institutionExists = await _db.Institutions
@@ -179,11 +164,14 @@ namespace LawAfrica.API.Services.Payments
                     throw new InvalidOperationException("Institution not found or inactive.");
             }
 
-            // ✅ NEW: legal document existence + purchasable checks
+            // -------------------------------
+            // ✅ Legal document checks (VAT-aware amount check)
+            // -------------------------------
             if (purpose == PaymentPurpose.PublicLegalDocumentPurchase)
             {
                 var doc = await _db.LegalDocuments
                     .AsNoTracking()
+                    .Include(d => d.VatRate)
                     .FirstOrDefaultAsync(d => d.Id == legalDocumentId!.Value);
 
                 if (doc == null)
@@ -195,9 +183,15 @@ namespace LawAfrica.API.Services.Payments
                 if (!doc.AllowPublicPurchase || doc.PublicPrice == null || doc.PublicPrice <= 0)
                     throw new InvalidOperationException("This document is not available for individual purchase.");
 
-                // Optional strict amount match (recommended)
-                // If you want to allow discounts later, remove this.
-                if (doc.PublicPrice.Value != amount)
+                // ✅ Expected amount must be the PAYABLE TOTAL (gross)
+                var expectedGross = ComputeExpectedLegalDocGross(doc);
+
+                // Be safe with decimals/rounding
+                var a = Round2(amount);
+                var e = Round2(expectedGross);
+
+                // Tiny tolerance protects against decimal representation issues
+                if (Math.Abs(a - e) > 0.01m)
                     throw new InvalidOperationException("Amount does not match current document price.");
             }
         }
@@ -241,19 +235,45 @@ namespace LawAfrica.API.Services.Payments
                 throw new InvalidOperationException("Content product not found.");
         }
 
+        // =========================
+        // ✅ Helpers (VAT-aware gross)
+        // =========================
+
+        private static decimal ComputeExpectedLegalDocGross(LegalDocument doc)
+        {
+            var price = doc.PublicPrice ?? 0m;
+            if (price <= 0m) return 0m;
+
+            var rate = doc.VatRate != null ? doc.VatRate.RatePercent : 0m;
+
+            // No VAT configured -> payable is base price
+            if (rate <= 0m)
+                return Round2(price);
+
+            // If price is tax-inclusive, payable is the shown price
+            if (doc.IsTaxInclusive)
+                return Round2(price);
+
+            // VAT added on top: payable = net + VAT
+            var vat = price * (rate / 100m);
+            return Round2(price + vat);
+        }
+
+        private static decimal Round2(decimal v)
+            => Math.Round(v, 2, MidpointRounding.AwayFromZero);
 
         public static string FormatToMpesaStandard(string phoneNumber)
         {
-
             if (phoneNumber is null)
                 throw new ArgumentNullException(nameof(phoneNumber), "Please provide a phone number to make this payment.");
-                 phoneNumber = phoneNumber.Trim();
-                 var match = Regex.Match(phoneNumber, @"^(?:254|\+254|0)?((?:7|1)[0-9]{8})$");
-                 if (!match.Success)
-                    throw new ArgumentException("Invalid phone number format. Expected a Kenyan mobile number (e.g., 07XXXXXXXX, 01XXXXXXXX, +2547XXXXXXXX).", nameof(phoneNumber));
-            // M-PESA Daraja API requires 2547XXXXXXXX / 2541XXXXXXXX
-                  return "254" + match.Groups[1].Value;
-        }
 
+            phoneNumber = phoneNumber.Trim();
+            var match = Regex.Match(phoneNumber, @"^(?:254|\+254|0)?((?:7|1)[0-9]{8})$");
+            if (!match.Success)
+                throw new ArgumentException("Invalid phone number format. Expected a Kenyan mobile number (e.g., 07XXXXXXXX, 01XXXXXXXX, +2547XXXXXXXX).", nameof(phoneNumber));
+
+            // M-PESA Daraja API requires 2547XXXXXXXX / 2541XXXXXXXX
+            return "254" + match.Groups[1].Value;
         }
     }
+}
