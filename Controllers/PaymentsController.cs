@@ -413,85 +413,68 @@ namespace LawAfrica.API.Controllers
             });
         }
 
-        // --------------------------------------------------------------------
-        // ✅ Updated validation for PublicLegalDocumentPurchase:
-        // - Public individual: allowed
-        // - Admin: allowed (optional)
-        // - Institution user: allowed IF decision.CanPurchaseIndividually == true
-        // --------------------------------------------------------------------
-        private async Task ValidatePublicLegalDocumentPurchaseAsync(int? userId, InitiateMpesaCheckoutRequest request)
-        {
-            if (!userId.HasValue || userId.Value <= 0)
-                throw new InvalidOperationException("Authentication required for legal document purchase.");
-
-            if (!request.LegalDocumentId.HasValue)
-                throw new InvalidOperationException("LegalDocumentId is required for legal document purchase.");
-
-            var user = await _db.Users
-                .AsNoTracking()
-                .Where(u => u.Id == userId.Value)
-                .Select(u => new { u.Id, u.UserType, u.InstitutionId })
-                .FirstOrDefaultAsync();
-
-            if (user == null)
-                throw new InvalidOperationException("User not found.");
-
-            var doc = await _db.LegalDocuments
-                .AsNoTracking()
-                .FirstOrDefaultAsync(d => d.Id == request.LegalDocumentId.Value && d.Status == LegalDocumentStatus.Published);
-
-            if (doc == null)
-                throw new InvalidOperationException("Document not found or unpublished.");
-
-            if (!doc.AllowPublicPurchase || doc.PublicPrice == null || doc.PublicPrice <= 0)
-                throw new InvalidOperationException("This document is not available for purchase.");
-
-            // ✅ VAT-aware amount check (rounded-to-rounded to avoid decimal precision mismatch)
-            var quote = await QuoteLegalDocumentAsync(request.LegalDocumentId.Value, CancellationToken.None);
-
-            var expected = VatMath.Round2(quote.Gross);
-            var provided = VatMath.Round2(request.Amount);
-
-            if (provided != expected)
-                throw new InvalidOperationException(
-                    $"Amount does not match the document total. Expected {expected} {quote.Currency}."
-                );
-
-            var already = await _db.UserLegalDocumentPurchases
-                .AsNoTracking()
-                .AnyAsync(p => p.UserId == userId.Value && p.LegalDocumentId == request.LegalDocumentId.Value);
-
-            if (already)
-                throw new InvalidOperationException("Already purchased.");
-
-            // ✅ Public individual allowed
-            var isPublicIndividual = user.UserType == UserType.Public && user.InstitutionId == null;
-            if (isPublicIndividual)
-                return;
-
-            // ✅ Admin can test (optional)
-            if (user.UserType == UserType.Admin)
-                return;
-
-            // ✅ Institution-user path (policy-driven)
-            if (user.InstitutionId != null)
+            private async Task ValidatePublicLegalDocumentPurchaseAsync(int? userId, InitiateMpesaCheckoutRequest request)
             {
-                var decision = await _entitlement.GetEntitlementDecisionAsync(userId.Value, doc);
+                if (!userId.HasValue || userId.Value <= 0)
+                    throw new InvalidOperationException("Authentication required for legal document purchase.");
 
-                if (decision.AccessLevel == DocumentAccessLevel.FullAccess)
-                    throw new InvalidOperationException("This document is included in your institution subscription.");
+                if (!request.LegalDocumentId.HasValue)
+                    throw new InvalidOperationException("LegalDocumentId is required for legal document purchase.");
 
-                if (!decision.CanPurchaseIndividually)
-                    throw new InvalidOperationException(
-                        decision.PurchaseDisabledReason
-                        ?? "Purchases are disabled for institution accounts. Please contact your administrator."
-                    );
+                var user = await _db.Users
+                    .AsNoTracking()
+                    .Where(u => u.Id == userId.Value)
+                    .Select(u => new { u.Id, u.UserType, u.InstitutionId })
+                    .FirstOrDefaultAsync();
 
-                return;
+                if (user == null)
+                    throw new InvalidOperationException("User not found.");
+
+                var doc = await _db.LegalDocuments
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(d => d.Id == request.LegalDocumentId.Value && d.Status == LegalDocumentStatus.Published);
+
+                if (doc == null)
+                    throw new InvalidOperationException("Document not found or unpublished.");
+
+                if (!doc.AllowPublicPurchase || doc.PublicPrice == null || doc.PublicPrice <= 0)
+                    throw new InvalidOperationException("This document is not available for purchase.");
+
+                var already = await _db.UserLegalDocumentPurchases
+                    .AsNoTracking()
+                    .AnyAsync(p => p.UserId == userId.Value && p.LegalDocumentId == request.LegalDocumentId.Value);
+
+                if (already)
+                    throw new InvalidOperationException("Already purchased.");
+
+                // ✅ Public individual allowed
+                var isPublicIndividual = user.UserType == UserType.Public && user.InstitutionId == null;
+                if (isPublicIndividual)
+                    return;
+
+                // ✅ Admin can test (optional)
+                if (user.UserType == UserType.Admin)
+                    return;
+
+                // ✅ Institution-user path (policy-driven)
+                if (user.InstitutionId != null)
+                {
+                    var decision = await _entitlement.GetEntitlementDecisionAsync(userId.Value, doc);
+
+                    if (decision.AccessLevel == DocumentAccessLevel.FullAccess)
+                        throw new InvalidOperationException("This document is included in your institution subscription.");
+
+                    if (!decision.CanPurchaseIndividually)
+                        throw new InvalidOperationException(
+                            decision.PurchaseDisabledReason
+                            ?? "Purchases are disabled for institution accounts. Please contact your administrator."
+                        );
+
+                    return;
+                }
+
+                throw new InvalidOperationException("Only public individual accounts can purchase documents.");
             }
-
-            throw new InvalidOperationException("Only public individual accounts can purchase documents.");
-        }
 
         // =======================
         // ✅ HELPERS (MPESA -> reconciliation tables + invoices)
