@@ -28,6 +28,8 @@ using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using System.Text;
 using System.Text.Json.Serialization;
+using OpenAI.Chat;
+using LawAfrica.API.Services.Ai;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -61,6 +63,8 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
         options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
     });
+
+
 
 // --------------------------------------------------
 // Options Binding
@@ -198,7 +202,19 @@ builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
 
 // QuestPDF license (Community is fine for most cases)
 
+// ✅ OpenAI client (Singleton is recommended by OpenAI .NET SDK docs)
+builder.Services.AddSingleton<ChatClient>(_ =>
+{
+    var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+    var model = Environment.GetEnvironmentVariable("AI_MODEL") ?? "gpt-4o-mini";
 
+    if (string.IsNullOrWhiteSpace(apiKey))
+        throw new InvalidOperationException("OPENAI_API_KEY is missing. Add it to Render env vars.");
+
+    return new ChatClient(model: model, apiKey: apiKey);
+});
+
+builder.Services.AddScoped<ILawReportSummarizer, OpenAiLawReportSummarizer>();
 
 // --------------------------------------------------
 // JWT Authentication

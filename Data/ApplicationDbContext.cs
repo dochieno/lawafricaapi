@@ -1,5 +1,6 @@
 ﻿using LawAfrica.API;
 using LawAfrica.API.Models;
+using LawAfrica.API.Models.Ai;
 using LawAfrica.API.Models.Authorization;
 using LawAfrica.API.Models.Institutions;
 using LawAfrica.API.Models.LawReports.Enums;
@@ -107,6 +108,10 @@ public class ApplicationDbContext : DbContext
     //LawReports
     public DbSet<LawReport> LawReports => Set<LawReport>();
     public DbSet<Town> Towns => Set<Town>();
+
+    //AI
+    public DbSet<AiLawReportSummary> AiLawReportSummaries => Set<AiLawReportSummary>();
+    public DbSet<AiUsage> AiUsages => Set<AiUsage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -239,7 +244,14 @@ public class ApplicationDbContext : DbContext
             b.Property(x => x.EmailNormalized).HasMaxLength(256).IsRequired();
         });
 
+        //AI
+        modelBuilder.Entity<AiLawReportSummary>()
+                    .HasIndex(x => new { x.LawReportId, x.UserId, x.SummaryType })
+                    .IsUnique();
 
+        modelBuilder.Entity<AiUsage>()
+                    .HasIndex(x => new { x.UserId, x.PeriodKey })
+                    .IsUnique();
         // =========================================================
         // LoginAudit
         // =========================================================
