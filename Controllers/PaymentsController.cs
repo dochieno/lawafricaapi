@@ -73,6 +73,7 @@ namespace LawAfrica.API.Controllers
             }
 
             // ✅ VAT-aware amount/currency (only for legal doc purchase)
+            // IMPORTANT: For legal doc purchases we DO NOT trust client Amount.
             var amount = request.Amount;
             var currency = "KES";
 
@@ -80,16 +81,15 @@ namespace LawAfrica.API.Controllers
             {
                 var quote = await QuoteLegalDocumentAsync(request.LegalDocumentId.Value, CancellationToken.None);
 
-                amount = quote.Gross;
-                currency = quote.Currency;
+                // ✅ FIX: Always use server-calculated gross, rounded
+                amount = VatMath.Round2(quote.Gross);
+                currency = (quote.Currency ?? "KES").Trim().ToUpperInvariant();
 
-                // ✅ FIX: keep request.Amount aligned to server VAT gross amount
-                // This prevents "Amount does not match current document price" when VAT is added on top.
+                // ✅ Keep request.Amount aligned (so downstream validation uses same rounded amount)
                 request.Amount = amount;
             }
             else
             {
-                // Preserve existing behavior for other flows.
                 currency = "KES";
             }
 
@@ -149,7 +149,7 @@ namespace LawAfrica.API.Controllers
             var (merchantRequestId, checkoutRequestId, raw) = await _mpesa.InitiateStkPushAsync(
                 token,
                 request.PhoneNumber,
-                amount, // ✅ use VAT-aware amount
+                amount, // ✅ server-calculated gross (rounded)
                 accountReference: $"LA-{intent.Id}",
                 transactionDesc: $"{request.Purpose}"
             );
@@ -450,10 +450,16 @@ namespace LawAfrica.API.Controllers
             if (!doc.AllowPublicPurchase || doc.PublicPrice == null || doc.PublicPrice <= 0)
                 throw new InvalidOperationException("This document is not available for purchase.");
 
-            // ✅ VAT-aware amount check
+            // ✅ VAT-aware amount check (rounded-to-rounded to avoid decimal precision mismatch)
             var quote = await QuoteLegalDocumentAsync(request.LegalDocumentId.Value, CancellationToken.None);
-            if (VatMath.Round2(request.Amount) != quote.Gross)
-                throw new InvalidOperationException($"Amount does not match the document total. Expected {quote.Gross} {quote.Currency}.");
+
+            var expected = VatMath.Round2(quote.Gross);
+            var provided = VatMath.Round2(request.Amount);
+
+            if (provided != expected)
+                throw new InvalidOperationException(
+                    $"Amount does not match the document total. Expected {expected} {quote.Currency}."
+                );
 
             var already = await _db.UserLegalDocumentPurchases
                 .AsNoTracking()
