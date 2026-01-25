@@ -79,8 +79,13 @@ namespace LawAfrica.API.Controllers
             if (request.Purpose == PaymentPurpose.PublicLegalDocumentPurchase && request.LegalDocumentId.HasValue)
             {
                 var quote = await QuoteLegalDocumentAsync(request.LegalDocumentId.Value, CancellationToken.None);
+
                 amount = quote.Gross;
                 currency = quote.Currency;
+
+                // ✅ FIX: keep request.Amount aligned to server VAT gross amount
+                // This prevents "Amount does not match current document price" when VAT is added on top.
+                request.Amount = amount;
             }
             else
             {
