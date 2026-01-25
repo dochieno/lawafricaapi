@@ -24,7 +24,7 @@ namespace LawAfrica.API.Controllers
         private readonly PaystackOptions _opts;
         private readonly ILogger<PaystackPaymentsController> _logger;
 
-        // ✅ NEW: bring these here (remove PaystackReturnController entirely)
+        // ✅ bring these here (remove PaystackReturnController entirely)
         private readonly PaymentFinalizerService _finalizer;
         private readonly LegalDocumentPurchaseFulfillmentService _legalDocFulfillment;
 
@@ -53,7 +53,13 @@ namespace LawAfrica.API.Controllers
         {
             var r = (reference ?? trxref ?? "").Trim();
 
-            var frontendReturn = "https://lawafricadigitalhub.pages.dev//payments/paystack/return";
+            // ✅ Use configured frontend callback URL if present; fallback to pages.dev
+            var frontendReturn = string.IsNullOrWhiteSpace(_opts.CallbackUrl)
+                ? "https://lawafricadigitalhub.pages.dev/payments/paystack/return"
+                : _opts.CallbackUrl.Trim();
+
+            // Avoid accidental // when someone configures a trailing slash
+            frontendReturn = frontendReturn.TrimEnd('/');
 
             if (string.IsNullOrWhiteSpace(r))
                 return Redirect(frontendReturn);
@@ -209,7 +215,7 @@ namespace LawAfrica.API.Controllers
             try
             {
                 // ✅ CRITICAL FIX:
-                // - Signup: keep existing behavior (working)
+                // - Signup: keep existing behavior (frontend callback URL)
                 // - Non-signup: force callback to API proxy GET /return (anonymous), then redirect to frontend
                 var callbackUrl = ResolvePaystackCallbackUrl(request.Purpose);
 
@@ -221,6 +227,7 @@ namespace LawAfrica.API.Controllers
                     callbackUrl: callbackUrl,
                     ct: ct);
 
+                // Save provider reference from Paystack response (often same as ours)
                 intent.ProviderReference = init.Reference;
                 intent.UpdatedAt = DateTime.UtcNow;
                 await _db.SaveChangesAsync(ct);
@@ -294,7 +301,7 @@ namespace LawAfrica.API.Controllers
         }
 
         // ============================================================
-        // ✅ NEW: POST /return-visit (optional logging)
+        // ✅ POST /return-visit (optional logging)
         // ============================================================
         public class ReturnVisitRequest
         {
@@ -313,7 +320,7 @@ namespace LawAfrica.API.Controllers
         }
 
         // ============================================================
-        // ✅ NEW: POST /confirm (server-to-server verify + fulfill)
+        // ✅ POST /confirm (server-to-server verify + fulfill)
         // ============================================================
         public class ConfirmPaystackRequest
         {
@@ -409,45 +416,47 @@ namespace LawAfrica.API.Controllers
             // ✅ DO NOT mess signup flow
             if (purpose == PaymentPurpose.PublicSignupFee)
             {
+                // For signup, callback goes to FRONTEND return (existing behavior)
                 var fallbackFrontendReturn = "https://lawafricadigitalhub.pages.dev/payments/paystack/return";
 
                 var configured = (_opts.CallbackUrl ?? "").Trim();
                 if (string.IsNullOrWhiteSpace(configured)) return fallbackFrontendReturn;
 
-                if (configured.Contains("return-visit", StringComparison.OrdinalIgnoreCase))
-                    return fallbackFrontendReturn;
-
+                // If someone mistakenly set callback to API return, still fallback to frontend
                 if (configured.Contains("/api/payments/paystack/return", StringComparison.OrdinalIgnoreCase))
                     return fallbackFrontendReturn;
 
-                // ✅ Guard against outdated Vercel domain
-                if (configured.Contains("pages.dev", StringComparison.OrdinalIgnoreCase))
+                // If set to return-visit, also fallback
+                if (configured.Contains("return-visit", StringComparison.OrdinalIgnoreCase))
                     return fallbackFrontendReturn;
 
-                return configured;
+                return configured.TrimEnd('/');
             }
 
             // ✅ Non-signup purchases: go through API proxy return
-            // Ensure the proxy URL is built from the *API* base, not the frontend.
             return BuildApiReturnProxyUrl();
         }
 
         private string BuildApiReturnProxyUrl()
         {
-            // ✅ Preferred: always build from configured public API base URL
-            // (prevents “whatever proxy host the request came through”)
-            var apiPublicBase = (_opts.ApiPublicBaseUrl ?? "").Trim();
-            if (!string.IsNullOrWhiteSpace(apiPublicBase))
+            // ✅ Best: explicitly configured public API base URL
+            var apiBase = (_opts.ApiPublicBaseUrl ?? "").Trim();
+
+            // ✅ SECOND BEST: reuse PublicBaseUrl (you already set Paystack__PublicBaseUrl to your API domain)
+            // This avoids broken forwarded headers behind Render/Cloudflare.
+            if (string.IsNullOrWhiteSpace(apiBase))
+                apiBase = (_opts.PublicBaseUrl ?? "").Trim();
+
+            if (!string.IsNullOrWhiteSpace(apiBase))
             {
-                apiPublicBase = apiPublicBase.TrimEnd('/');
-                return $"{apiPublicBase}/api/payments/paystack/return";
+                apiBase = apiBase.TrimEnd('/');
+                return $"{apiBase}/api/payments/paystack/return";
             }
 
-            // Fallback: derive from request headers (kept for safety)
+            // Fallback: derive from request headers
             var forwardedProto = Request.Headers["X-Forwarded-Proto"].ToString();
             var forwardedHost = Request.Headers["X-Forwarded-Host"].ToString();
 
-            // Some proxies send comma-separated values: "https, http"
             string FirstHeaderValue(string v)
                 => string.IsNullOrWhiteSpace(v) ? "" : v.Split(',')[0].Trim();
 
