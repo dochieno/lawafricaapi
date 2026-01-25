@@ -72,8 +72,7 @@ namespace LawAfrica.API.Controllers
                 userId = User.GetUserId();
             }
 
-            // ✅ VAT-aware amount/currency (only for legal doc purchase)
-            // IMPORTANT: For legal doc purchases we DO NOT trust client Amount.
+            // ✅ SERVER is source of truth for amount (especially when VAT is added on top)
             var amount = request.Amount;
             var currency = "KES";
 
@@ -81,11 +80,11 @@ namespace LawAfrica.API.Controllers
             {
                 var quote = await QuoteLegalDocumentAsync(request.LegalDocumentId.Value, CancellationToken.None);
 
-                // ✅ FIX: Always use server-calculated gross, rounded
+                // ✅ Always charge the server-computed gross (rounded)
                 amount = VatMath.Round2(quote.Gross);
-                currency = (quote.Currency ?? "KES").Trim().ToUpperInvariant();
+                currency = string.IsNullOrWhiteSpace(quote.Currency) ? "KES" : quote.Currency.Trim().ToUpperInvariant();
 
-                // ✅ Keep request.Amount aligned (so downstream validation uses same rounded amount)
+                // ✅ overwrite client-provided amount so any downstream validators see the right value
                 request.Amount = amount;
             }
             else
@@ -95,9 +94,10 @@ namespace LawAfrica.API.Controllers
 
             try
             {
+                // ✅ Validate with SERVER amount (not the UI amount)
                 await _paymentValidation.ValidateStkInitiateAsync(
                     request.Purpose,
-                    amount, // ✅ use VAT-aware amount
+                    amount,
                     request.PhoneNumber,
                     request.RegistrationIntentId,
                     request.ContentProductId,
@@ -108,7 +108,7 @@ namespace LawAfrica.API.Controllers
 
                 if (request.Purpose == PaymentPurpose.PublicLegalDocumentPurchase)
                 {
-                    // Validate policy + amount
+                    // ✅ Validate policy only (amount check removed below)
                     await ValidatePublicLegalDocumentPurchaseAsync(userId, request);
                 }
             }
@@ -117,7 +117,6 @@ namespace LawAfrica.API.Controllers
                 return BadRequest(ex.Message);
             }
 
-            // ✅ Create intent using VAT-aware amount/currency
             var intent = new PaymentIntent
             {
                 Provider = PaymentProvider.Mpesa,
@@ -129,14 +128,12 @@ namespace LawAfrica.API.Controllers
                 Currency = currency,
 
                 PhoneNumber = request.PhoneNumber,
-
                 UserId = userId,
 
                 InstitutionId = request.InstitutionId,
                 RegistrationIntentId = request.RegistrationIntentId,
                 ContentProductId = request.ContentProductId,
                 DurationInMonths = request.DurationInMonths,
-
                 LegalDocumentId = request.LegalDocumentId
             };
 
@@ -145,11 +142,10 @@ namespace LawAfrica.API.Controllers
 
             var token = await _mpesa.GetAccessTokenAsync();
 
-            // ✅ Push VAT-aware amount to Mpesa
             var (merchantRequestId, checkoutRequestId, raw) = await _mpesa.InitiateStkPushAsync(
                 token,
                 request.PhoneNumber,
-                amount, // ✅ server-calculated gross (rounded)
+                amount, // ✅ server gross
                 accountReference: $"LA-{intent.Id}",
                 transactionDesc: $"{request.Purpose}"
             );
