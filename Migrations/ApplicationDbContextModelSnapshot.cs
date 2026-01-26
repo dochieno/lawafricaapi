@@ -67,7 +67,7 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("LawReportId", "UserId", "SummaryType")
                         .IsUnique();
 
-                    b.ToTable("AiLawReportSummaries");
+                    b.ToTable("AiLawReportSummaries", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Ai.AiUsage", b =>
@@ -99,7 +99,7 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("UserId", "PeriodKey")
                         .IsUnique();
 
-                    b.ToTable("AiUsages");
+                    b.ToTable("AiUsages", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.AuditEvent", b =>
@@ -129,7 +129,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("AuditEvents");
+                    b.ToTable("AuditEvents", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Authorization.AdminPermission", b =>
@@ -227,7 +227,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("ContentProducts");
+                    b.ToTable("ContentProducts", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.ContentProductLegalDocument", b =>
@@ -257,7 +257,7 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("ContentProductId", "LegalDocumentId")
                         .IsUnique();
 
-                    b.ToTable("ContentProductLegalDocuments");
+                    b.ToTable("ContentProductLegalDocuments", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Country", b =>
@@ -348,7 +348,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("LegalDocumentId", "PageNumber");
 
-                    b.ToTable("DocumentTextIndexes");
+                    b.ToTable("DocumentTextIndexes", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Institution", b =>
@@ -499,7 +499,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("Status", "StartDate");
 
-                    b.ToTable("InstitutionProductSubscriptions");
+                    b.ToTable("InstitutionProductSubscriptions", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.InstitutionSubscriptionActionRequest", b =>
@@ -591,7 +591,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("SubscriptionId", "CreatedAt");
 
-                    b.ToTable("InstitutionSubscriptionAudits");
+                    b.ToTable("InstitutionSubscriptionAudits", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Institutions.InstitutionMembership", b =>
@@ -644,7 +644,7 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("UserId", "InstitutionId")
                         .IsUnique();
 
-                    b.ToTable("InstitutionMemberships");
+                    b.ToTable("InstitutionMemberships", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.LegalDocumentAnnotation", b =>
@@ -702,7 +702,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("UserId", "LegalDocumentId");
 
-                    b.ToTable("LegalDocumentAnnotations");
+                    b.ToTable("LegalDocumentAnnotations", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.LegalDocumentNode", b =>
@@ -745,7 +745,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("ParentId");
 
-                    b.ToTable("LegalDocumentNodes");
+                    b.ToTable("LegalDocumentNodes", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.LegalDocumentNote", b =>
@@ -797,7 +797,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("UserId");
 
-                    b.ToTable("LegalDocumentNotes");
+                    b.ToTable("LegalDocumentNotes", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.LegalDocumentProgress", b =>
@@ -845,7 +845,7 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("UserId", "LegalDocumentId")
                         .IsUnique();
 
-                    b.ToTable("LegalDocumentProgress");
+                    b.ToTable("LegalDocumentProgress", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Locations.Town", b =>
@@ -1016,7 +1016,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("UserId");
 
-                    b.ToTable("Invoices");
+                    b.ToTable("Invoices", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Payments.InvoiceLine", b =>
@@ -1067,7 +1067,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("InvoiceId");
 
-                    b.ToTable("InvoiceLines");
+                    b.ToTable("InvoiceLines", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Payments.InvoiceSequence", b =>
@@ -1092,7 +1092,7 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("Year")
                         .IsUnique();
 
-                    b.ToTable("InvoiceSequences");
+                    b.ToTable("InvoiceSequences", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Payments.InvoiceSettings", b =>
@@ -1298,7 +1298,7 @@ namespace LawAfrica.API.Migrations
                         .IsUnique()
                         .HasFilter("\"ProviderTransactionId\" IS NOT NULL");
 
-                    b.ToTable("PaymentIntents");
+                    b.ToTable("PaymentIntents", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentProviderTransaction", b =>
@@ -1359,7 +1359,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("Provider", "Reference");
 
-                    b.ToTable("PaymentProviderTransactions");
+                    b.ToTable("PaymentProviderTransactions", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentProviderWebhookEvent", b =>
@@ -1420,7 +1420,7 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("Provider", "DedupeHash")
                         .IsUnique();
 
-                    b.ToTable("PaymentProviderWebhookEvents");
+                    b.ToTable("PaymentProviderWebhookEvents", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentReconciliationItem", b =>
@@ -1480,7 +1480,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("Provider", "Reference");
 
-                    b.ToTable("PaymentReconciliationItems");
+                    b.ToTable("PaymentReconciliationItems", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Payments.PaymentReconciliationRun", b =>
@@ -1516,7 +1516,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("PerformedByUserId");
 
-                    b.ToTable("PaymentReconciliationRuns");
+                    b.ToTable("PaymentReconciliationRuns", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Registration.RegistrationResumeOtp", b =>
@@ -1794,7 +1794,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("Roles");
+                    b.ToTable("Roles", (string)null);
 
                     b.HasData(
                         new
@@ -1854,7 +1854,7 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("Code")
                         .IsUnique();
 
-                    b.ToTable("VatRates");
+                    b.ToTable("VatRates", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Tax.VatRule", b =>
@@ -1901,7 +1901,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("Purpose", "CountryCode", "Priority");
 
-                    b.ToTable("VatRules");
+                    b.ToTable("VatRules", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Usage.UsageEvent", b =>
@@ -1993,7 +1993,7 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("UserId", "LegalDocumentId")
                         .IsUnique();
 
-                    b.ToTable("UserLegalDocumentPurchases");
+                    b.ToTable("UserLegalDocumentPurchases", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.UserLibrary", b =>
@@ -2023,7 +2023,7 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("UserId", "LegalDocumentId")
                         .IsUnique();
 
-                    b.ToTable("UserLibraries");
+                    b.ToTable("UserLibraries", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.UserPresence", b =>
@@ -2042,7 +2042,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasKey("UserId");
 
-                    b.ToTable("UserPresences");
+                    b.ToTable("UserPresences", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.UserProductOwnership", b =>
@@ -2071,7 +2071,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("UserId");
 
-                    b.ToTable("UserProductOwnerships");
+                    b.ToTable("UserProductOwnerships", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.UserProductSubscription", b =>
@@ -2112,7 +2112,7 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("UserId", "ContentProductId")
                         .IsUnique();
 
-                    b.ToTable("UserProductSubscriptions");
+                    b.ToTable("UserProductSubscriptions", (string)null);
                 });
 
             modelBuilder.Entity("LegalDocument", b =>
@@ -2224,7 +2224,7 @@ namespace LawAfrica.API.Migrations
 
                     b.HasIndex("VatRateId");
 
-                    b.ToTable("LegalDocuments");
+                    b.ToTable("LegalDocuments", (string)null);
                 });
 
             modelBuilder.Entity("User", b =>

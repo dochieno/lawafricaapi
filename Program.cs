@@ -1,11 +1,4 @@
-﻿// Program.cs (FULL FILE)
-// ✅ Minimal change: do NOT require EmailSettings.Host when using Microsoft Graph.
-// ✅ Adds persistent disk support via STORAGE_ROOT env var on Render.
-// ✅ Adds deterministic GET /storage/** endpoint to eliminate 405 for cover images on Render.
-// ✅ Ensures Render/Vercel env vars override JSON via AddEnvironmentVariables().
-// ✅ Keeps existing logic unchanged.
-
-using LawAfrica.API;
+﻿using LawAfrica.API;
 using LawAfrica.API.Authorization.Handlers;
 using LawAfrica.API.Authorization.Policies;
 using LawAfrica.API.Authorization.Requirements;
@@ -39,8 +32,6 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Configuration
     .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
     .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true, reloadOnChange: true)
-    // ✅ IMPORTANT: allow Render env vars to override appsettings.json
-    // For nested keys: Mpesa__ConsumerKey, Paystack__SecretKey, etc.
     .AddEnvironmentVariables();
 
 if (builder.Environment.IsDevelopment())

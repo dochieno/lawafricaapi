@@ -1027,7 +1027,8 @@ namespace LawAfrica.API.Controllers
                     (r.Town != null && r.Town.ToLower().Contains(qLower)) ||
                     (r.Judges != null && r.Judges.ToLower().Contains(qLower)) ||
                     (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.ToLower().Contains(qLower)) ||
-                    (r.TownRef != null && r.TownRef.PostCode != null && r.TownRef.PostCode.ToLower().Contains(qLower))
+                    (r.TownRef != null && r.TownRef.PostCode != null && r.TownRef.PostCode.ToLower().Contains(qLower)) ||
+                    (r.ContentText != null && r.ContentText.ToLower().Contains(qLower)) // ✅ NEW: search inside content
                 );
             }
 
