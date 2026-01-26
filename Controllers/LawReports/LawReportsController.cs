@@ -1014,21 +1014,29 @@ namespace LawAfrica.API.Controllers
                 .AsQueryable();
 
             // ---------- Quick search ----------
+            // ---------- Quick search (Postgres ILIKE, includes ContentText) ----------
             if (!string.IsNullOrWhiteSpace(q))
             {
-                var qLower = q.ToLower();
+                // Optional: guardrail to prevent abuse / huge scans
+                if (q.Length > 120) q = q[..120];
+
+                var term = q.Trim();
+                var like = $"%{EscapeLike(term)}%";
 
                 query = query.Where(r =>
-                    (r.ReportNumber != null && r.ReportNumber.ToLower().Contains(qLower)) ||
-                    (r.Citation != null && r.Citation.ToLower().Contains(qLower)) ||
-                    (r.CaseNumber != null && r.CaseNumber.ToLower().Contains(qLower)) ||
-                    (r.Parties != null && r.Parties.ToLower().Contains(qLower)) ||
-                    (r.Court != null && r.Court.ToLower().Contains(qLower)) ||
-                    (r.Town != null && r.Town.ToLower().Contains(qLower)) ||
-                    (r.Judges != null && r.Judges.ToLower().Contains(qLower)) ||
-                    (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.ToLower().Contains(qLower)) ||
-                    (r.TownRef != null && r.TownRef.PostCode != null && r.TownRef.PostCode.ToLower().Contains(qLower)) ||
-                    (r.ContentText != null && r.ContentText.ToLower().Contains(qLower)) // ✅ NEW: search inside content
+                    // transcript content search ✅
+                    EF.Functions.ILike(r.ContentText, like) ||
+
+                    // metadata search ✅
+                    (r.ReportNumber != null && EF.Functions.ILike(r.ReportNumber, like)) ||
+                    (r.Citation != null && EF.Functions.ILike(r.Citation, like)) ||
+                    (r.CaseNumber != null && EF.Functions.ILike(r.CaseNumber, like)) ||
+                    (r.Parties != null && EF.Functions.ILike(r.Parties, like)) ||
+                    (r.Court != null && EF.Functions.ILike(r.Court, like)) ||
+                    (r.Town != null && EF.Functions.ILike(r.Town, like)) ||
+                    (r.Judges != null && EF.Functions.ILike(r.Judges, like)) ||
+                    (r.LegalDocument != null && r.LegalDocument.Title != null && EF.Functions.ILike(r.LegalDocument.Title, like)) ||
+                    (r.TownRef != null && r.TownRef.PostCode != null && EF.Functions.ILike(r.TownRef.PostCode, like))
                 );
             }
 
@@ -1464,6 +1472,18 @@ namespace LawAfrica.API.Controllers
             public DateTime? DecisionDate { get; set; }
 
             public string PreviewText { get; set; } = "";
+        }
+
+        private static string EscapeLike(string input)
+        {
+            if (string.IsNullOrEmpty(input))
+                return input;
+
+            // Escape LIKE wildcards so user input doesn't become a pattern
+            return input
+                .Replace(@"\", @"\\")
+                .Replace("%", @"\%")
+                .Replace("_", @"\_");
         }
     }
 }
