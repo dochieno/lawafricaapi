@@ -40,10 +40,9 @@ namespace LawAfrica.API.Services.Ai
             if (string.IsNullOrWhiteSpace(input))
                 throw new InvalidOperationException("Law report has no ContentText.");
 
-            // Build Responses API JSON payload manually (no helper DTOs => fewer compile issues).
             var payload = new
             {
-                model = model,
+                model,
                 max_output_tokens = maxOutputTokens,
                 input = new object[]
                 {
@@ -62,7 +61,6 @@ ABSOLUTE RULES:
 - Ranges MUST refer to the exact input string (0-based char index, end exclusive).
 - Blocks MUST be ordered, non-overlapping, and each block MUST have end > start.
 - Prefer: title/meta in the first part; headings for section labels; paragraphs for prose; list_item for numbered/lettered items; divider/spacer only if clearly present.
-
 Return ONLY JSON that matches the schema."
                             }
                         }
@@ -94,7 +92,6 @@ Return ONLY JSON that matches the schema."
             if (!resp.IsSuccessStatusCode)
                 throw new InvalidOperationException($"OpenAI formatter failed: {(int)resp.StatusCode} {resp.ReasonPhrase}\n{body}");
 
-            // Extract the first output content text from Responses API
             var jsonText = ExtractOutputText(body);
             if (string.IsNullOrWhiteSpace(jsonText))
                 throw new InvalidOperationException("OpenAI returned no structured JSON output.");
@@ -112,7 +109,6 @@ Return ONLY JSON that matches the schema."
             using var doc = JsonDocument.Parse(responsesApiJson);
             var root = doc.RootElement;
 
-            // Responses shape: { output: [ { content: [ { text: "...." } ] } ] }
             if (!root.TryGetProperty("output", out var output) || output.ValueKind != JsonValueKind.Array)
                 return "";
 
@@ -133,6 +129,8 @@ Return ONLY JSON that matches the schema."
 
         private static object BuildSchema()
         {
+            // NOTE: property name in JSON Schema is "enum" (not "@enum"),
+            // but in C# anonymous types we write @enum to avoid keyword conflict.
             return new
             {
                 type = "object",

@@ -1,4 +1,6 @@
-﻿using LawAfrica.API.Services.LawReportsContent;
+﻿using System.Threading;
+using System.Threading.Tasks;
+using LawAfrica.API.Services.LawReportsContent;
 using Microsoft.AspNetCore.Mvc;
 
 namespace LawAfrica.API.Controllers
@@ -7,9 +9,9 @@ namespace LawAfrica.API.Controllers
     [Route("api/law-reports")]
     public class LawReportsAiFormatController : ControllerBase
     {
-        private readonly LawReportContentBuilder _builder;
+        private readonly ILawReportContentBuilder _builder;
 
-        public LawReportsAiFormatController(LawReportContentBuilder builder)
+        public LawReportsAiFormatController(ILawReportContentBuilder builder)
         {
             _builder = builder;
         }
@@ -21,7 +23,10 @@ namespace LawAfrica.API.Controllers
         }
 
         [HttpPost("{lawReportId:int}/ai-format")]
-        public async Task<IActionResult> AiFormat(int lawReportId, [FromBody] AiFormatRequest req, CancellationToken ct)
+        public async Task<IActionResult> AiFormat(
+            int lawReportId,
+            [FromBody] AiFormatRequest? req,
+            CancellationToken ct)
         {
             var (buildResult, modelUsed) = await _builder.BuildAiAsync(
                 lawReportId,
@@ -29,14 +34,7 @@ namespace LawAfrica.API.Controllers
                 maxInputCharsOverride: req?.MaxInputChars,
                 ct: ct);
 
-            // If you want to return the JSON cache directly, you can load it here and return it.
-            // For now, returning summary info is OK, but you asked "Output must be JSON blocks schema".
-            // So: load cache and return it.
-
-            // You likely already have DbContext inside builder; simplest is add a GetCachedJsonDto method.
-            // If you prefer: expose a reader service. For brevity, add a builder method that returns the dto.
-
-            var dto = await _builder.GetJsonDtoAsync(lawReportId, ct); // implement tiny helper (below)
+            var dto = await _builder.GetJsonDtoAsync(lawReportId, ct);
 
             return Ok(new
             {
