@@ -208,6 +208,7 @@ builder.Services.AddSingleton<ChatClient>(_ =>
 
 builder.Services.AddScoped<ILawReportSummarizer, OpenAiLawReportSummarizer>();
 builder.Services.AddScoped<ILawReportContentBuilder, LawReportContentBuilder>();
+builder.Services.AddHttpClient<LawAfrica.API.Services.Ai.ILawReportFormatter, LawAfrica.API.Services.Ai.OpenAiLawReportFormatter>();
 
 // --------------------------------------------------
 // JWT Authentication
