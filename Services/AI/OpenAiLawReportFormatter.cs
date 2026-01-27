@@ -61,7 +61,13 @@ namespace LawAfrica.API.Services.Ai
                         - Ranges MUST refer to the exact input string (0-based char index, end exclusive).
                         - Blocks MUST be ordered, non-overlapping, and each block MUST have end > start.
                         - Prefer: title/meta in the first part; headings for section labels; paragraphs for prose; list_item for numbered/lettered items; divider/spacer only if clearly present.
-                        Return ONLY JSON that matches the schema."
+                        Return ONLY JSON that matches the schema.
+                        BOUNDARY RULES (CRITICAL):
+                        - start/end MUST NOT split a word. Every boundary must be on: whitespace, newline, or punctuation.
+                        - Headings MUST be entire lines (surrounded by newlines) and must be ALL CAPS or one of:
+                          RULING, JUDGMENT, JUDGEMENT, INTRODUCTION, BACKGROUND, FACTS, ISSUES, ANALYSIS, DETERMINATION, ORDERS, CONCLUSION.
+                        - NEVER output a heading that is shorter than 12 characters unless it is exactly one of the known labels above.
+                        - ONLY output divider if the input contains an explicit divider line like: '---', '___', '***'."
                 }
             }
         },

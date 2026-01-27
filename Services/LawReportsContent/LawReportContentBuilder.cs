@@ -214,6 +214,7 @@ namespace LawAfrica.API.Services.LawReportsContent
 
             // 1) Ask AI for ranges (ranges refer to *normalized*)
             var (ranges, modelUsed) = await _aiFormatter.FormatRangesAsync(normalized, ct);
+            ranges = PostProcessAiRanges(ranges, normalized);
 
             // 2) Convert ranges -> ParsedBlock list (TEXT IS ALWAYS SLICED FROM *normalized*)
             var blocks = BuildBlocksFromRanges(normalized, ranges);
@@ -762,6 +763,196 @@ namespace LawAfrica.API.Services.LawReportsContent
             text = SalvageNewlines(text);
 
             return text;
+        }
+
+        private static AiLawReportFormatResult PostProcessAiRanges(AiLawReportFormatResult result, string text)
+        {
+            if (result?.Blocks == null || result.Blocks.Count == 0) return result ?? new AiLawReportFormatResult();
+
+            // 1) Clamp + ensure ordered + non-overlapping
+            var blocks = result.Blocks
+                .Where(b => b.End > b.Start)
+                .Select(b => new AiLawReportRangeBlock
+                {
+                    Type = (b.Type ?? "paragraph").Trim(),
+                    Start = Math.Max(0, b.Start),
+                    End = Math.Min(text.Length, b.End),
+                    Marker = b.Marker,
+                    Indent = b.Indent
+                })
+                .Where(b => b.End > b.Start)
+                .OrderBy(b => b.Start)
+                .ToList();
+
+            // 2) Fix overlaps by pushing starts forward
+            int prevEnd = 0;
+            foreach (var b in blocks)
+            {
+                if (b.Start < prevEnd) b.Start = prevEnd;
+                if (b.End < b.Start + 1) b.End = Math.Min(text.Length, b.Start + 1);
+                prevEnd = b.End;
+            }
+
+            // 3) Snap boundaries so we don’t split words (adjust the boundary between blocks)
+            // We only move the boundary forward (safer) and set next start accordingly.
+            const int lookAhead = 40;
+
+            for (int i = 0; i < blocks.Count - 1; i++)
+            {
+                var a = blocks[i];
+                var b = blocks[i + 1];
+
+                int boundary = a.End;
+                if (boundary <= 0 || boundary >= text.Length) continue;
+
+                // If boundary splits a word: letter/digit on both sides => move boundary forward to a safe break
+                if (IsWordChar(text[boundary - 1]) && IsWordChar(text[boundary]))
+                {
+                    int newBoundary = FindNextBreak(text, boundary, lookAhead);
+                    if (newBoundary > boundary && newBoundary < b.End)
+                    {
+                        a.End = newBoundary;
+                        b.Start = newBoundary;
+                    }
+                }
+            }
+
+            // 4) Retype “junk headings” as paragraphs (and remove bogus dividers)
+            foreach (var b in blocks)
+            {
+                var t = (b.Type ?? "").ToLowerInvariant();
+
+                if (t == "divider")
+                {
+                    var slice = text.Substring(b.Start, b.End - b.Start).Trim();
+                    if (!LooksLikeDivider(slice)) b.Type = "paragraph";
+                    continue;
+                }
+
+                if (t == "heading")
+                {
+                    var slice = text.Substring(b.Start, b.End - b.Start).Trim();
+                    if (!LooksLikeHeading(slice))
+                        b.Type = "paragraph";
+                }
+            }
+
+            // 5) Merge consecutive paragraphs that are actually the same paragraph split badly
+            blocks = MergeConsecutive(blocks, text, type: "paragraph");
+
+            // 6) Fix Title + Meta: if “meta” starts with lowercase continuation, merge into title until newline
+            blocks = FixTitleContinuation(blocks, text);
+
+            return new AiLawReportFormatResult { Blocks = blocks };
+        }
+
+        private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '\'' || c == '’';
+
+        private static int FindNextBreak(string s, int start, int lookAhead)
+        {
+            int max = Math.Min(s.Length, start + lookAhead);
+            for (int i = start; i < max; i++)
+            {
+                char c = s[i];
+                if (char.IsWhiteSpace(c) || c == '\n' || c == '\r' || c == '.' || c == ',' || c == ';' || c == ':' || c == ')' || c == ']')
+                    return i; // boundary at break char
+            }
+            return start;
+        }
+
+        private static bool LooksLikeDivider(string slice)
+        {
+            if (string.IsNullOrWhiteSpace(slice)) return false;
+            slice = slice.Trim();
+            if (slice.Length < 3) return false;
+
+            // allow lines like --- ___ ***
+            return slice.All(ch => ch == '-' || ch == '_' || ch == '*');
+        }
+
+        private static bool LooksLikeHeading(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return false;
+            s = s.Trim();
+            if (s.Length < 12)
+            {
+                // allow known short headings
+                return IsKnownHeadingLabel(s);
+            }
+
+            // Must be mostly caps or a known label
+            if (IsKnownHeadingLabel(s)) return true;
+
+            // All-caps-ish heuristic (ignore punctuation/spaces)
+            var letters = s.Where(char.IsLetter).ToList();
+            if (letters.Count == 0) return false;
+            var upper = letters.Count(char.IsUpper);
+            return (upper / (double)letters.Count) > 0.85;
+        }
+
+        private static bool IsKnownHeadingLabel(string s)
+        {
+            var x = (s ?? "").Trim().ToUpperInvariant();
+            return x is "RULING" or "JUDGMENT" or "JUDGEMENT" or "INTRODUCTION" or "BACKGROUND"
+                or "FACTS" or "ISSUE" or "ISSUES" or "ANALYSIS" or "DETERMINATION" or "ORDERS" or "CONCLUSION";
+        }
+
+        private static List<AiLawReportRangeBlock> MergeConsecutive(List<AiLawReportRangeBlock> blocks, string text, string type)
+        {
+            var t = type.ToLowerInvariant();
+            var outList = new List<AiLawReportRangeBlock>();
+            foreach (var b in blocks)
+            {
+                if (outList.Count == 0) { outList.Add(b); continue; }
+
+                var prev = outList[^1];
+                if (string.Equals((prev.Type ?? "").ToLowerInvariant(), t) &&
+                    string.Equals((b.Type ?? "").ToLowerInvariant(), t))
+                {
+                    // Merge if the gap is just whitespace/newlines
+                    var gap = text.Substring(prev.End, Math.Max(0, b.Start - prev.End));
+                    if (gap.All(ch => char.IsWhiteSpace(ch)))
+                    {
+                        prev.End = b.End;
+                        outList[^1] = prev;
+                        continue;
+                    }
+                }
+
+                outList.Add(b);
+            }
+            return outList;
+        }
+
+        private static List<AiLawReportRangeBlock> FixTitleContinuation(List<AiLawReportRangeBlock> blocks, string text)
+        {
+            if (blocks.Count < 2) return blocks;
+
+            var first = blocks[0];
+            var second = blocks[1];
+
+            if (!string.Equals(first.Type, "title", StringComparison.OrdinalIgnoreCase)) return blocks;
+            if (!string.Equals(second.Type, "meta", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(second.Type, "metaline", StringComparison.OrdinalIgnoreCase))
+                return blocks;
+
+            // If meta starts with lowercase and title ends with word-char, it's probably a continuation
+            if (second.Start < text.Length &&
+                IsWordChar(text[Math.Max(0, first.End - 1)]) &&
+                char.IsLower(text[second.Start]))
+            {
+                // extend title until first newline after second.Start (or safe break)
+                int nl = text.IndexOf('\n', second.Start);
+                if (nl > 0 && nl < second.End)
+                {
+                    first.End = nl;       // title ends at newline
+                    second.Start = nl;    // meta starts at newline
+                    blocks[0] = first;
+                    blocks[1] = second;
+                }
+            }
+
+            return blocks;
         }
     }
 }
