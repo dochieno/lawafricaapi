@@ -1,10 +1,10 @@
 ﻿using LawAfrica.API.Data;
-using LawAfrica.API.Models;
 using LawAfrica.API.Models.LawReportsContent;
 using LawAfrica.API.Models.Payments.LawReportsContent.Models;
 using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -20,7 +20,7 @@ namespace LawAfrica.API.Services.LawReportsContent
         private readonly ApplicationDbContext _db;
 
         // bump this when you change parsing rules
-        private const string BUILT_BY = "lawreport-block-builder:v1";
+        private const string BUILT_BY = "lawreport-block-builder:v2";
 
         private static readonly JsonSerializerOptions JsonOpts = new()
         {
@@ -166,7 +166,7 @@ namespace LawAfrica.API.Services.LawReportsContent
         }
 
         // =========================
-        // Parsing rules (v1)
+        // Parsing rules (v2)
         // =========================
 
         private class ParsedBlock
@@ -182,7 +182,10 @@ namespace LawAfrica.API.Services.LawReportsContent
         private List<ParsedBlock> Parse(string input)
         {
             // normalize newlines, preserve blank lines
-            var text = input.Replace("\r\n", "\n").Replace("\u00A0", " ");
+            var text = (input ?? "").Replace("\r\n", "\n").Replace("\u00A0", " ");
+
+            // ✅ If content came in as ONE giant line, inject breaks using common markers
+            text = SalvageNewlines(text);
 
             // split into lines to detect “Lexis-like” front matter
             var lines = text.Split('\n').Select(x => x.TrimEnd()).ToList();
@@ -190,34 +193,29 @@ namespace LawAfrica.API.Services.LawReportsContent
             var blocks = new List<ParsedBlock>();
             int order = 1;
 
-            // --- 1) Front matter: first ~25 lines until a big gap or “Judgment/Ruling/…” ---
-            // We convert these into:
-            // - Title (case name line)
-            // - Meta lines (court, judge, date, citation, etc.)
-            // - Heading (RULING/JUDGMENT/etc.)
+            // --- 1) Front matter: first ~80 lines until a blank line or a body paragraph ---
             var front = new List<string>();
             int i = 0;
 
             for (; i < lines.Count && i < 80; i++)
             {
                 var ln = lines[i].Trim();
+
                 if (string.IsNullOrWhiteSpace(ln))
                 {
-                    // stop front matter after first “real” blank line *once we already have some*
                     if (front.Count > 0) break;
                     continue;
                 }
 
-                // break into body once we hit long paragraph-ish line
-                if (ln.Length > 120 && front.Count > 0) break;
+                // break into body once we hit a long paragraph-ish line (front already started)
+                if (ln.Length > 160 && front.Count > 0) break;
 
                 front.Add(ln);
 
-                // if we hit a known heading, stop front collection
                 if (IsHeadingLine(ln)) { i++; break; }
             }
 
-            // Title heuristic: first front line that looks like “A v B …”
+            // Title heuristic: first front line that looks like “A v B”
             var titleLineIndex = front.FindIndex(IsCaseTitleLine);
             if (titleLineIndex >= 0)
             {
@@ -229,7 +227,6 @@ namespace LawAfrica.API.Services.LawReportsContent
                     Style = "title"
                 });
 
-                // all other front lines become meta unless they are headings
                 var metaLines = front
                     .Where((x, idx) => idx != titleLineIndex)
                     .Where(x => !string.IsNullOrWhiteSpace(x))
@@ -250,16 +247,16 @@ namespace LawAfrica.API.Services.LawReportsContent
             }
             else
             {
-                // no clear title, treat all front lines as meta
                 foreach (var m in front.Where(x => !string.IsNullOrWhiteSpace(x)))
                 {
+                    var isHead = IsHeadingLine(m) || IsAllCapsHeading(m);
                     blocks.Add(new ParsedBlock
                     {
                         Order = order++,
-                        Type = IsHeadingLine(m) ? LawReportContentBlockType.Heading : LawReportContentBlockType.MetaLine,
-                        Text = m,
-                        Json = IsHeadingLine(m) ? null : JsonSerializer.Serialize(new { text = m }, JsonOpts),
-                        Style = IsHeadingLine(m) ? "heading" : "meta"
+                        Type = isHead ? LawReportContentBlockType.Heading : LawReportContentBlockType.MetaLine,
+                        Text = isHead ? NormalizeHeading(m) : m,
+                        Json = isHead ? null : JsonSerializer.Serialize(new { text = m }, JsonOpts),
+                        Style = isHead ? "heading" : "meta"
                     });
                 }
             }
@@ -280,20 +277,20 @@ namespace LawAfrica.API.Services.LawReportsContent
                 }
             }
 
-            // --- 2) Body parsing: paragraphs + numbered/lettered items like screen 2 ---
-            // We'll build paragraphs from line runs separated by blanks.
+            // --- 2) Body parsing: paragraphs + list items ---
             var bodyLines = lines.Skip(i).ToList();
             var para = new List<string>();
 
             void flushPara()
             {
                 if (para.Count == 0) return;
+
                 var joined = string.Join(" ", para.Select(x => x.Trim()).Where(x => !string.IsNullOrWhiteSpace(x))).Trim();
                 para.Clear();
+
                 if (string.IsNullOrWhiteSpace(joined)) return;
 
-                // if paragraph is all-caps short => heading
-                if (IsAllCapsHeading(joined))
+                if (IsAllCapsHeading(joined) || IsHeadingLine(joined))
                 {
                     blocks.Add(new ParsedBlock
                     {
@@ -324,7 +321,6 @@ namespace LawAfrica.API.Services.LawReportsContent
                     continue;
                 }
 
-                // heading line mid-body
                 if (IsHeadingLine(ln) || IsAllCapsHeading(ln))
                 {
                     flushPara();
@@ -338,7 +334,6 @@ namespace LawAfrica.API.Services.LawReportsContent
                     continue;
                 }
 
-                // numbered item 1) / 1. / (a) / a)
                 if (IsListItemLine(ln, out var marker, out var value))
                 {
                     flushPara();
@@ -363,15 +358,58 @@ namespace LawAfrica.API.Services.LawReportsContent
         }
 
         // =========================
+        // Salvage helper (important)
+        // =========================
+
+        private static string SalvageNewlines(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return text;
+
+            // If there are already newlines, don't touch.
+            if (text.Contains('\n')) return text;
+
+            // Only salvage if it looks like a giant flattened document
+            if (text.Length < 500) return text;
+
+            // Add breaks around common law report markers
+            var t = text;
+
+            // Court markers
+            t = Regex.Replace(t, @"\s+(HIGH\s+COURT\s+OF\s+KENYA)\s+", "\n$1 ", RegexOptions.IgnoreCase);
+            t = Regex.Replace(t, @"\s+(COURT\s+OF\s+APPEAL\s+AT\s+[A-Z][A-Z\s]+)\s+", "\n$1 ", RegexOptions.IgnoreCase);
+            t = Regex.Replace(t, @"\s+(SUPREME\s+COURT\s+OF\s+KENYA)\s+", "\n$1 ", RegexOptions.IgnoreCase);
+
+            // Judges / date / case no / citation
+            t = Regex.Replace(t, @"\s+(Date\s+of\s+Judg(?:ment|ement))\s+", "\n$1 ", RegexOptions.IgnoreCase);
+            t = Regex.Replace(t, @"\s+(Case\s+No\.?)\s*", "\n$1 ", RegexOptions.IgnoreCase);
+            t = Regex.Replace(t, @"\s+(Sourced\s+by)\s+", "\n$1 ", RegexOptions.IgnoreCase);
+            t = Regex.Replace(t, @"\s+(Citation)\s+", "\n$1 ", RegexOptions.IgnoreCase);
+
+            // Judgment heading (handles "J u d g m e n t")
+            t = Regex.Replace(t, @"\s+(J\s*u\s*d\s*g\s*m\s*e\s*n\s*t)\s+", "\nJUDGMENT\n", RegexOptions.IgnoreCase);
+            t = Regex.Replace(t, @"\s+(JUDGMENT|JUDGEMENT|RULING)\s+", "\n$1\n", RegexOptions.IgnoreCase);
+
+            // Start paragraph split after periods for readability (very conservative)
+            t = Regex.Replace(t, @"\.\s+(On\s+\d{1,2}\s+[A-Za-z]+\s*,?\s+\d{4})", ".\n\n$1", RegexOptions.IgnoreCase);
+            t = Regex.Replace(t, @"\.\s+(It\s+is\s+expressed\s+to\s+be)", ".\n\n$1", RegexOptions.IgnoreCase);
+
+            return t.Trim();
+        }
+
+        // =========================
         // Helpers
         // =========================
 
         private static bool IsCaseTitleLine(string s)
         {
-            // Typical: "Odundo v Africa Merchant Assurance Company Limited"
             var x = (s ?? "").Trim();
             if (x.Length < 8) return false;
-            if (Regex.IsMatch(x, @"\bv\b", RegexOptions.IgnoreCase)) return true;
+            if (x.Length > 140) return false; // ✅ prevent huge single-line docs becoming "title"
+
+            // require " v " or " vs " as a word separator, not just any 'v' anywhere
+            if (Regex.IsMatch(x, @"\b(v|vs|versus)\b", RegexOptions.IgnoreCase))
+                return true;
+
             return false;
         }
 
@@ -380,8 +418,8 @@ namespace LawAfrica.API.Services.LawReportsContent
             var x = (s ?? "").Trim();
             if (x.Length == 0) return false;
 
-            // common law report headings
-            return Regex.IsMatch(x, @"^(RULING|JUDGMENT|JUDGEMENT|INTRODUCTION|BACKGROUND|FACTS?|ISSUES?|ANALYSIS|DETERMINATION|ORDERS?|CONCLUSION)\b",
+            return Regex.IsMatch(x,
+                @"^(RULING|JUDGMENT|JUDGEMENT|INTRODUCTION|BACKGROUND|FACTS?|ISSUES?|ANALYSIS|DETERMINATION|ORDERS?|CONCLUSION)\b",
                 RegexOptions.IgnoreCase);
         }
 
@@ -395,7 +433,6 @@ namespace LawAfrica.API.Services.LawReportsContent
         private static string NormalizeHeading(string s)
         {
             var x = (s ?? "").Trim();
-            // normalize double spaces
             x = Regex.Replace(x, @"\s{2,}", " ");
             return x;
         }
@@ -405,7 +442,6 @@ namespace LawAfrica.API.Services.LawReportsContent
             marker = "";
             value = "";
 
-            // 1) text
             var m1 = Regex.Match(s, @"^(?<m>\d{1,2}\))\s*(?<t>.+)$");
             if (m1.Success)
             {
@@ -414,7 +450,6 @@ namespace LawAfrica.API.Services.LawReportsContent
                 return true;
             }
 
-            // 1. text
             var m2 = Regex.Match(s, @"^(?<m>\d{1,2}\.)\s*(?<t>.+)$");
             if (m2.Success)
             {
@@ -423,7 +458,6 @@ namespace LawAfrica.API.Services.LawReportsContent
                 return true;
             }
 
-            // (a) text
             var m3 = Regex.Match(s, @"^(?<m>\([a-z]\))\s*(?<t>.+)$", RegexOptions.IgnoreCase);
             if (m3.Success)
             {
@@ -432,7 +466,6 @@ namespace LawAfrica.API.Services.LawReportsContent
                 return true;
             }
 
-            // a) text
             var m4 = Regex.Match(s, @"^(?<m>[a-z]\))\s*(?<t>.+)$", RegexOptions.IgnoreCase);
             if (m4.Success)
             {
