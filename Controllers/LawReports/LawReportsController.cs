@@ -2,8 +2,10 @@
 using LawAfrica.API.DTOs.Reports;
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.LawReports.Enums;
-using LawAfrica.API.Models.Reports;
 using LawAfrica.API.Models.Locations;
+using LawAfrica.API.Models.Payments.LawReportsContent.Models;
+using LawAfrica.API.Models.Reports;
+using LawAfrica.API.Services.LawReportsContent;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -18,10 +20,11 @@ namespace LawAfrica.API.Controllers
 
         // ✅ enum (matches LegalDocument.Category type)
         private const LegalDocumentCategory LLR_CATEGORY = LegalDocumentCategory.LLRServices;
-
-        public LawReportsController(ApplicationDbContext db)
+        private readonly ILawReportContentBuilder _builder;
+        public LawReportsController(ApplicationDbContext db, ILawReportContentBuilder builder)
         {
             _db = db;
+            _builder = builder;
         }
 
         // -------------------------
@@ -287,6 +290,68 @@ namespace LawAfrica.API.Controllers
 
             await _db.SaveChangesAsync(ct);
             return NoContent();
+        }
+
+        [HttpGet("json")]
+        public async Task<IActionResult> GetJson(
+        int lawReportId,
+        [FromQuery] bool forceBuild = false,
+        CancellationToken ct = default)
+        {
+            // 1) Try cache first (fast path)
+            var cache = await _db.Set<LawReportContentJsonCache>()
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.LawReportId == lawReportId, ct);
+
+
+            if (cache == null || forceBuild)
+            {
+                // 2) Build (will no-op if unchanged unless forceBuild triggers rebuild in your builder)
+                await _builder.BuildAsync(lawReportId, force: forceBuild, ct: ct);
+
+
+                cache = await _db.Set<LawReportContentJsonCache>()
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.LawReportId == lawReportId, ct);
+            }
+
+
+            if (cache == null)
+                return NotFound(new { message = "No normalized content cache found for this report." });
+
+
+            // Return the jsonb string as JSON
+            // (It’s already serialized JSON, so return Content with application/json)
+            return Content(cache.Json ?? "{}", "application/json");
+        }
+
+        [HttpGet("json/status")]
+        public async Task<IActionResult> GetJsonStatus(int lawReportId, CancellationToken ct = default)
+        {
+            var cache = await _db.Set<LawReportContentJsonCache>()
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.LawReportId == lawReportId, ct);
+
+
+            if (cache == null)
+                return Ok(new { lawReportId, exists = false });
+
+
+            var blocksCount = await _db.Set<LawReportContentBlock>()
+            .AsNoTracking()
+            .CountAsync(x => x.LawReportId == lawReportId, ct);
+
+
+            return Ok(new
+            {
+                lawReportId,
+                exists = true,
+                hash = cache.Hash,
+                builtBy = cache.BuiltBy,
+                createdAt = cache.BuiltAt,
+                updatedAt = cache.UpdatedAt,
+                blocksCount
+            });
         }
 
         // Minimal DTO for content updates

@@ -6,6 +6,7 @@ using LawAfrica.API.Models.Institutions;
 using LawAfrica.API.Models.LawReports.Enums;
 using LawAfrica.API.Models.Locations;
 using LawAfrica.API.Models.Payments;
+using LawAfrica.API.Models.Payments.LawReportsContent.Models;
 using LawAfrica.API.Models.Registration;
 using LawAfrica.API.Models.Reports;
 using LawAfrica.API.Models.Tax;
@@ -105,9 +106,12 @@ public class ApplicationDbContext : DbContext
     public DbSet<VatRule> VatRules => Set<VatRule>();
 
 
+
     //LawReports
     public DbSet<LawReport> LawReports => Set<LawReport>();
     public DbSet<Town> Towns => Set<Town>();
+    public DbSet<LawReportContentBlock> LawReportContentBlocks => Set<LawReportContentBlock>();
+    public DbSet<LawReportContentJsonCache> LawReportContentJsonCaches => Set<LawReportContentJsonCache>();
 
     //AI
     public DbSet<AiLawReportSummary> AiLawReportSummaries => Set<AiLawReportSummary>();
@@ -199,6 +203,57 @@ public class ApplicationDbContext : DbContext
 
             b.HasIndex(x => x.TownId);
         });
+        // ...
+
+            modelBuilder.Entity<LawReportContentBlock>(e =>
+            {
+                e.ToTable("LawReportContentBlocks");
+
+                e.HasKey(x => x.Id);
+
+                e.Property(x => x.Type)
+                    .HasConversion<short>(); // enum stored as smallint
+
+                e.Property(x => x.Text)
+                    .HasMaxLength(20000);
+
+                // store as jsonb in Postgres (still a string in C#)
+                e.Property(x => x.Json)
+                    .HasColumnType("jsonb");
+
+                e.Property(x => x.Style)
+                    .HasMaxLength(80);
+
+                e.HasIndex(x => new { x.LawReportId, x.Order })
+                    .IsUnique();
+
+                // optional FK to LawReports table (recommended)
+                e.HasOne<LawReport>()               // <-- assumes your entity is named LawReport
+                    .WithMany()                     // we can add navigation later if you want
+                    .HasForeignKey(x => x.LawReportId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            modelBuilder.Entity<LawReportContentJsonCache>(e =>
+            {
+                e.ToTable("LawReportContentJsonCaches");
+
+                e.HasKey(x => x.LawReportId); // 1:1 keyed by LawReportId
+
+                e.Property(x => x.Json)
+                    .HasColumnType("jsonb");
+
+                e.Property(x => x.Hash)
+                    .HasMaxLength(120);
+
+                e.Property(x => x.BuiltBy)
+                    .HasMaxLength(120);
+
+                e.HasOne<LawReport>()               // <-- assumes your entity is named LawReport
+                    .WithOne()
+                    .HasForeignKey<LawReportContentJsonCache>(x => x.LawReportId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
 
         modelBuilder.Entity<RegistrationResumeOtp>(b =>
         {

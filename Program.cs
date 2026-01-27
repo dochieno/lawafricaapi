@@ -5,9 +5,11 @@ using LawAfrica.API.Authorization.Requirements;
 using LawAfrica.API.Data;
 using LawAfrica.API.Models;
 using LawAfrica.API.Services;
+using LawAfrica.API.Services.Ai;
 using LawAfrica.API.Services.Documents;
 using LawAfrica.API.Services.Emails;
 using LawAfrica.API.Services.Institutions;
+using LawAfrica.API.Services.LawReportsContent;
 using LawAfrica.API.Services.Payments;
 using LawAfrica.API.Services.Subscriptions;
 using LawAfrica.API.Settings;
@@ -19,10 +21,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using OpenAI.Chat;
 using System.Text;
 using System.Text.Json.Serialization;
-using OpenAI.Chat;
-using LawAfrica.API.Services.Ai;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -206,6 +207,7 @@ builder.Services.AddSingleton<ChatClient>(_ =>
 });
 
 builder.Services.AddScoped<ILawReportSummarizer, OpenAiLawReportSummarizer>();
+builder.Services.AddScoped<ILawReportContentBuilder, LawReportContentBuilder>();
 
 // --------------------------------------------------
 // JWT Authentication
