@@ -1,4 +1,4 @@
-﻿namespace LawAfrica.API.Models.Payments.LawReportsContent.Models
+﻿namespace LawAfrica.API.Models.LawReportsContent.Models
 {
     // Stored as smallint (see your EF config)
     public enum LawReportContentBlockType : short

@@ -1,6 +1,6 @@
 ﻿using System.Threading;
 using System.Threading.Tasks;
-using LawAfrica.API.Models.LawReportsContent;
+using LawAfrica.API.Models.LawReportsContent.DTOs;
 
 namespace LawAfrica.API.Services.LawReportsContent
 {

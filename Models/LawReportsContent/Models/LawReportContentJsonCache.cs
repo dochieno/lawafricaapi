@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace LawAfrica.API.Models.Payments.LawReportsContent.Models
+namespace LawAfrica.API.Models.LawReportsContent.Models
 {
     // 1:1 keyed by LawReportId (see your EF config)
     public class LawReportContentJsonCache

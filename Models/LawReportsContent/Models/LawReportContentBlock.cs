@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace LawAfrica.API.Models.Payments.LawReportsContent.Models
+namespace LawAfrica.API.Models.LawReportsContent.Models
 {
     public class LawReportContentBlock
     {

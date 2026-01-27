@@ -1,7 +1,7 @@
 ﻿using LawAfrica.API.Data;
 using LawAfrica.API.Models.Ai;
-using LawAfrica.API.Models.LawReportsContent;
-using LawAfrica.API.Models.Payments.LawReportsContent.Models;
+using LawAfrica.API.Models.LawReportsContent.DTOs;
+using LawAfrica.API.Models.LawReportsContent.Models;
 using LawAfrica.API.Services.Ai;
 using Microsoft.EntityFrameworkCore;
 using System;
@@ -172,120 +172,124 @@ namespace LawAfrica.API.Services.LawReportsContent
 
         //AI -powered builder
         public async Task<(BuildResult result, string modelUsed)> BuildAiAsync(
-        int lawReportId,
-        bool force = false,
-        int? maxInputCharsOverride = null,
-        CancellationToken ct = default)
+            int lawReportId,
+            bool force = false,
+            int? maxInputCharsOverride = null,
+            CancellationToken ct = default)
+        {
+            var report = await _db.LawReports
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.Id == lawReportId, ct);
+
+            if (report == null)
+                throw new InvalidOperationException("Law report not found.");
+
+            // ✅ ONE canonical string for:
+            // - hashing
+            // - sending to AI
+            // - slicing ranges
+            var normalized = NormalizeForAi(report.ContentText ?? "");
+            if (string.IsNullOrWhiteSpace(normalized))
             {
-                var report = await _db.LawReports
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(x => x.Id == lawReportId, ct);
+                await ClearExistingAsync(lawReportId, ct);
+                return (new BuildResult(lawReportId, Built: true, Hash: ComputeHash(""), BlocksWritten: 0), modelUsed: "n/a");
+            }
 
-                if (report == null)
-                    throw new InvalidOperationException("Law report not found.");
+            // ✅ IMPORTANT: truncate AFTER normalization so AI and slicing see the SAME exact string
+            var maxChars = maxInputCharsOverride.GetValueOrDefault(20000);
+            if (maxChars > 0 && normalized.Length > maxChars)
+                normalized = normalized.Substring(0, maxChars);
 
-                var raw = (report.ContentText ?? "").Replace("\r\n", "\n").Trim();
-                if (string.IsNullOrWhiteSpace(raw))
-                {
-                    await ClearExistingAsync(lawReportId, ct);
-                    return (new BuildResult(lawReportId, Built: true, Hash: ComputeHash(""), BlocksWritten: 0), modelUsed: "n/a");
-                }
+            // ✅ Hash the exact string used for AI + builder version
+            var hash = ComputeHash(normalized + "|" + BUILT_BYV1);
 
-                // optional truncation before AI (still safe; you’ll format what you sent)
-                var maxInputChars = maxInputCharsOverride.GetValueOrDefault(20000);
-                var sendToAi = raw;
-                if (sendToAi.Length > maxInputChars)
-                    sendToAi = sendToAi.Substring(0, maxInputChars);
+            var existingCache = await _db.Set<LawReportContentJsonCache>()
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.LawReportId == lawReportId, ct);
 
-                var hash = ComputeHash(sendToAi + "|" + BUILT_BYV1);
+            if (!force && existingCache != null && string.Equals(existingCache.Hash, hash, StringComparison.Ordinal))
+            {
+                return (new BuildResult(lawReportId, Built: false, Hash: hash, BlocksWritten: 0), modelUsed: "cached");
+            }
 
-                var existingCache = await _db.Set<LawReportContentJsonCache>()
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(x => x.LawReportId == lawReportId, ct);
+            // 1) Ask AI for ranges (ranges refer to *normalized*)
+            var (ranges, modelUsed) = await _aiFormatter.FormatRangesAsync(normalized, ct);
 
-                if (!force && existingCache != null && string.Equals(existingCache.Hash, hash, StringComparison.Ordinal))
-                {
-                    return (new BuildResult(lawReportId, Built: false, Hash: hash, BlocksWritten: 0), modelUsed: "cached");
-                }
+            // 2) Convert ranges -> ParsedBlock list (TEXT IS ALWAYS SLICED FROM *normalized*)
+            var blocks = BuildBlocksFromRanges(normalized, ranges);
 
-                // 1) Ask AI for ranges
-                var (ranges, modelUsed) = await _aiFormatter.FormatRangesAsync(sendToAi, ct);
+            // 3) Persist (same as BuildAsync)
+            await using var tx = await _db.Database.BeginTransactionAsync(ct);
 
-                // 2) Convert ranges -> ParsedBlock list (TEXT IS ALWAYS SLICED FROM ORIGINAL)
-                var blocks = BuildBlocksFromRanges(sendToAi, ranges);
+            var oldBlocks = await _db.Set<LawReportContentBlock>()
+                .Where(x => x.LawReportId == lawReportId)
+                .ToListAsync(ct);
 
-                // 3) Persist (same as your BuildAsync)
-                await using var tx = await _db.Database.BeginTransactionAsync(ct);
-
-                var oldBlocks = await _db.Set<LawReportContentBlock>()
-                    .Where(x => x.LawReportId == lawReportId)
-                    .ToListAsync(ct);
-
-                if (oldBlocks.Count > 0)
-                {
-                    _db.RemoveRange(oldBlocks);
-                    await _db.SaveChangesAsync(ct);
-                }
-
-                _db.AddRange(blocks.Select(b => new LawReportContentBlock
-                {
-                    LawReportId = lawReportId,
-                    Order = b.Order,
-                    Type = b.Type,
-                    Text = b.Text,
-                    Json = b.Json,
-                    Indent = b.Indent,
-                    Style = b.Style,
-                    CreatedAt = DateTime.UtcNow
-                }));
-
+            if (oldBlocks.Count > 0)
+            {
+                _db.RemoveRange(oldBlocks);
                 await _db.SaveChangesAsync(ct);
+            }
 
-                var jsonDto = new LawReportContentJsonDto
+            _db.AddRange(blocks.Select(b => new LawReportContentBlock
+            {
+                LawReportId = lawReportId,
+                Order = b.Order,
+                Type = b.Type,
+                Text = b.Text,
+                Json = b.Json,
+                Indent = b.Indent,
+                Style = b.Style,
+                CreatedAt = DateTime.UtcNow
+            }));
+
+            await _db.SaveChangesAsync(ct);
+
+            var jsonDto = new LawReportContentJsonDto
+            {
+                LawReportId = lawReportId,
+                Hash = hash,
+                Blocks = blocks.Select(b => new LawReportContentJsonBlockDto
+                {
+                    Order = b.Order,
+                    Type = b.Type, // DTO now exposes string "type" via TypeName, enum is JsonIgnored
+                    Text = b.Text,
+                    Data = string.IsNullOrWhiteSpace(b.Json) ? null : JsonSerializer.Deserialize<object>(b.Json!, JsonOpts),
+                    Indent = b.Indent,
+                    Style = b.Style
+                }).ToList()
+            };
+
+            var jsonString = JsonSerializer.Serialize(jsonDto, JsonOpts);
+
+            var cache = await _db.Set<LawReportContentJsonCache>()
+                .FirstOrDefaultAsync(x => x.LawReportId == lawReportId, ct);
+
+            if (cache == null)
+            {
+                cache = new LawReportContentJsonCache
                 {
                     LawReportId = lawReportId,
                     Hash = hash,
-                    Blocks = blocks.Select(b => new LawReportContentJsonBlockDto
-                    {
-                        Order = b.Order,
-                        Type = b.Type,
-                        Text = b.Text,
-                        Data = string.IsNullOrWhiteSpace(b.Json) ? null : JsonSerializer.Deserialize<object>(b.Json!, JsonOpts),
-                        Indent = b.Indent,
-                        Style = b.Style
-                    }).ToList()
+                    Json = jsonString,
+                    BuiltBy = BUILT_BYV1,
+                    BuiltAt = DateTime.UtcNow
                 };
-
-                var jsonString = JsonSerializer.Serialize(jsonDto, JsonOpts);
-
-                var cache = await _db.Set<LawReportContentJsonCache>()
-                    .FirstOrDefaultAsync(x => x.LawReportId == lawReportId, ct);
-
-                if (cache == null)
-                {
-                    cache = new LawReportContentJsonCache
-                    {
-                        LawReportId = lawReportId,
-                        Hash = hash,
-                        Json = jsonString,
-                        BuiltBy = BUILT_BYV1,
-                        BuiltAt = DateTime.UtcNow
-                    };
-                    _db.Add(cache);
-                }
-                else
-                {
-                    cache.Hash = hash;
-                    cache.Json = jsonString;
-                    cache.BuiltBy = BUILT_BYV1;
-                    cache.UpdatedAt = DateTime.UtcNow;
-                }
-
-                await _db.SaveChangesAsync(ct);
-                await tx.CommitAsync(ct);
-
-                return (new BuildResult(lawReportId, Built: true, Hash: hash, BlocksWritten: blocks.Count), modelUsed);
+                _db.Add(cache);
             }
+            else
+            {
+                cache.Hash = hash;
+                cache.Json = jsonString;
+                cache.BuiltBy = BUILT_BYV1;
+                cache.UpdatedAt = DateTime.UtcNow;
+            }
+
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+
+            return (new BuildResult(lawReportId, Built: true, Hash: hash, BlocksWritten: blocks.Count), modelUsed);
+        }
 
         private List<ParsedBlock> BuildBlocksFromRanges(string input, AiLawReportFormatResult ranges)
         {
@@ -745,6 +749,19 @@ namespace LawAfrica.API.Services.LawReportsContent
 
             return JsonSerializer.Deserialize<LawReportContentJsonDto>(cache.Json, JsonOpts)
                 ?? new LawReportContentJsonDto { LawReportId = lawReportId, Hash = cache.Hash, Blocks = new() };
+        }
+
+        private static string NormalizeForAi(string input)
+        {
+            var text = (input ?? "")
+                .Replace("\r\n", "\n")
+                .Replace("\u00A0", " ")
+                .Trim();
+
+            // If flattened, salvage once
+            text = SalvageNewlines(text);
+
+            return text;
         }
     }
 }
