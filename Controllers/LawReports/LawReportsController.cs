@@ -9,6 +9,7 @@ using LawAfrica.API.Services.LawReportsContent;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Ganss.Xss;
 
 namespace LawAfrica.API.Controllers
 {
@@ -281,7 +282,8 @@ namespace LawAfrica.API.Controllers
 
             if (r == null) return NotFound();
 
-            r.ContentText = dto.ContentText;
+            var normalized = LawAfrica.API.Services.Html.ReportHtmlNormalizer.Normalize(dto.ContentText);
+            r.ContentText = LawAfrica.API.Services.Html.ReportHtmlSanitizer.Sanitize(normalized);
             r.UpdatedAt = DateTime.UtcNow;
 
             // Optional: allow updating these from content page if you want
