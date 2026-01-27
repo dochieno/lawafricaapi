@@ -145,8 +145,6 @@ namespace LawAfrica.API.Services.Ai
 
         private static object BuildSchema()
         {
-            // NOTE: property name in JSON Schema is "enum" (not "@enum"),
-            // but in C# anonymous types we write @enum to avoid keyword conflict.
             return new
             {
                 type = "object",
@@ -162,16 +160,24 @@ namespace LawAfrica.API.Services.Ai
                         {
                             type = "object",
                             additionalProperties = false,
-                            required = new[] { "type", "start", "end" },
+
+                            // ✅ strict requires ALL keys in "properties" to be listed here
+                            required = new[] { "type", "start", "end", "marker", "indent" },
+
                             properties = new
                             {
                                 type = new
                                 {
                                     type = "string",
-                                    @enum = new[] { "title", "meta", "heading", "paragraph", "list_item", "divider", "spacer" }
+                                    @enum = new[]
+                                    {
+                                "title", "meta", "heading", "paragraph", "list_item", "divider", "spacer"
+                            }
                                 },
                                 start = new { type = "integer", minimum = 0 },
                                 end = new { type = "integer", minimum = 1 },
+
+                                // Optional by allowing null, but still required to appear
                                 marker = new { type = new object[] { "string", "null" } },
                                 indent = new { type = new object[] { "integer", "null" }, minimum = 0 }
                             }
