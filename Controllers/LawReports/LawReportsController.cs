@@ -3,7 +3,7 @@ using LawAfrica.API.DTOs.Reports;
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.LawReports.Enums;
 using LawAfrica.API.Models.Locations;
-using LawAfrica.API.Models.Payments.LawReportsContent.Models;
+using LawAfrica.API.Models;
 using LawAfrica.API.Models.Reports;
 using LawAfrica.API.Services.LawReportsContent;
 using Microsoft.AspNetCore.Authorization;

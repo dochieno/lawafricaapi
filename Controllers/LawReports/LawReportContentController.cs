@@ -1,6 +1,6 @@
 ﻿using LawAfrica.API.Data;
 using LawAfrica.API.Models.LawReportsContent;
-using LawAfrica.API.Models.Payments.LawReportsContent.Models;
+using LawAfrica.API.Models.LawReportsContent.Models;
 using LawAfrica.API.Services.LawReportsContent;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
