@@ -218,6 +218,8 @@ namespace LawAfrica.API.Services.LawReportsContent
 
             // 2) Convert ranges -> ParsedBlock list (TEXT IS ALWAYS SLICED FROM *normalized*)
             var blocks = BuildBlocksFromRanges(normalized, ranges);
+            blocks = FixTrailingCapsCategoryOnTitle(blocks);
+            blocks = SplitParagraphBySectionMarkers(blocks);
 
             // 3) Persist (same as BuildAsync)
             await using var tx = await _db.Database.BeginTransactionAsync(ct);
@@ -953,6 +955,155 @@ namespace LawAfrica.API.Services.LawReportsContent
             }
 
             return blocks;
+        }
+
+        private List<ParsedBlock> FixTrailingCapsCategoryOnTitle(List<ParsedBlock> blocks)
+        {
+            if (blocks == null || blocks.Count == 0) return blocks;
+
+            var first = blocks.FirstOrDefault();
+            if (first == null || first.Type != LawReportContentBlockType.Title) return blocks;
+            if (string.IsNullOrWhiteSpace(first.Text)) return blocks;
+
+            var title = first.Text.Trim();
+
+            // Split last token group if it's ALL CAPS and looks like a category
+            // Example: "... Resort & Spa EMPLOYMENT" => title="... Resort & Spa", heading="EMPLOYMENT"
+            var m = System.Text.RegularExpressions.Regex.Match(
+                title,
+                @"^(?<main>.+?)\s+(?<caps>[A-Z][A-Z\s/&\-]{2,30})$");
+
+            if (!m.Success) return blocks;
+
+            var main = m.Groups["main"].Value.Trim();
+            var caps = m.Groups["caps"].Value.Trim();
+
+            // Must be mostly caps letters
+            var letters = caps.Where(char.IsLetter).ToList();
+            if (letters.Count == 0) return blocks;
+            if (letters.Count(c => char.IsUpper(c)) / (double)letters.Count < 0.95) return blocks;
+
+            // Apply split
+            first.Text = main;
+            blocks[0] = first;
+
+            // Insert a heading after title (order will be normalized later)
+            blocks.Insert(1, new ParsedBlock
+            {
+                Type = LawReportContentBlockType.Heading,
+                Text = caps,
+                Style = "heading"
+            });
+
+            // Re-number orders
+            for (int i = 0; i < blocks.Count; i++) blocks[i].Order = i + 1;
+
+            return blocks;
+        }
+        private List<ParsedBlock> SplitParagraphBySectionMarkers(List<ParsedBlock> blocks)
+        {
+            if (blocks == null || blocks.Count == 0) return blocks;
+
+            // Only work on paragraph blocks
+            var markers = new[]
+            {
+        "Introduction",
+        "Background",
+        "Facts",
+        "Issues",
+        "Issues in dispute are:",
+        "Analysis",
+        "Analysis and Determination",
+        "Determination",
+        "Protection from arbitrary termination",
+        "Orders",
+        "Conclusion"
+    };
+
+            bool IsMarkerLine(string line)
+            {
+                var t = (line ?? "").Trim();
+                if (t.Length < 4 || t.Length > 80) return false;
+
+                // exact marker or startswith marker (case-insensitive)
+                return markers.Any(m =>
+                    t.Equals(m, StringComparison.OrdinalIgnoreCase) ||
+                    t.StartsWith(m + " ", StringComparison.OrdinalIgnoreCase) ||
+                    t.StartsWith(m + ":", StringComparison.OrdinalIgnoreCase));
+            }
+
+            var outList = new List<ParsedBlock>();
+
+            foreach (var b in blocks)
+            {
+                if (b.Type != LawReportContentBlockType.Paragraph || string.IsNullOrWhiteSpace(b.Text))
+                {
+                    outList.Add(b);
+                    continue;
+                }
+
+                // Split by newlines first
+                var lines = b.Text.Replace("\r\n", "\n").Split('\n');
+
+                // If no newlines, don't touch
+                if (lines.Length <= 1)
+                {
+                    outList.Add(b);
+                    continue;
+                }
+
+                var currentPara = new List<string>();
+
+                void FlushPara()
+                {
+                    var joined = string.Join(" ", currentPara.Select(x => x.Trim()).Where(x => x.Length > 0)).Trim();
+                    currentPara.Clear();
+                    if (string.IsNullOrWhiteSpace(joined)) return;
+
+                    outList.Add(new ParsedBlock
+                    {
+                        Type = LawReportContentBlockType.Paragraph,
+                        Text = joined,
+                        Style = "para"
+                    });
+                }
+
+                foreach (var rawLine in lines)
+                {
+                    var line = (rawLine ?? "").Trim();
+                    if (string.IsNullOrWhiteSpace(line))
+                    {
+                        FlushPara();
+                        continue;
+                    }
+
+                    if (IsMarkerLine(line))
+                    {
+                        // end current paragraph
+                        FlushPara();
+
+                        // marker becomes heading
+                        outList.Add(new ParsedBlock
+                        {
+                            Type = LawReportContentBlockType.Heading,
+                            Text = line,
+                            Style = "heading"
+                        });
+
+                        continue;
+                    }
+
+                    currentPara.Add(line);
+                }
+
+                FlushPara();
+            }
+
+            // Re-number orders
+            for (int i = 0; i < outList.Count; i++)
+                outList[i].Order = i + 1;
+
+            return outList;
         }
     }
 }
