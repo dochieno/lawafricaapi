@@ -46,29 +46,35 @@ namespace LawAfrica.API.Services.Ai
                 max_output_tokens = maxOutputTokens,
                 input = new object[]
                 {
-                    new {
-                        role = "system",
-                        content = new object[]
-                        {
-                            new {
-                                type = "text",
-                                text =
-@"You are a STRICT legal document formatter.
-ABSOLUTE RULES:
-- DO NOT rewrite, rephrase, correct, summarize, or add any words.
-- DO NOT output any text from the document.
-- You may ONLY output structure as character ranges into the provided input string.
-- Ranges MUST refer to the exact input string (0-based char index, end exclusive).
-- Blocks MUST be ordered, non-overlapping, and each block MUST have end > start.
-- Prefer: title/meta in the first part; headings for section labels; paragraphs for prose; list_item for numbered/lettered items; divider/spacer only if clearly present.
-Return ONLY JSON that matches the schema."
-                            }
-                        }
-                    },
-                    new {
-                        role = "user",
-                        content = new object[] { new { type = "text", text = input } }
-                    }
+        new {
+            role = "system",
+            content = new object[]
+            {
+                new {
+                    type = "input_text",   // ✅ FIX (was "text")
+                    text =
+                        @"You are a STRICT legal document formatter.
+                        ABSOLUTE RULES:
+                        - DO NOT rewrite, rephrase, correct, summarize, or add any words.
+                        - DO NOT output any text from the document.
+                        - You may ONLY output structure as character ranges into the provided input string.
+                        - Ranges MUST refer to the exact input string (0-based char index, end exclusive).
+                        - Blocks MUST be ordered, non-overlapping, and each block MUST have end > start.
+                        - Prefer: title/meta in the first part; headings for section labels; paragraphs for prose; list_item for numbered/lettered items; divider/spacer only if clearly present.
+                        Return ONLY JSON that matches the schema."
+                }
+            }
+        },
+        new {
+            role = "user",
+            content = new object[]
+            {
+                new {
+                    type = "input_text",  // ✅ FIX (was "text")
+                    text = input
+                }
+            }
+        }
                 },
                 text = new
                 {
@@ -81,7 +87,6 @@ Return ONLY JSON that matches the schema."
                     }
                 }
             };
-
             using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/responses");
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
             req.Content = new StringContent(JsonSerializer.Serialize(payload, JsonOpts), Encoding.UTF8, "application/json");
@@ -119,6 +124,17 @@ Return ONLY JSON that matches the schema."
 
                 foreach (var c in content.EnumerateArray())
                 {
+                    // Prefer items that are output_text, but accept any with "text"
+                    if (c.TryGetProperty("type", out var typeEl) && typeEl.ValueKind == JsonValueKind.String)
+                    {
+                        var t = typeEl.GetString();
+                        if (!string.Equals(t, "output_text", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(t, "text", StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+                    }
+
                     if (c.TryGetProperty("text", out var textEl) && textEl.ValueKind == JsonValueKind.String)
                         return textEl.GetString() ?? "";
                 }
