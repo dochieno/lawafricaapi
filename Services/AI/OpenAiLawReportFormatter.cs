@@ -34,7 +34,7 @@ namespace LawAfrica.API.Services.Ai
                 throw new InvalidOperationException("OPENAI_API_KEY is not configured.");
 
             var model = GetString("AI_FORMATTER_MODEL", GetString("AI_MODEL", "gpt-4.1-mini"));
-            var maxOutputTokens = GetInt("AI_FORMATTER_MAX_OUTPUT_TOKENS", 2500);
+            var maxOutputTokens = GetInt("AI_FORMATTER_MAX_OUTPUT_TOKENS", 25000);
 
             var input = (rawText ?? "").Replace("\r\n", "\n").Trim();
             if (string.IsNullOrWhiteSpace(input))
@@ -53,21 +53,31 @@ namespace LawAfrica.API.Services.Ai
                 new {
                     type = "input_text",   // ✅ FIX (was "text")
                     text =
-                        @"You are a STRICT legal document formatter.
-                        ABSOLUTE RULES:
-                        - DO NOT rewrite, rephrase, correct, summarize, or add any words.
-                        - DO NOT output any text from the document.
-                        - You may ONLY output structure as character ranges into the provided input string.
-                        - Ranges MUST refer to the exact input string (0-based char index, end exclusive).
-                        - Blocks MUST be ordered, non-overlapping, and each block MUST have end > start.
-                        - Prefer: title/meta in the first part; headings for section labels; paragraphs for prose; list_item for numbered/lettered items; divider/spacer only if clearly present.
-                        Return ONLY JSON that matches the schema.
-                        BOUNDARY RULES (CRITICAL):
-                        - start/end MUST NOT split a word. Every boundary must be on: whitespace, newline, or punctuation.
-                        - Headings MUST be entire lines (surrounded by newlines) and must be ALL CAPS or one of:
-                          RULING, JUDGMENT, JUDGEMENT, INTRODUCTION, BACKGROUND, FACTS, ISSUES, ANALYSIS, DETERMINATION, ORDERS, CONCLUSION.
-                        - NEVER output a heading that is shorter than 12 characters unless it is exactly one of the known labels above.
-                        - ONLY output divider if the input contains an explicit divider line like: '---', '___', '***'."
+                        @"You are a legal document formatter.
+
+                        Your task is to format the provided case law text into clear titles, headings, paragraphs, and bullet points where appropriate.
+
+                        Strict rules:
+
+                        Do NOT change, rewrite, correct, summarize, paraphrase, omit, or replace any words.
+
+                        Do NOT add new content, explanations, or interpretations.
+
+                        Preserve every word, number, date, citation, and spelling exactly as given, including errors or inconsistencies.
+
+                        You may only add structural formatting, such as:
+
+                        Section titles and headings
+
+                        Line breaks
+
+                        Paragraph separation
+
+                        Bullet or numbered lists (using existing text only)
+
+                        Maintain the original order and meaning of the text.
+
+                        Do not complete truncated sentences or guess missing text."
                 }
             }
         },
