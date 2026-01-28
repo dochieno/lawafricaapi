@@ -209,6 +209,8 @@ builder.Services.AddScoped<ILawReportSummarizer, OpenAiLawReportSummarizer>();
 builder.Services.AddScoped<ILawReportRelatedCasesService, OpenAiLawReportRelatedCasesService>();
 builder.Services.AddScoped<ILawReportContentBuilder, LawReportContentBuilder>();
 builder.Services.AddHttpClient<ILawReportFormatter, OpenAiLawReportFormatter>();
+builder.Services.AddScoped<IAiTextClient, AiTextClientAdapter>();
+builder.Services.AddScoped<ILawReportChatService, LawReportChatService>();
 
 
 // --------------------------------------------------
@@ -441,15 +443,32 @@ if (!string.IsNullOrEmpty(port))
     app.Urls.Add($"http://0.0.0.0:{port}");
 }
 
-try
+
+var autoMigrate = Environment.GetEnvironmentVariable("AUTO_MIGRATE");
+
+var shouldMigrate =
+    builder.Environment.IsDevelopment()
+        ? string.Equals(autoMigrate, "true", StringComparison.OrdinalIgnoreCase)
+        : !string.Equals(autoMigrate, "false", StringComparison.OrdinalIgnoreCase);
+
+if (shouldMigrate)
 {
-    using var scope = app.Services.CreateScope();
-    var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-    db.Database.Migrate();
+    try
+    {
+        using var scope = app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        db.Database.Migrate();
+        app.Logger.LogInformation("Database migration applied on startup. AUTO_MIGRATE={AutoMigrate}", autoMigrate);
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, "Database migration failed on startup.");
+        throw; // fail fast in production if migrations are required
+    }
 }
-catch (Exception ex)
+else
 {
-    app.Logger.LogError(ex, "Database migration failed on startup.");
+    app.Logger.LogWarning("AUTO_MIGRATE disabled. No migrations applied on startup. Environment={Env}", builder.Environment.EnvironmentName);
 }
 
 app.Run();
