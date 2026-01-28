@@ -15,12 +15,9 @@ namespace LawAfrica.API.Models.DTOs.Payments
         public int? ContentProductId { get; set; }
         public int? DurationInMonths { get; set; }
         public int? LegalDocumentId { get; set; }
-
-        /// <summary>
-        /// Paystack requires customer email for initialize.
-        /// If user is authenticated, backend will use the user's email and ignore this.
-        /// If anonymous (e.g. public signup), this is required.
-        /// </summary>
+        public string? ClientReturnUrl { get; set; }
         public string? Email { get; set; }
+
+
     }
 }

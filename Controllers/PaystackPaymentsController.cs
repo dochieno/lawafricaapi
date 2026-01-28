@@ -46,19 +46,19 @@ namespace LawAfrica.API.Controllers
             _legalDocFulfillment = legalDocFulfillment;
         }
 
-        // ✅ API proxy return: Paystack redirects here (GET) then we redirect to frontend return page.
         [AllowAnonymous]
         [HttpGet("return")]
-        public IActionResult ReturnToFrontend([FromQuery] string? reference, [FromQuery] string? trxref)
+        public IActionResult ReturnToFrontend(
+            [FromQuery] string? reference,
+            [FromQuery] string? trxref,
+            CancellationToken ct = default)
         {
             var r = (reference ?? trxref ?? "").Trim();
 
-            // ✅ Use configured frontend callback URL if present; fallback to pages.dev
             var frontendReturn = string.IsNullOrWhiteSpace(_opts.CallbackUrl)
                 ? "https://lawafricadigitalhub.pages.dev/payments/paystack/return"
                 : _opts.CallbackUrl.Trim();
 
-            // Avoid accidental // when someone configures a trailing slash
             frontendReturn = frontendReturn.TrimEnd('/');
 
             if (string.IsNullOrWhiteSpace(r))
@@ -67,10 +67,7 @@ namespace LawAfrica.API.Controllers
             return Redirect($"{frontendReturn}?reference={Uri.EscapeDataString(r)}");
         }
 
-        // ✅ SAFETY NET:
-        // If Paystack callback is accidentally set to .../return-visit (GET),
-        // we redirect to the correct /return endpoint instead of 405.
-        // This does NOT affect your frontend logging endpoint (POST return-visit).
+
         [AllowAnonymous]
         [HttpGet("return-visit")]
         public IActionResult ReturnVisitGetFallback([FromQuery] string? reference, [FromQuery] string? trxref)
@@ -78,10 +75,6 @@ namespace LawAfrica.API.Controllers
             return ReturnToFrontend(reference, trxref);
         }
 
-        /// <summary>
-        /// Creates a PaymentIntent + initializes Paystack transaction, returns authorization_url to redirect user.
-        /// VAT-aware for legal doc purchases (gross amount), tolerant to older frontend that still sends base price.
-        /// </summary>
         [AllowAnonymous]
         [HttpPost("initialize")]
         public async Task<IActionResult> Initialize([FromBody] InitiatePaystackCheckoutRequest request, CancellationToken ct)
@@ -199,7 +192,9 @@ namespace LawAfrica.API.Controllers
 
                 CreatedAt = DateTime.UtcNow
             };
-
+            intent.ClientReturnUrl = string.IsNullOrWhiteSpace(request.ClientReturnUrl)
+                                    ? null
+                                    : request.ClientReturnUrl.Trim();
             _db.PaymentIntents.Add(intent);
             await _db.SaveChangesAsync(ct);
 

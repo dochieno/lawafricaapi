@@ -71,37 +71,22 @@ namespace LawAfrica.API.Models.Payments
         // ✅ NEW: Legal document purchase
         public int? LegalDocumentId { get; set; }
 
-        // ------------------ ✅ NEW: Provider-agnostic identifiers (Paystack & others) ------------------
+            public string? ProviderReference { get; set; }
 
-        /// <summary>
-        /// Provider reference we generate and send to provider (e.g. Paystack "reference").
-        /// Example: "LA-12345"
-        /// </summary>
-        public string? ProviderReference { get; set; }
-
-        /// <summary>
-        /// Provider transaction id (e.g. Paystack "data.id", Mpesa could remain null).
-        /// </summary>
+    
         public string? ProviderTransactionId { get; set; }
 
-        /// <summary>
-        /// Optional: payment channel returned by provider (e.g. Paystack: card/bank/ussd/transfer).
-        /// </summary>
+
         public string? ProviderChannel { get; set; }
 
-        /// <summary>
-        /// Optional: when provider says it was paid.
-        /// </summary>
+
         public DateTime? ProviderPaidAt { get; set; }
 
-        /// <summary>
-        /// Optional: store trimmed raw provider json (NOT required, but helps audit).
-        /// Keep small (don’t store massive payloads).
-        /// </summary>
         public string? ProviderRawJson { get; set; }
 
         public int? InvoiceId { get; set; }
         public Invoice? Invoice { get; set; }
+        public string? ClientReturnUrl { get; set; }
 
     }
 }

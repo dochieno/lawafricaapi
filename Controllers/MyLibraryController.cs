@@ -90,13 +90,13 @@ namespace LawAfrica.API.Controllers
                     return Ok(new { message = "Added to library." });
                 }
 
-                // ✅ Premium doc => allow only if entitled (bundle/purchase/subscription/etc)
+            // ✅ Premium doc => allow only if entitled (bundle/purchase/subscription/etc)
                 var accessLevel = await entitlementService.GetAccessLevelAsync(userId, doc);
                 if (accessLevel != DocumentAccessLevel.FullAccess)
-                    return Forbid("Access required.");
+                    return StatusCode(StatusCodes.Status403Forbidden, "Access required.");
 
-                // ✅ Add as bookmark (do NOT grant Subscription/Purchase/AdminGrant)
-                _db.UserLibraries.Add(new UserLibrary
+            // ✅ Add as bookmark (do NOT grant Subscription/Purchase/AdminGrant)
+            _db.UserLibraries.Add(new UserLibrary
                 {
                     UserId = userId,
                     LegalDocumentId = documentId,

@@ -239,6 +239,7 @@ namespace LawAfrica.API.Controllers.Ai
 )
         {
             req ??= new LawReportChatRequestDto();
+            var userId = GetUserId();
 
             var report = await _db.LawReports
                 .AsNoTracking()
