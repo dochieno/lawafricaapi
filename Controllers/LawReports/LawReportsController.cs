@@ -9,6 +9,7 @@ using LawAfrica.API.Services.LawReportsContent;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Linq.Expressions;
 using Ganss.Xss;
 
 namespace LawAfrica.API.Controllers
@@ -1351,18 +1352,29 @@ namespace LawAfrica.API.Controllers
             // Party token match (optional)
             if (partyTokens.Count > 0)
             {
-                // Match ANY token in Parties/Title/Citation
-                q = q.Where(r =>
-                    partyTokens.Any(tok =>
-                        (r.Parties != null && EF.Functions.ILike(r.Parties, $"%{EscapeLike(tok)}%")) ||
-                        (r.Citation != null && EF.Functions.ILike(r.Citation, $"%{EscapeLike(tok)}%")) ||
-                        (r.LegalDocument != null && r.LegalDocument.Title != null && EF.Functions.ILike(r.LegalDocument.Title, $"%{EscapeLike(tok)}%"))
-                    )
-                );
+                // escape OUTSIDE the query
+                var likes = partyTokens
+                    .Select(t => $"%{EscapeLike(t)}%")
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                // build (A OR B OR C ...) as a SQL-translatable expression
+                Expression<Func<LawReport, bool>> predicate = r => false;
+
+                foreach (var like in likes)
+                {
+                    Expression<Func<LawReport, bool>> one = r =>
+                        (r.Parties != null && EF.Functions.ILike(r.Parties, like)) ||
+                        (r.Citation != null && EF.Functions.ILike(r.Citation, like)) ||
+                        (r.LegalDocument != null && r.LegalDocument.Title != null && EF.Functions.ILike(r.LegalDocument.Title, like));
+
+                    predicate = OrElse(predicate, one);
+                }
+
+                q = q.Where(predicate);
             }
             else
             {
-                // Fallback: same year if no parties text
                 q = q.Where(r => r.Year == seed.Year);
             }
 
@@ -1606,6 +1618,21 @@ namespace LawAfrica.API.Controllers
                 .Replace(@"\", @"\\")
                 .Replace("%", @"\%")
                 .Replace("_", @"\_");
+        }
+
+        private static Expression<Func<LawReport, bool>> OrElse(
+        Expression<Func<LawReport, bool>> left,
+        Expression<Func<LawReport, bool>> right)
+        {
+            var p = Expression.Parameter(typeof(LawReport), "r");
+
+            var leftBody = Expression.Invoke(left, p);
+            var rightBody = Expression.Invoke(right, p);
+
+            return Expression.Lambda<Func<LawReport, bool>>(
+                Expression.OrElse(leftBody, rightBody),
+                p
+            );
         }
     }
 }
