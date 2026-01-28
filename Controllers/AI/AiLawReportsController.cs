@@ -1,10 +1,11 @@
-﻿using System.Security.Claims;
-using LawAfrica.API.Data;
+﻿using LawAfrica.API.Data;
+using LawAfrica.API.DTOs.AI;
 using LawAfrica.API.Models.Ai;
 using LawAfrica.API.Services.Ai;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 
 
 namespace LawAfrica.API.Controllers.Ai
@@ -17,13 +18,14 @@ namespace LawAfrica.API.Controllers.Ai
         private readonly ApplicationDbContext _db;
         private readonly ILawReportSummarizer _summarizer;
         private readonly ILawReportRelatedCasesService _relatedCases;
+        private readonly ILawReportChatService _chat;
 
-        public AiLawReportsController(ApplicationDbContext db, ILawReportSummarizer summarizer, ILawReportRelatedCasesService relatedCases)
+        public AiLawReportsController(ApplicationDbContext db, ILawReportSummarizer summarizer, ILawReportRelatedCasesService relatedCases, ILawReportChatService chat  )
         {
             _db = db;
             _summarizer = summarizer;
             _relatedCases = relatedCases;
-           _relatedCases = relatedCases;
+            _chat = chat;
         }
 
         public class GenerateSummaryRequest
@@ -228,6 +230,71 @@ namespace LawAfrica.API.Controllers.Ai
                 }
             }
 
+        //Chat Controller:
+        [HttpPost("{id:int}/chat")]
+        public async Task<IActionResult> Chat(
+    int id,
+    [FromBody] LawReportChatRequestDto req,
+    CancellationToken ct = default
+)
+        {
+            req ??= new LawReportChatRequestDto();
+
+            var report = await _db.LawReports
+                .AsNoTracking()
+                .Include(x => x.LegalDocument)
+                .FirstOrDefaultAsync(x => x.Id == id, ct);
+
+            if (report == null)
+                return NotFound(new { message = "Law report not found." });
+
+            var content = report.ContentText ?? "";
+            if (string.IsNullOrWhiteSpace(content))
+                return BadRequest(new { message = "This law report has no content to chat with yet." });
+
+            var userMessage = (req.Message ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(userMessage))
+                return BadRequest(new { message = "Message is required." });
+
+            var caseTitle = (
+                report.LegalDocument?.Title ??
+                report.Parties ??
+                report.CaseNumber ??   // if your LawReport has CaseNumber (your UI shows it)
+                "Law report"
+            ).Trim();
+
+            var caseCitation = (report.Citation ?? "").Trim();
+
+            try
+            {
+                var resp = await _chat.AskAsync(
+                    id,
+                    caseTitle,
+                    caseCitation,
+                    content,
+                    userMessage,
+                    req.History,
+                    ct
+                );
+
+                // ✅ match frontend parsing: res.data.reply
+                return Ok(resp);
+            }
+            catch (InvalidOperationException ex)
+            {
+                // good for quota/limits later
+                return StatusCode(429, new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "Chat failed.",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
         private string GetUserId()
         {
             // Works with Identity/JWT; fallback to "sub" if needed
