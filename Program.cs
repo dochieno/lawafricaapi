@@ -194,7 +194,6 @@ builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
 
 // QuestPDF license (Community is fine for most cases)
 
-// ✅ OpenAI client (Singleton is recommended by OpenAI .NET SDK docs)
 builder.Services.AddSingleton<ChatClient>(_ =>
 {
     var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
@@ -207,6 +206,7 @@ builder.Services.AddSingleton<ChatClient>(_ =>
 });
 
 builder.Services.AddScoped<ILawReportSummarizer, OpenAiLawReportSummarizer>();
+builder.Services.AddScoped<ILawReportRelatedCasesService, OpenAiLawReportRelatedCasesService>();
 builder.Services.AddScoped<ILawReportContentBuilder, LawReportContentBuilder>();
 builder.Services.AddHttpClient<ILawReportFormatter, OpenAiLawReportFormatter>();
 

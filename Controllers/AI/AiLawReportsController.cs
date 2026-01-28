@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
+
 namespace LawAfrica.API.Controllers.Ai
 {
     [ApiController]
@@ -15,11 +16,14 @@ namespace LawAfrica.API.Controllers.Ai
     {
         private readonly ApplicationDbContext _db;
         private readonly ILawReportSummarizer _summarizer;
+        private readonly ILawReportRelatedCasesService _relatedCases;
 
-        public AiLawReportsController(ApplicationDbContext db, ILawReportSummarizer summarizer)
+        public AiLawReportsController(ApplicationDbContext db, ILawReportSummarizer summarizer, ILawReportRelatedCasesService relatedCases)
         {
             _db = db;
             _summarizer = summarizer;
+            _relatedCases = relatedCases;
+           _relatedCases = relatedCases;
         }
 
         public class GenerateSummaryRequest
@@ -158,6 +162,57 @@ namespace LawAfrica.API.Controllers.Ai
                 return StatusCode(500, new
                 {
                     message = "Failed to generate AI summary.",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
+
+        //Get Related Cases 
+        [HttpPost("{id:int}/related-cases")]
+        public async Task<IActionResult> GenerateRelatedCases(
+        int id,
+        [FromQuery] int takeKenya = 6,
+        [FromQuery] int takeForeign = 2,
+        CancellationToken ct = default
+)
+        {
+            var userId = GetUserId();
+
+            // ✅ premium gating later: for now auth-only, same as summaries MVP
+            // Later we can hook into tokens/subscription guard here.
+
+            var report = await _db.LawReports
+                .AsNoTracking()
+                .Include(x => x.LegalDocument)
+                .FirstOrDefaultAsync(x => x.Id == id, ct);
+
+            if (report == null)
+                return NotFound(new { message = "Law report not found." });
+
+            // (Optional) Kenya-only seed enforcement:
+            // if you store CountryId for Kenya and want to restrict, you can enforce here later.
+
+            try
+            {
+                var (items, modelUsed) = await _relatedCases.FindRelatedCasesAsync(report, takeKenya, takeForeign, ct);
+
+                // ✅ Put disclaimer at response level too (UX-friendly)
+                return Ok(new
+                {
+                    lawReportId = id,
+                    kenyaCount = items.Count(x => string.Equals(x.Jurisdiction, "Kenya", StringComparison.OrdinalIgnoreCase)),
+                    foreignCount = items.Count(x => !string.Equals(x.Jurisdiction, "Kenya", StringComparison.OrdinalIgnoreCase)),
+                    disclaimer = "AI suggestions may be inaccurate. Foreign cases are persuasive only. Always verify citations and holdings.",
+                    model = modelUsed,
+                    items
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "Failed to generate AI related cases.",
                     detail = ex.Message,
                     type = ex.GetType().Name
                 });
