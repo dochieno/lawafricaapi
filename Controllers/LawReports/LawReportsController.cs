@@ -1294,6 +1294,123 @@ namespace LawAfrica.API.Controllers
             return Ok(data);
         }
 
+        //Lightweight Related Cases API:
+
+        // -------------------------
+        // ✅ RELATED CASES (DB-only, heuristic)
+        // GET /api/law-reports/{id}/related?take=8
+        // -------------------------
+        [Authorize]
+        [HttpGet("{id:int}/related")]
+        public async Task<ActionResult<List<LawReportListItemDto>>> Related(
+            int id,
+            [FromQuery] int take = 8,
+            CancellationToken ct = default
+        )
+        {
+            take = Math.Clamp(take, 1, 20);
+
+            var seed = await _db.LawReports
+                .AsNoTracking()
+                .Include(x => x.LegalDocument)
+                .FirstOrDefaultAsync(x => x.Id == id, ct);
+
+            if (seed == null) return NotFound(new { message = "Law report not found." });
+
+            // Defensive strings
+            var parties = (seed.Parties ?? "").Trim();
+            var partyTokens = parties
+                .Split(new[] { " v ", " vs ", " v. ", " vs. ", "&", "and", ",", ";", "  " }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => x.Length >= 4) // avoid noise
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(6)
+                .ToList();
+
+            // Base query: only published reports in same category/kind
+            var q = _db.LawReports
+                .AsNoTracking()
+                .Include(x => x.LegalDocument)
+                .Include(x => x.TownRef)
+                .Where(r =>
+                    r.Id != seed.Id &&
+                    r.LegalDocument != null &&
+                    r.LegalDocument.Category == LLR_CATEGORY &&
+                    r.LegalDocument.Kind == LegalDocumentKind.Report &&
+                    r.LegalDocument.FileType == "report" &&
+                    r.LegalDocument.Status == LegalDocumentStatus.Published
+                )
+                .AsQueryable();
+
+            // Prefer same court/case/decision
+            q = q.Where(r => r.CourtType == seed.CourtType);
+
+            // Soft match: same case type / decision type
+            q = q.Where(r => r.CaseType == seed.CaseType || r.DecisionType == seed.DecisionType);
+
+            // Party token match (optional)
+            if (partyTokens.Count > 0)
+            {
+                // Match ANY token in Parties/Title/Citation
+                q = q.Where(r =>
+                    partyTokens.Any(tok =>
+                        (r.Parties != null && EF.Functions.ILike(r.Parties, $"%{EscapeLike(tok)}%")) ||
+                        (r.Citation != null && EF.Functions.ILike(r.Citation, $"%{EscapeLike(tok)}%")) ||
+                        (r.LegalDocument != null && r.LegalDocument.Title != null && EF.Functions.ILike(r.LegalDocument.Title, $"%{EscapeLike(tok)}%"))
+                    )
+                );
+            }
+            else
+            {
+                // Fallback: same year if no parties text
+                q = q.Where(r => r.Year == seed.Year);
+            }
+
+            // Rank-ish ordering: most recently updated first, then year desc, then id desc
+            var list = await q
+                .OrderByDescending(r => r.UpdatedAt ?? r.CreatedAt)
+                .ThenByDescending(r => r.Year)
+                .ThenByDescending(r => r.Id)
+                .Take(take)
+                .Select(r => new LawReportListItemDto
+                {
+                    Id = r.Id,
+                    LegalDocumentId = r.LegalDocumentId,
+
+                    Title = r.LegalDocument != null ? (r.LegalDocument.Title ?? "") : "",
+                    IsPremium = r.LegalDocument != null && r.LegalDocument.IsPremium,
+
+                    ReportNumber = r.ReportNumber,
+                    Year = r.Year,
+                    CaseNumber = r.CaseNumber,
+                    Citation = r.Citation,
+
+                    CourtType = (int)r.CourtType,
+                    CourtTypeLabel = CourtTypeLabel(r.CourtType),
+
+                    DecisionType = r.DecisionType,
+                    DecisionTypeLabel = DecisionTypeLabel(r.DecisionType),
+
+                    CaseType = r.CaseType,
+                    CaseTypeLabel = CaseTypeLabel(r.CaseType),
+
+                    Court = r.Court,
+
+                    Town = r.Town,
+                    TownId = r.TownId,
+                    TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
+
+                    Parties = r.Parties,
+                    Judges = r.Judges,
+                    DecisionDate = r.DecisionDate,
+
+                    PreviewText = "" // not needed here
+                })
+                .ToListAsync(ct);
+
+            return Ok(list);
+        }
+
         public class LawReportDecisionTypeOptionDto
         {
             public int Value { get; set; }
