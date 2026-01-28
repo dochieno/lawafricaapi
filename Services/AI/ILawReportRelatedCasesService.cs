@@ -140,6 +140,7 @@ TRANSCRIPT EXCERPT:
             - For outside Kenya items, set Note = ""Outside Kenya — persuasive only. Verify independently.""
             - If you are unsure about Citation/Url, use null (do not invent).
             - Confidence is optional (0.0 to 1.0), else null.
+            IMPORTANT: Do NOT suggest the same case as the current law report (do not repeat its title/parties/citation).
 
             Focus on similarity by: issues, legal principles, court level, remedy, and procedural posture.
             ".Trim();

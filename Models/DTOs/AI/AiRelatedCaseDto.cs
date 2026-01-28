@@ -2,6 +2,7 @@
 {
     public class AiRelatedCaseDto
     {
+        public int? LawReportId { get; set; }
         public string Title { get; set; } = "";
         public string? Citation { get; set; }
         public int? Year { get; set; }
