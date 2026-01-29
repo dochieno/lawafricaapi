@@ -57,15 +57,15 @@ namespace LawAfrica.API.Services.Ai
             var system = BuildSystemPrompt(takeKenya, takeForeign);
 
             var user = $@"
-SEED CASE:
-Title: {title}
-Citation: {citation}
-Court: {court}
-Year: {year}
+            SEED CASE:
+            Title: {title}
+            Citation: {citation}
+            Court: {court}
+            Year: {year}
 
-TRANSCRIPT EXCERPT:
-{content}
-".Trim();
+            TRANSCRIPT EXCERPT:
+            {content}
+            ".Trim();
 
             var messages = new List<ChatMessage>
             {

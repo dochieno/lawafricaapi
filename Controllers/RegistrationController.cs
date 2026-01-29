@@ -3,7 +3,7 @@ using LawAfrica.API.Data;
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.DTOs.Registration;
 using LawAfrica.API.Services;
-using LawAfrica.API.Services.Institutions; // ✅ ADD
+using LawAfrica.API.Services.Institutions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -31,72 +31,190 @@ namespace LawAfrica.API.Controllers
             _logger = logger;
         }
 
-            [HttpPost("intent")]
-            public async Task<IActionResult> CreateRegistrationIntent([FromBody] CreateRegistrationIntentRequest request)
+        // =========================================================
+        // NEW: Resolve institution from email domain and/or access code
+        // POST: /api/registration/resolve-institution
+        // Body: { email?: string, institutionAccessCode?: string }
+        // Always returns 200 with ok=true/false (no leakage of details beyond "not found")
+        // =========================================================
+        public class ResolveInstitutionRequest
+        {
+            public string? Email { get; set; }
+            public string? InstitutionAccessCode { get; set; }
+        }
+
+        [AllowAnonymous]
+        [HttpPost("resolve-institution")]
+        public async Task<IActionResult> ResolveInstitution([FromBody] ResolveInstitutionRequest req, CancellationToken ct)
+        {
+            var email = (req?.Email ?? "").Trim();
+            var code = NormalizeAccessCode(req?.InstitutionAccessCode);
+
+            // Prefer access code because it's globally unique
+            if (!string.IsNullOrWhiteSpace(code))
             {
-                try
+                var inst = await _db.Institutions
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(i =>
+                        i.InstitutionAccessCode != null &&
+                        i.InstitutionAccessCode.Trim().ToUpper() == code, ct);
+
+                if (inst == null)
+                    return Ok(new { ok = false });
+
+                return Ok(new
                 {
-                    if (request == null)
-                        return BadRequest(new
-                        {
-                            message = "Invalid request.",
-                            traceId = HttpContext.TraceIdentifier
-                        });
+                    ok = true,
+                    institutionId = inst.Id,
+                    name = inst.Name,
+                    emailDomain = inst.EmailDomain,
+                    isActive = inst.IsActive
+                });
+            }
 
-                    // ============================
-                    // Normalize core fields
-                    // ============================
-                    var email = (request.Email ?? "").Trim();
-                    var username = (request.Username ?? "").Trim();
-                    var password = request.Password ?? "";
+            // Fallback: resolve via email domain
+            var domain = ExtractEmailDomain(email);
+            if (string.IsNullOrWhiteSpace(domain))
+                return Ok(new { ok = false });
 
-                    // ✅ Reference number: keep nullable (empty => null)
-                    var referenceNumber = string.IsNullOrWhiteSpace(request.ReferenceNumber)
-                        ? null
-                        : request.ReferenceNumber.Trim();
+            var instByDomain = await _db.Institutions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(i =>
+                    i.EmailDomain != null &&
+                    i.EmailDomain.Trim().ToLower() == domain.ToLower(), ct);
 
-                    if (string.IsNullOrWhiteSpace(email))
-                        return BadRequest(new { message = "Email is required.", traceId = HttpContext.TraceIdentifier });
+            if (instByDomain == null)
+                return Ok(new { ok = false });
 
-                    if (string.IsNullOrWhiteSpace(username))
-                        return BadRequest(new { message = "Username is required.", traceId = HttpContext.TraceIdentifier });
+            return Ok(new
+            {
+                ok = true,
+                institutionId = instByDomain.Id,
+                name = instByDomain.Name,
+                emailDomain = instByDomain.EmailDomain,
+                isActive = instByDomain.IsActive
+            });
+        }
 
-                    if (string.IsNullOrWhiteSpace(password))
-                        return BadRequest(new { message = "Password is required.", traceId = HttpContext.TraceIdentifier });
-
-                    // ============================
-                    // Uniqueness checks
-                    // ============================
-                    if (await _db.Users.AnyAsync(u => u.Email == email))
-                        return BadRequest(new
-                        {
-                            message = "An account with this email already exists.",
-                            traceId = HttpContext.TraceIdentifier
-                        });
-
-                    var existing = await _db.RegistrationIntents
-                        .OrderByDescending(r => r.Id)
-                        .FirstOrDefaultAsync(r => r.Email == email);
-
-                    if (existing != null)
+        // =========================================================
+        // Registration Intent
+        // =========================================================
+        [HttpPost("intent")]
+        public async Task<IActionResult> CreateRegistrationIntent([FromBody] CreateRegistrationIntentRequest request)
+        {
+            try
+            {
+                if (request == null)
+                    return BadRequest(new
                     {
-                        var next = existing.UserType == UserType.Public
-                            ? "PAYMENT_REQUIRED"
-                            : "READY_FOR_ACCOUNT_CREATION";
+                        message = "Invalid request.",
+                        traceId = HttpContext.TraceIdentifier
+                    });
 
-                        return Ok(new
-                        {
-                            registrationIntentId = existing.Id,
-                            nextAction = next
-                        });
+                // ============================
+                // Normalize core fields
+                // ============================
+                var email = (request.Email ?? "").Trim();
+                var username = (request.Username ?? "").Trim();
+                var password = request.Password ?? "";
+
+                // ✅ Reference number: keep nullable (empty => null)
+                var referenceNumber = string.IsNullOrWhiteSpace(request.ReferenceNumber)
+                    ? null
+                    : request.ReferenceNumber.Trim();
+
+                if (string.IsNullOrWhiteSpace(email))
+                    return BadRequest(new { message = "Email is required.", traceId = HttpContext.TraceIdentifier });
+
+                if (string.IsNullOrWhiteSpace(username))
+                    return BadRequest(new { message = "Username is required.", traceId = HttpContext.TraceIdentifier });
+
+                if (string.IsNullOrWhiteSpace(password))
+                    return BadRequest(new { message = "Password is required.", traceId = HttpContext.TraceIdentifier });
+
+                // ============================
+                // Uniqueness checks
+                // ============================
+                if (await _db.Users.AnyAsync(u => u.Email == email))
+                    return BadRequest(new
+                    {
+                        message = "An account with this email already exists.",
+                        traceId = HttpContext.TraceIdentifier
+                    });
+
+                var existing = await _db.RegistrationIntents
+                    .OrderByDescending(r => r.Id)
+                    .FirstOrDefaultAsync(r => r.Email == email);
+
+                if (existing != null)
+                {
+                    var next = existing.UserType == UserType.Public
+                        ? "PAYMENT_REQUIRED"
+                        : "READY_FOR_ACCOUNT_CREATION";
+
+                    return Ok(new
+                    {
+                        registrationIntentId = existing.Id,
+                        nextAction = next
+                    });
+                }
+
+                // ============================
+                // Normalize optional fields
+                // ============================
+                var firstName = (request.FirstName ?? "").Trim();
+                var lastName = (request.LastName ?? "").Trim();
+                var phoneNumber = (request.PhoneNumber ?? "").Trim();
+
+                // Access code normalize (uppercase, trimmed)
+                var institutionAccessCode = NormalizeAccessCode(request.InstitutionAccessCode);
+
+                // ============================
+                // Institution inference + validation path
+                // ============================
+                Institution? institution = null;
+
+                var isPublic = request.UserType == UserType.Public;
+
+                if (!isPublic)
+                {
+                    // ✅ If InstitutionId not provided, infer it using globally-unique access code
+                    if (!request.InstitutionId.HasValue)
+                    {
+                        if (string.IsNullOrWhiteSpace(institutionAccessCode))
+                            return BadRequest(new
+                            {
+                                message = "Institution access code is required.",
+                                traceId = HttpContext.TraceIdentifier
+                            });
+
+                        institution = await _db.Institutions
+                            .AsNoTracking()
+                            .FirstOrDefaultAsync(i =>
+                                i.InstitutionAccessCode != null &&
+                                i.InstitutionAccessCode.Trim().ToUpper() == institutionAccessCode, default);
+
+                        if (institution == null)
+                            return BadRequest(new
+                            {
+                                message = "Invalid institution access code.",
+                                traceId = HttpContext.TraceIdentifier
+                            });
+
+                        if (!institution.IsActive)
+                            return BadRequest(new
+                            {
+                                message = "Invalid or inactive institution.",
+                                traceId = HttpContext.TraceIdentifier
+                            });
+
+                        // ✅ Assign inferred InstitutionId (so intent saves InstitutionId as required by your flow)
+                        request.InstitutionId = institution.Id;
                     }
-
-                    // ============================
-                    // Institution validation path
-                    // ============================
-                    if (request.InstitutionId.HasValue)
+                    else
                     {
-                        var institution = await _db.Institutions
+                        // If InstitutionId provided, load that institution
+                        institution = await _db.Institutions
                             .AsNoTracking()
                             .FirstOrDefaultAsync(i => i.Id == request.InstitutionId.Value && i.IsActive);
 
@@ -106,140 +224,135 @@ namespace LawAfrica.API.Controllers
                                 message = "Invalid or inactive institution.",
                                 traceId = HttpContext.TraceIdentifier
                             });
-
-                        // Validate email format
-                        var atIndex = email.LastIndexOf('@');
-                        if (atIndex <= 0 || atIndex == email.Length - 1)
-                            return BadRequest(new
-                            {
-                                message = "Invalid email address.",
-                                traceId = HttpContext.TraceIdentifier
-                            });
-
-                        var emailDomain = email[(atIndex + 1)..].Trim().ToLowerInvariant();
-                        var instDomain = (institution.EmailDomain ?? "").Trim().ToLowerInvariant();
-
-                        if (string.IsNullOrWhiteSpace(instDomain))
-                            return BadRequest(new
-                            {
-                                message = "Institution email domain is not configured. Please contact your administrator.",
-                                traceId = HttpContext.TraceIdentifier
-                            });
-
-                        if (!string.Equals(emailDomain, instDomain, StringComparison.OrdinalIgnoreCase))
-                            return BadRequest(new
-                            {
-                                message = "Email domain does not match institution.",
-                                traceId = HttpContext.TraceIdentifier
-                            });
-
-                        // Access code validation
-                        var expectedCode = (institution.InstitutionAccessCode ?? "").Trim();
-                        if (string.IsNullOrWhiteSpace(expectedCode))
-                            return BadRequest(new
-                            {
-                                message = "Institution access code is not configured. Please contact your administrator.",
-                                traceId = HttpContext.TraceIdentifier
-                            });
-
-                        var providedCode = (request.InstitutionAccessCode ?? "").Trim();
-                        if (string.IsNullOrWhiteSpace(providedCode))
-                            return BadRequest(new
-                            {
-                                message = "Institution access code is required.",
-                                traceId = HttpContext.TraceIdentifier
-                            });
-
-                        if (!string.Equals(providedCode, expectedCode, StringComparison.Ordinal))
-                            return BadRequest(new
-                            {
-                                message = "Invalid institution access code.",
-                                traceId = HttpContext.TraceIdentifier
-                            });
-
-                        // ✅ NEW: require ReferenceNumber ONLY for institution users (Student/Staff signups)
-                        // (Field is still nullable in DB, but institution flow requires it for seat allocation/audit.)
-                        if (string.IsNullOrWhiteSpace(referenceNumber))
-                            return BadRequest(new
-                            {
-                                message = "Reference number is required for institution users.",
-                                traceId = HttpContext.TraceIdentifier
-                            });
-
-                        if (referenceNumber.Length < 3)
-                            return BadRequest(new
-                            {
-                                message = "Reference number looks too short.",
-                                traceId = HttpContext.TraceIdentifier
-                            });
-                    }
-                    else
-                    {
-                        // ✅ Public signup: ensure we never store empty-string reference numbers
-                        referenceNumber = null;
                     }
 
-                    // ============================
-                    // Normalize optional fields
-                    // ============================
-                    var firstName = (request.FirstName ?? "").Trim();
-                    var lastName = (request.LastName ?? "").Trim();
-                    var phoneNumber = (request.PhoneNumber ?? "").Trim();
-                    var institutionAccessCode = (request.InstitutionAccessCode ?? "").Trim();
+                    // Validate email format + domain match
+                    var emailDomain = ExtractEmailDomain(email);
+                    if (string.IsNullOrWhiteSpace(emailDomain))
+                        return BadRequest(new
+                        {
+                            message = "Invalid email address.",
+                            traceId = HttpContext.TraceIdentifier
+                        });
 
-                    var intent = new RegistrationIntent
-                    {
-                        Email = email,
-                        Username = username,
-                        PasswordHash = BCrypt.Net.BCrypt.HashPassword(password),
+                    var instDomain = (institution.EmailDomain ?? "").Trim().ToLowerInvariant();
+                    if (string.IsNullOrWhiteSpace(instDomain))
+                        return BadRequest(new
+                        {
+                            message = "Institution email domain is not configured. Please contact your administrator.",
+                            traceId = HttpContext.TraceIdentifier
+                        });
 
-                        FirstName = firstName,
-                        LastName = lastName,
-                        PhoneNumber = phoneNumber,
-                        CountryId = request.CountryId,
-                        InstitutionAccessCode = institutionAccessCode,
+                    if (!string.Equals(emailDomain, instDomain, StringComparison.OrdinalIgnoreCase))
+                        return BadRequest(new
+                        {
+                            message = "Email domain does not match institution.",
+                            traceId = HttpContext.TraceIdentifier
+                        });
 
-                        // ✅ Save nullable reference number (null for public; required for institution)
-                        ReferenceNumber = referenceNumber,
+                    // Access code validation (must match institution)
+                    var expectedCode = NormalizeAccessCode(institution.InstitutionAccessCode);
+                    if (string.IsNullOrWhiteSpace(expectedCode))
+                        return BadRequest(new
+                        {
+                            message = "Institution access code is not configured. Please contact your administrator.",
+                            traceId = HttpContext.TraceIdentifier
+                        });
 
-                        UserType = request.UserType,
-                        InstitutionId = request.InstitutionId,
+                    if (string.IsNullOrWhiteSpace(institutionAccessCode))
+                        return BadRequest(new
+                        {
+                            message = "Institution access code is required.",
+                            traceId = HttpContext.TraceIdentifier
+                        });
 
-                        InstitutionMemberType = request.InstitutionMemberType
-                            ?? LawAfrica.API.Models.Institutions.InstitutionMemberType.Student,
+                    if (!string.Equals(institutionAccessCode, expectedCode, StringComparison.Ordinal))
+                        return BadRequest(new
+                        {
+                            message = "Invalid institution access code.",
+                            traceId = HttpContext.TraceIdentifier
+                        });
 
-                        ExpiresAt = DateTime.UtcNow.AddMinutes(60)
-                    };
+                    // ✅ Reference number required for institution users
+                    if (string.IsNullOrWhiteSpace(referenceNumber))
+                        return BadRequest(new
+                        {
+                            message = "Reference number is required for institution users.",
+                            traceId = HttpContext.TraceIdentifier
+                        });
 
-                    _db.RegistrationIntents.Add(intent);
-                    await _db.SaveChangesAsync();
-
-                    var nextAction = intent.UserType == UserType.Public
-                        ? "PAYMENT_REQUIRED"
-                        : "READY_FOR_ACCOUNT_CREATION";
-
-                    return Ok(new
-                    {
-                        registrationIntentId = intent.Id,
-                        nextAction
-                    });
+                    if (referenceNumber.Length < 3)
+                        return BadRequest(new
+                        {
+                            message = "Reference number looks too short.",
+                            traceId = HttpContext.TraceIdentifier
+                        });
                 }
-                catch (Exception ex)
+                else
                 {
-                    _logger.LogError(
-                        ex,
-                        "CreateRegistrationIntent failed. TraceId={TraceId}",
-                        HttpContext.TraceIdentifier
-                    );
+                    // ✅ Public signup: ensure we never store empty-string reference numbers
+                    referenceNumber = null;
 
-                    return StatusCode(500, new
-                    {
-                        message = "Internal server error while creating registration intent.",
-                        traceId = HttpContext.TraceIdentifier
-                    });
+                    // Public users should not carry institution metadata
+                    request.InstitutionId = null;
+                    request.InstitutionMemberType = null;
+                    institutionAccessCode = "";
                 }
-            }
 
+                var intent = new RegistrationIntent
+                {
+                    Email = email,
+                    Username = username,
+                    PasswordHash = BCrypt.Net.BCrypt.HashPassword(password),
+
+                    FirstName = firstName,
+                    LastName = lastName,
+                    PhoneNumber = phoneNumber,
+                    CountryId = request.CountryId,
+
+                    InstitutionAccessCode = institutionAccessCode,
+
+                    ReferenceNumber = referenceNumber,
+
+                    UserType = request.UserType,
+
+                    // ✅ Will be inferred above for institution flows (so it is present)
+                    InstitutionId = request.InstitutionId,
+
+                    InstitutionMemberType = request.InstitutionMemberType
+                        ?? LawAfrica.API.Models.Institutions.InstitutionMemberType.Student,
+
+                    ExpiresAt = DateTime.UtcNow.AddMinutes(60)
+                };
+
+                _db.RegistrationIntents.Add(intent);
+                await _db.SaveChangesAsync();
+
+                var nextAction = intent.UserType == UserType.Public
+                    ? "PAYMENT_REQUIRED"
+                    : "READY_FOR_ACCOUNT_CREATION";
+
+                return Ok(new
+                {
+                    registrationIntentId = intent.Id,
+                    nextAction
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "CreateRegistrationIntent failed. TraceId={TraceId}",
+                    HttpContext.TraceIdentifier
+                );
+
+                return StatusCode(500, new
+                {
+                    message = "Internal server error while creating registration intent.",
+                    traceId = HttpContext.TraceIdentifier
+                });
+            }
+        }
 
         [HttpPost("complete/{intentId}")]
         public async Task<IActionResult> CompleteRegistration(int intentId)
@@ -254,7 +367,6 @@ namespace LawAfrica.API.Controllers
             {
                 var (user, twoFactor) = await _registrationService.CreateUserFromIntentAsync(intent);
 
-                // (kept as-is; you already send inside service too; leaving unchanged to avoid "breaking")
                 try
                 {
                     await _authService.SendEmailVerificationAsync(user.Id);
@@ -271,7 +383,7 @@ namespace LawAfrica.API.Controllers
                     requiresEmailVerification = true,
                 });
             }
-            catch (SeatLimitExceededException ex) // ✅ ADD: Seat limit => 409 Conflict
+            catch (SeatLimitExceededException ex)
             {
                 return Conflict(new
                 {
@@ -320,6 +432,19 @@ namespace LawAfrica.API.Controllers
                 paymentCompleted = intent.PaymentCompleted,
                 expiresAt = intent.ExpiresAt
             });
+        }
+
+        // ---------------- Helpers ----------------
+
+        private static string NormalizeAccessCode(string? code)
+            => string.IsNullOrWhiteSpace(code) ? "" : code.Trim().ToUpperInvariant();
+
+        private static string ExtractEmailDomain(string email)
+        {
+            if (string.IsNullOrWhiteSpace(email)) return "";
+            var at = email.LastIndexOf('@');
+            if (at <= 0 || at >= email.Length - 1) return "";
+            return email[(at + 1)..].Trim().ToLowerInvariant();
         }
     }
 }
