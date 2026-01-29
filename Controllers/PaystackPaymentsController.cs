@@ -48,31 +48,51 @@ namespace LawAfrica.API.Controllers
 
         [AllowAnonymous]
         [HttpGet("return")]
-        public IActionResult ReturnToFrontend(
+        public async Task<IActionResult> ReturnToFrontend(
             [FromQuery] string? reference,
             [FromQuery] string? trxref,
             CancellationToken ct = default)
         {
             var r = (reference ?? trxref ?? "").Trim();
 
-            var frontendReturn = string.IsNullOrWhiteSpace(_opts.CallbackUrl)
+            var fallbackFrontendReturn = string.IsNullOrWhiteSpace(_opts.CallbackUrl)
                 ? "https://lawafricadigitalhub.pages.dev/payments/paystack/return"
                 : _opts.CallbackUrl.Trim();
 
-            frontendReturn = frontendReturn.TrimEnd('/');
+            fallbackFrontendReturn = fallbackFrontendReturn.TrimEnd('/');
 
             if (string.IsNullOrWhiteSpace(r))
-                return Redirect(frontendReturn);
+                return Redirect(fallbackFrontendReturn);
 
-            return Redirect($"{frontendReturn}?reference={Uri.EscapeDataString(r)}");
+            // ✅ Find intent by reference so we can redirect to mobile deep link if available
+            var intent = await _db.PaymentIntents
+                .AsNoTracking()
+                .Where(x => x.Provider == PaymentProvider.Paystack && x.ProviderReference == r)
+                .Select(x => new { x.ClientReturnUrl })
+                .FirstOrDefaultAsync(ct);
+
+            var targetBase = intent?.ClientReturnUrl;
+
+            // Fallback to web return if no client return
+            if (string.IsNullOrWhiteSpace(targetBase))
+                targetBase = fallbackFrontendReturn;
+
+            targetBase = targetBase.Trim();
+
+            // ✅ Append reference safely (handles if target already has ? )
+            var sep = targetBase.Contains("?") ? "&" : "?";
+            return Redirect($"{targetBase}{sep}reference={Uri.EscapeDataString(r)}");
         }
 
 
         [AllowAnonymous]
         [HttpGet("return-visit")]
-        public IActionResult ReturnVisitGetFallback([FromQuery] string? reference, [FromQuery] string? trxref)
+        public Task<IActionResult> ReturnVisitGetFallback(
+            [FromQuery] string? reference,
+            [FromQuery] string? trxref,
+            CancellationToken ct = default)
         {
-            return ReturnToFrontend(reference, trxref);
+            return ReturnToFrontend(reference, trxref, ct);
         }
 
         [AllowAnonymous]
@@ -192,9 +212,9 @@ namespace LawAfrica.API.Controllers
 
                 CreatedAt = DateTime.UtcNow
             };
-            intent.ClientReturnUrl = string.IsNullOrWhiteSpace(request.ClientReturnUrl)
-                                    ? null
-                                    : request.ClientReturnUrl.Trim();
+
+            var clientReturn = request.ClientReturnUrl ?? request.CallbackUrl;
+            intent.ClientReturnUrl = string.IsNullOrWhiteSpace(clientReturn) ? null : clientReturn.Trim();
             _db.PaymentIntents.Add(intent);
             await _db.SaveChangesAsync(ct);
 
@@ -406,29 +426,35 @@ namespace LawAfrica.API.Controllers
         // =========================
         // Helpers
         // =========================
+        /*  private string ResolvePaystackCallbackUrl(PaymentPurpose purpose)
+          {
+              // ✅ DO NOT mess signup flow
+              if (purpose == PaymentPurpose.PublicSignupFee)
+              {
+                  // For signup, callback goes to FRONTEND return (existing behavior)
+                  var fallbackFrontendReturn = "https://lawafricadigitalhub.pages.dev/payments/paystack/return";
+
+                  var configured = (_opts.CallbackUrl ?? "").Trim();
+                  if (string.IsNullOrWhiteSpace(configured)) return fallbackFrontendReturn;
+
+                  // If someone mistakenly set callback to API return, still fallback to frontend
+                  if (configured.Contains("/api/payments/paystack/return", StringComparison.OrdinalIgnoreCase))
+                      return fallbackFrontendReturn;
+
+                  // If set to return-visit, also fallback
+                  if (configured.Contains("return-visit", StringComparison.OrdinalIgnoreCase))
+                      return fallbackFrontendReturn;
+
+                  return configured.TrimEnd('/');
+              }
+
+              // ✅ Non-signup purchases: go through API proxy return
+              return BuildApiReturnProxyUrl();
+          }*/
+
         private string ResolvePaystackCallbackUrl(PaymentPurpose purpose)
         {
-            // ✅ DO NOT mess signup flow
-            if (purpose == PaymentPurpose.PublicSignupFee)
-            {
-                // For signup, callback goes to FRONTEND return (existing behavior)
-                var fallbackFrontendReturn = "https://lawafricadigitalhub.pages.dev/payments/paystack/return";
 
-                var configured = (_opts.CallbackUrl ?? "").Trim();
-                if (string.IsNullOrWhiteSpace(configured)) return fallbackFrontendReturn;
-
-                // If someone mistakenly set callback to API return, still fallback to frontend
-                if (configured.Contains("/api/payments/paystack/return", StringComparison.OrdinalIgnoreCase))
-                    return fallbackFrontendReturn;
-
-                // If set to return-visit, also fallback
-                if (configured.Contains("return-visit", StringComparison.OrdinalIgnoreCase))
-                    return fallbackFrontendReturn;
-
-                return configured.TrimEnd('/');
-            }
-
-            // ✅ Non-signup purchases: go through API proxy return
             return BuildApiReturnProxyUrl();
         }
 

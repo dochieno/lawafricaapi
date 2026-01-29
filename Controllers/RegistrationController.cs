@@ -141,22 +141,30 @@ namespace LawAfrica.API.Controllers
                         message = "An account with this email already exists.",
                         traceId = HttpContext.TraceIdentifier
                     });
-
                 var existing = await _db.RegistrationIntents
                     .OrderByDescending(r => r.Id)
                     .FirstOrDefaultAsync(r => r.Email == email);
 
                 if (existing != null)
                 {
-                    var next = existing.UserType == UserType.Public
-                        ? "PAYMENT_REQUIRED"
-                        : "READY_FOR_ACCOUNT_CREATION";
-
-                    return Ok(new
+                    // ✅ If expired, remove it and continue to create a new one
+                    if (existing.ExpiresAt <= DateTime.UtcNow)
                     {
-                        registrationIntentId = existing.Id,
-                        nextAction = next
-                    });
+                        _db.RegistrationIntents.Remove(existing);
+                        await _db.SaveChangesAsync();
+                    }
+                    else
+                    {
+                        var next = existing.UserType == UserType.Public
+                            ? "PAYMENT_REQUIRED"
+                            : "READY_FOR_ACCOUNT_CREATION";
+
+                        return Ok(new
+                        {
+                            registrationIntentId = existing.Id,
+                            nextAction = next
+                        });
+                    }
                 }
 
                 // ============================

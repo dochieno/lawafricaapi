@@ -1,4 +1,5 @@
 ﻿using LawAfrica.API.Models.Payments;
+using System.Text.Json.Serialization;
 
 namespace LawAfrica.API.Models.DTOs.Payments
 {
@@ -15,7 +16,13 @@ namespace LawAfrica.API.Models.DTOs.Payments
         public int? ContentProductId { get; set; }
         public int? DurationInMonths { get; set; }
         public int? LegalDocumentId { get; set; }
+
+        [JsonPropertyName("clientReturnUrl")]
         public string? ClientReturnUrl { get; set; }
+
+        // Accept alias from mobile if sent as callbackUrl
+        [JsonPropertyName("callbackUrl")]
+        public string? CallbackUrl { get; set; }
         public string? Email { get; set; }
 
 
