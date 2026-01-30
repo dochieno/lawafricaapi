@@ -56,13 +56,10 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
     });
 
-
-
 // --------------------------------------------------
 // Options Binding
 // --------------------------------------------------
-builder.Services.Configure<EmailSettings>(
-    builder.Configuration.GetSection("EmailSettings"));
+builder.Services.Configure<EmailSettings>(builder.Configuration.GetSection("EmailSettings"));
 
 var emailSettings = builder.Configuration.GetSection("EmailSettings").Get<EmailSettings>();
 if (emailSettings == null)
@@ -76,7 +73,9 @@ var hasGraph =
 
 // If Graph vars are NOT set, we assume SMTP mode and require Host.
 if (!hasGraph && string.IsNullOrWhiteSpace(emailSettings.Host))
-    throw new InvalidOperationException("EmailSettings:Host is missing or empty (SMTP mode). For Graph, set GraphTenantId/GraphClientId/GraphClientSecret.");
+    throw new InvalidOperationException(
+        "EmailSettings:Host is missing or empty (SMTP mode). For Graph, set GraphTenantId/GraphClientId/GraphClientSecret."
+    );
 
 // --------------------------------------------------
 // Core Services
@@ -88,7 +87,6 @@ builder.Services.AddScoped<EmailService>();
 builder.Services.AddScoped<InstitutionService>();
 builder.Services.AddHostedService<LawAfrica.API.Services.InstitutionSubscriptionStatusHostedService>();
 builder.Services.AddScoped<LawAfrica.API.Services.InstitutionAccessService>();
-
 
 // --------------------------------------------------
 // Payment & Subscription Services
@@ -153,8 +151,7 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("RequireAdmin", policy => policy.RequireRole("Admin"));
     options.AddPolicy("RequireUser", policy => policy.RequireRole("User", "Admin"));
 
-    // ✅ NEW: allows either Role=Admin OR token claim isGlobalAdmin=true
-    // This fixes dashboards for GlobalAdmins who are not Role=Admin.
+    // ✅ Allows either Role=Admin OR token claim isGlobalAdmin=true
     options.AddPolicy("RequireAdminOrGlobalAdmin", policy =>
         policy.RequireAssertion(ctx =>
             ctx.User.IsInRole("Admin") ||
@@ -193,8 +190,9 @@ builder.Services.AddScoped<IAuthorizationHandler, CanApproveInstitutionUsersHand
 builder.Services.AddScoped<IAuthorizationHandler, GlobalAdminHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
 
-// QuestPDF license (Community is fine for most cases)
-
+// --------------------------------------------------
+// OpenAI / AI
+// --------------------------------------------------
 builder.Services.AddSingleton<ChatClient>(_ =>
 {
     var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
@@ -212,7 +210,6 @@ builder.Services.AddScoped<ILawReportContentBuilder, LawReportContentBuilder>();
 builder.Services.AddHttpClient<ILawReportFormatter, OpenAiLawReportFormatter>();
 builder.Services.AddScoped<IAiTextClient, AiTextClientAdapter>();
 builder.Services.AddScoped<ILawReportChatService, LawReportChatService>();
-
 
 // --------------------------------------------------
 // JWT Authentication
@@ -251,32 +248,23 @@ builder.Services
     });
 
 // --------------------------------------------------
-// ✅ CORS (FIXED)
+// ✅ CORS (Cloudflare Pages + local dev) — FIXED ORDER USE BELOW
 // --------------------------------------------------
-// --------------------------------------------------
-// ✅ CORS (Cloudflare Pages + local dev)
-// --------------------------------------------------
-    builder.Services.AddCors(options =>
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("ViteDev", policy =>
     {
-        options.AddPolicy("ViteDev", policy =>
-        {
-            policy.WithOrigins(
-                    // Local dev
-                    "http://localhost:5173",
-
-                    // ✅ Cloudflare Pages (your deployed frontend)
-                    "https://lawafricadigitalhub.pages.dev"
-
-                    // (Optional) If you later add a custom domain, add it here too:
-                    // "https://lawafrica.co.ke",
-                    // "https://www.lawafrica.co.ke",
-
-                  )
-                  .AllowAnyHeader()
-                  .AllowAnyMethod();
-        });
+        policy.WithOrigins(
+                "http://localhost:5173",
+                "https://lawafricadigitalhub.pages.dev"
+              // Add custom domains here if/when you use them:
+              // "https://lawafrica.co.ke",
+              // "https://www.lawafrica.co.ke"
+              )
+              .AllowAnyHeader()
+              .AllowAnyMethod();
     });
-
+});
 
 // --------------------------------------------------
 // Swagger
@@ -298,7 +286,6 @@ builder.Services.AddSwaggerGen(c =>
         Description = "JWT Authorization header using the Bearer scheme."
     });
 
-    // ✅ FIX: AddSecurityRequirement expects an OpenApiSecurityRequirement object (not a lambda)
     c.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
         {
@@ -338,25 +325,17 @@ app.UseExceptionHandler(errorApp =>
     });
 });
 
-app.UseMiddleware<ApiExceptionMiddleware>();
-
 // --------------------------------------------------
 // ✅ STORAGE (PERSISTENT DISK READY) + deterministic GET /storage/**
 // - Uses STORAGE_ROOT if provided (Render Disk mount recommended: /var/data/Storage)
 // - Falls back to ./Storage for local dev
-// - Registers BEFORE routing so /storage isn't captured by routing / CORS maps
 // --------------------------------------------------
 var storageRoot = Environment.GetEnvironmentVariable("STORAGE_ROOT");
-
 if (string.IsNullOrWhiteSpace(storageRoot))
 {
     storageRoot = Path.Combine(Directory.GetCurrentDirectory(), "Storage");
 }
-
-// Normalize + ensure exists
 Directory.CreateDirectory(storageRoot);
-
-// Optional: log path so you can confirm on Render logs
 app.Logger.LogInformation("Storage root: {StorageRoot}", storageRoot);
 
 // Default wwwroot (harmless if no wwwroot)
@@ -394,7 +373,7 @@ app.MapGet("/storage/{**filePath}", (string filePath) =>
 });
 
 // --------------------------------------------------
-// Middleware
+// Swagger
 // --------------------------------------------------
 app.UseSwagger();
 app.UseSwaggerUI(c =>
@@ -403,22 +382,23 @@ app.UseSwaggerUI(c =>
     c.RoutePrefix = "swagger";
 });
 
-// ✅ Routing is required for correct endpoint routing + CORS behavior
+// --------------------------------------------------
+// ✅ CRITICAL: Routing + CORS MUST come before custom middleware that can short-circuit requests
+// --------------------------------------------------
 app.UseRouting();
-
-// ✅ CORS after routing so it applies to controller endpoints properly
 app.UseCors("ViteDev");
 
-// ✅ Handle ALL preflight OPTIONS requests (fixes CORS “blocked” for some endpoints)
+// ✅ Handle ALL preflight OPTIONS requests (ensures CORS headers exist)
 app.MapMethods("{*path}", new[] { "OPTIONS" }, () => Results.Ok())
    .RequireCors("ViteDev");
+
+// ✅ NOW it is safe to run your API exception middleware
+app.UseMiddleware<ApiExceptionMiddleware>();
 
 app.UseAuthentication();
 app.UseAuthorization();
 
-// ✅ NEW: Paystack misconfig safety-net (root path)
-// If Paystack (or old cached config) redirects to https://lawafricaapi.onrender.com/return-visit
-// we catch it and forward to the real proxy endpoint.
+// ✅ Paystack misconfig safety-net (root path)
 app.MapGet("/return-visit", (HttpContext ctx) =>
 {
     var reference = (ctx.Request.Query["reference"].ToString() ?? "").Trim();
@@ -432,9 +412,10 @@ app.MapGet("/return-visit", (HttpContext ctx) =>
     return Results.Redirect(target);
 });
 
-// ✅ Ensure controllers always get the CORS policy too
+// ✅ Controllers always get the CORS policy too
 app.MapControllers().RequireCors("ViteDev");
 
+// Basic endpoints
 app.MapGet("/", () => Results.Ok(new { status = "ok", service = "LawAfrica.API" }));
 app.MapGet("/health", () => Results.Ok("ok"));
 
@@ -444,7 +425,9 @@ if (!string.IsNullOrEmpty(port))
     app.Urls.Add($"http://0.0.0.0:{port}");
 }
 
-
+// --------------------------------------------------
+// Auto-migrate
+// --------------------------------------------------
 var autoMigrate = Environment.GetEnvironmentVariable("AUTO_MIGRATE");
 
 var shouldMigrate =
@@ -464,7 +447,7 @@ if (shouldMigrate)
     catch (Exception ex)
     {
         app.Logger.LogError(ex, "Database migration failed on startup.");
-        throw; // fail fast in production if migrations are required
+        throw; // fail fast if migrations are required
     }
 }
 else
