@@ -119,6 +119,7 @@ builder.Services.AddScoped<InvoiceNumberGenerator>();
 // --------------------------------------------------
 builder.Services.AddScoped<InstitutionSeatService>();
 builder.Services.AddScoped<DocumentEntitlementService>();
+builder.Services.AddScoped<LegalDocumentTocService>();
 builder.Services.AddScoped<FileStorageService>();
 builder.Services.AddScoped<ReadingProgressService>();
 builder.Services.AddScoped<IDocumentIndexingService, PdfDocumentIndexingService>();

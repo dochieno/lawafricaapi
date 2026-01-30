@@ -1,4 +1,5 @@
 ﻿using LawAfrica.API.Models;
+using LawAfrica.API.Models.Documents;
 using LawAfrica.API.Models.LawReports.Enums;
 using System.Xml.Linq;
 
@@ -63,6 +64,8 @@ public class LegalDocument
 
     // ✅ 1:1 child (optional)
     public ICollection<ContentProductLegalDocument> ProductDocuments { get; set; } = new List<ContentProductLegalDocument>();
+    public ICollection<LegalDocumentTocEntry> TocEntries { get; set; } = new List<LegalDocumentTocEntry>();
+
 
 
 }

@@ -2,6 +2,7 @@
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.Ai;
 using LawAfrica.API.Models.Authorization;
+using LawAfrica.API.Models.Documents;
 using LawAfrica.API.Models.Institutions;
 using LawAfrica.API.Models.LawReports.Enums;
 using LawAfrica.API.Models.LawReportsContent.Models;
@@ -86,6 +87,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<InstitutionMembership> InstitutionMemberships { get; set; }
     public DbSet<InstitutionSubscriptionAudit> InstitutionSubscriptionAudits => Set<InstitutionSubscriptionAudit>();
     public DbSet<ContentProductLegalDocument> ContentProductLegalDocuments { get; set; } = null!;
+    public DbSet<LegalDocumentTocEntry> LegalDocumentTocEntries => Set<LegalDocumentTocEntry>();
     public DbSet<UserLegalDocumentPurchase> UserLegalDocumentPurchases { get; set; } = null!;
     public DbSet<AdminPermission> AdminPermissions => Set<AdminPermission>();
     public DbSet<UserAdminPermission> UserAdminPermissions => Set<UserAdminPermission>();
@@ -594,6 +596,32 @@ public class ApplicationDbContext : DbContext
             b.HasIndex(x => x.InvoiceId);
         });
 
+        //TOCLegalDocument
+        modelBuilder.Entity<LegalDocumentTocEntry>(e =>
+        {
+            e.ToTable("LegalDocumentTocEntries");
+
+            e.HasOne(x => x.LegalDocument)
+                .WithMany(d => d.TocEntries)
+                .HasForeignKey(x => x.LegalDocumentId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            e.HasOne(x => x.Parent)
+                .WithMany(x => x.Children)
+                .HasForeignKey(x => x.ParentId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // Helpful indexes
+            e.HasIndex(x => new { x.LegalDocumentId, x.ParentId, x.Order });
+
+            e.HasIndex(x => new { x.LegalDocumentId, x.AnchorId });
+
+            // Optional safety: keep title length sane
+            e.Property(x => x.Title).HasMaxLength(500);
+            e.Property(x => x.AnchorId).HasMaxLength(200);
+            e.Property(x => x.PageLabel).HasMaxLength(50);
+            e.Property(x => x.Notes).HasMaxLength(2000);
+        });
 
         //LawReports
 

@@ -98,6 +98,7 @@ namespace LawAfrica.API.Controllers
                     AllowPublicPurchase = d.AllowPublicPurchase,
                     PublicPrice = d.PublicPrice,
                     VatRateId = d.VatRateId,
+                    
                     IsTaxInclusive = d.IsTaxInclusive,
                     PublicCurrency = d.PublicCurrency
                 })
@@ -458,7 +459,7 @@ namespace LawAfrica.API.Controllers
             }
         }
 
-        [HttpGet("{id:int}/toc")]
+       /* [HttpGet("{id:int}/toc")]
         public async Task<IActionResult> GetTableOfContents(int id)
         {
             var doc = await _db.LegalDocuments
@@ -472,7 +473,7 @@ namespace LawAfrica.API.Controllers
 
             var tocItems = TocParser.ParseOrEmpty(doc.TableOfContentsJson);
             return Ok(new { items = tocItems });
-        }
+        }*/
 
         [HttpGet("{id}/access")]
         [Authorize]
