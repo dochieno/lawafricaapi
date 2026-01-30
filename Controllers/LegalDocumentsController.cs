@@ -555,6 +555,30 @@ namespace LawAfrica.API.Controllers
             });
         }
 
+        // ✅ Reader Outline (Table of Contents) - logged-in users
+        // GET /api/legal-documents/{id}/outline
+        [Authorize]
+        [HttpGet("{id:int}/outline")]
+        public async Task<IActionResult> GetOutline(
+            int id,
+            [FromServices] LegalDocumentTocService outlineService)
+        {
+            // optional: ensure doc exists (prevents leaking whether entries exist)
+            var exists = await _db.LegalDocuments
+                .AsNoTracking()
+                .AnyAsync(d => d.Id == id && d.Status == LegalDocumentStatus.Published);
+
+            if (!exists)
+                return NotFound("Document not found.");
+
+            // ✅ includeAdminFields = false for reader
+            var items = await outlineService.GetTreeAsync(id, includeAdminFields: false);
+
+            // ✅ Return shape that your current reader code expects: res.data.items
+            return Ok(new { items });
+        }
+
+
         [HttpGet("{id:int}/availability")]
         public async Task<IActionResult> GetAvailability(int id, [FromServices] FileStorageService storage)
         {
