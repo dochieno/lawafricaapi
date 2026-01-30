@@ -11,13 +11,19 @@
 
     public async Task Invoke(HttpContext ctx)
     {
+        // ✅ Never interfere with CORS preflight
+        if (HttpMethods.IsOptions(ctx.Request.Method))
+        {
+            await _next(ctx);
+            return;
+        }
+
         try
         {
             await _next(ctx);
         }
         catch (InvalidOperationException ex)
         {
-            // Known user-facing conflict (like “already exists”)
             ctx.Response.StatusCode = StatusCodes.Status409Conflict;
             ctx.Response.ContentType = "application/json";
 

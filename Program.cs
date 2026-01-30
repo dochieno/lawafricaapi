@@ -248,21 +248,18 @@ builder.Services
     });
 
 // --------------------------------------------------
-// ✅ CORS (Cloudflare Pages + local dev) — FIXED ORDER USE BELOW
+// ✅ CORS (Cloudflare Pages + local dev) — DEFAULT POLICY (most reliable)
 // --------------------------------------------------
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("ViteDev", policy =>
+    options.AddDefaultPolicy(policy =>
     {
         policy.WithOrigins(
                 "http://localhost:5173",
                 "https://lawafricadigitalhub.pages.dev"
-              // Add custom domains here if/when you use them:
-              // "https://lawafrica.co.ke",
-              // "https://www.lawafrica.co.ke"
-              )
-              .AllowAnyHeader()
-              .AllowAnyMethod();
+            )
+            .AllowAnyHeader()
+            .AllowAnyMethod();
     });
 });
 
@@ -327,8 +324,6 @@ app.UseExceptionHandler(errorApp =>
 
 // --------------------------------------------------
 // ✅ STORAGE (PERSISTENT DISK READY) + deterministic GET /storage/**
-// - Uses STORAGE_ROOT if provided (Render Disk mount recommended: /var/data/Storage)
-// - Falls back to ./Storage for local dev
 // --------------------------------------------------
 var storageRoot = Environment.GetEnvironmentVariable("STORAGE_ROOT");
 if (string.IsNullOrWhiteSpace(storageRoot))
@@ -338,17 +333,14 @@ if (string.IsNullOrWhiteSpace(storageRoot))
 Directory.CreateDirectory(storageRoot);
 app.Logger.LogInformation("Storage root: {StorageRoot}", storageRoot);
 
-// Default wwwroot (harmless if no wwwroot)
 app.UseStaticFiles();
 
-// Static mapping (keep)
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(storageRoot),
     RequestPath = "/storage"
 });
 
-// ✅ Hard guarantee: GET /storage/** always serves files (prevents 405 "Method Not Allowed")
 var contentTypes = new FileExtensionContentTypeProvider();
 app.MapGet("/storage/{**filePath}", (string filePath) =>
 {
@@ -357,7 +349,6 @@ app.MapGet("/storage/{**filePath}", (string filePath) =>
 
     var clean = filePath.Replace('\\', '/').TrimStart('/');
 
-    // basic traversal protection
     if (clean.Contains(".."))
         return Results.BadRequest("Invalid path.");
 
@@ -383,22 +374,23 @@ app.UseSwaggerUI(c =>
 });
 
 // --------------------------------------------------
-// ✅ CRITICAL: Routing + CORS MUST come before custom middleware that can short-circuit requests
+// ✅ CRITICAL ORDER: Routing -> CORS -> (OPTIONS handler) -> custom middleware -> Auth
 // --------------------------------------------------
 app.UseRouting();
-app.UseCors("ViteDev");
 
-// ✅ Handle ALL preflight OPTIONS requests (ensures CORS headers exist)
-app.MapMethods("{*path}", new[] { "OPTIONS" }, () => Results.Ok())
-   .RequireCors("ViteDev");
+// ✅ Apply CORS globally (default policy)
+app.UseCors();
 
-// ✅ NOW it is safe to run your API exception middleware
+// ✅ Handle ALL preflight OPTIONS requests (global)
+app.MapMethods("{*path}", new[] { "OPTIONS" }, () => Results.Ok());
+
+// ✅ Custom middleware (can short-circuit; CORS already ran)
 app.UseMiddleware<ApiExceptionMiddleware>();
 
 app.UseAuthentication();
 app.UseAuthorization();
 
-// ✅ Paystack misconfig safety-net (root path)
+// Paystack misconfig safety-net (root path)
 app.MapGet("/return-visit", (HttpContext ctx) =>
 {
     var reference = (ctx.Request.Query["reference"].ToString() ?? "").Trim();
@@ -412,8 +404,8 @@ app.MapGet("/return-visit", (HttpContext ctx) =>
     return Results.Redirect(target);
 });
 
-// ✅ Controllers always get the CORS policy too
-app.MapControllers().RequireCors("ViteDev");
+// Controllers
+app.MapControllers();
 
 // Basic endpoints
 app.MapGet("/", () => Results.Ok(new { status = "ok", service = "LawAfrica.API" }));
@@ -447,7 +439,7 @@ if (shouldMigrate)
     catch (Exception ex)
     {
         app.Logger.LogError(ex, "Database migration failed on startup.");
-        throw; // fail fast if migrations are required
+        throw;
     }
 }
 else
