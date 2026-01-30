@@ -459,21 +459,6 @@ namespace LawAfrica.API.Controllers
             }
         }
 
-       /* [HttpGet("{id:int}/toc")]
-        public async Task<IActionResult> GetTableOfContents(int id)
-        {
-            var doc = await _db.LegalDocuments
-                .AsNoTracking()
-                .Where(d => d.Id == id)
-                .Select(d => new { d.TableOfContentsJson })
-                .FirstOrDefaultAsync();
-
-            if (doc == null)
-                return NotFound();
-
-            var tocItems = TocParser.ParseOrEmpty(doc.TableOfContentsJson);
-            return Ok(new { items = tocItems });
-        }*/
 
         [HttpGet("{id}/access")]
         [Authorize]
@@ -829,45 +814,6 @@ namespace LawAfrica.API.Controllers
                     : (hasFullAccess ? "Access granted." : $"Preview mode: first {DEFAULT_PREVIEW_MAX_PAGES} pages available.")
             });
         }
-        // ✅ Reader ToC (non-admin)
-        [Authorize]
-        [HttpGet("{id:int}/toc")]
-        public async Task<IActionResult> GetToc(
-            int id,
-            [FromServices] LegalDocumentTocService toc,
-            [FromServices] DocumentEntitlementService entitlementService)
-        {
-            var doc = await _db.LegalDocuments
-                .AsNoTracking()
-                .FirstOrDefaultAsync(d => d.Id == id && d.Status == LegalDocumentStatus.Published);
-
-            if (doc == null) return NotFound(new { message = "Document not found." });
-
-            var userId = User.GetUserId();
-            var decision = await entitlementService.GetEntitlementDecisionAsync(userId, doc);
-
-            if (!decision.IsAllowed &&
-                (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
-                 decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded))
-            {
-                return StatusCode(403, new
-                {
-                    message = decision.Message ?? "Access blocked.",
-                    denyReason = decision.DenyReason.ToString(),
-                    source = "READER_TOC_V2_BLOCK"
-                });
-            }
-
-            var tree = await toc.GetTreeAsync(id, includeAdminFields: false);
-
-            return Ok(new
-            {
-                items = tree,
-                count = tree.Count,
-                source = "READER_TOC_V2_DB"
-            });
-        }
-
 
     }
 }
