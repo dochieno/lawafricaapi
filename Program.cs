@@ -6,6 +6,7 @@ using LawAfrica.API.Data;
 using LawAfrica.API.Models;
 using LawAfrica.API.Services;
 using LawAfrica.API.Services.Ai;
+using LawAfrica.API.Services.Ai.Sections;
 using LawAfrica.API.Services.Documents;
 using LawAfrica.API.Services.Emails;
 using LawAfrica.API.Services.Institutions;
@@ -205,6 +206,7 @@ builder.Services.AddSingleton<ChatClient>(_ =>
 });
 
 builder.Services.AddScoped<ILawReportSummarizer, OpenAiLawReportSummarizer>();
+builder.Services.AddScoped<ILegalDocumentSectionSummarizer, LegalDocumentSectionSummarizer>();
 builder.Services.AddScoped<ILawReportRelatedCasesService, OpenAiLawReportRelatedCasesService>();
 builder.Services.AddScoped<ILawReportContentBuilder, LawReportContentBuilder>();
 builder.Services.AddHttpClient<ILawReportFormatter, OpenAiLawReportFormatter>();
@@ -364,6 +366,7 @@ app.MapGet("/storage/{**filePath}", (string filePath) =>
     return Results.File(fullPath, contentType);
 });
 
+
 // --------------------------------------------------
 // Swagger
 // --------------------------------------------------
@@ -373,6 +376,12 @@ app.UseSwaggerUI(c =>
     c.SwaggerEndpoint("/swagger/v1/swagger.json", "LawAfrica.API v1");
     c.RoutePrefix = "swagger";
 });
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
 
 // --------------------------------------------------
 // ✅ CRITICAL ORDER: Routing -> CORS -> (OPTIONS handler) -> custom middleware -> Auth

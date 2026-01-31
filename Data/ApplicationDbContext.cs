@@ -1,6 +1,7 @@
 ﻿using LawAfrica.API;
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.Ai;
+using LawAfrica.API.Models.Ai.Sections;
 using LawAfrica.API.Models.Authorization;
 using LawAfrica.API.Models.Documents;
 using LawAfrica.API.Models.Institutions;
@@ -106,7 +107,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<InvoiceSettings> InvoiceSettings => Set<InvoiceSettings>();
     public DbSet<VatRate> VatRates => Set<VatRate>();
     public DbSet<VatRule> VatRules => Set<VatRule>();
-
+    public DbSet<AiLegalDocumentSectionSummary> AiLegalDocumentSectionSummaries => Set<AiLegalDocumentSectionSummary>();
+    public DbSet<AiDailyAiUsage> AiDailyAiUsages => Set<AiDailyAiUsage>();
 
 
     //LawReports
@@ -724,6 +726,28 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(x => new { x.SubscriptionId, x.Status });
             entity.HasIndex(x => new { x.Status, x.CreatedAt });
         });
+
+        modelBuilder.Entity<AiLegalDocumentSectionSummary>(e =>
+        {
+            e.HasIndex(x => new
+            {
+                x.UserId,
+                x.LegalDocumentId,
+                x.TocEntryId,
+                x.StartPage,
+                x.EndPage,
+                x.Type,
+                x.PromptVersion
+            })
+            .IsUnique();
+        });
+
+
+        modelBuilder.Entity<AiDailyAiUsage>(e =>
+        {
+            e.HasIndex(x => new { x.UserId, x.DayUtc, x.Feature }).IsUnique();
+        });
+
 
         // =========================================================
         // UserPresence

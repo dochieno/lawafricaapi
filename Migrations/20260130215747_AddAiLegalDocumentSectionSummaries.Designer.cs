@@ -3,6 +3,7 @@ using System;
 using LawAfrica.API.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace LawAfrica.API.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260130215747_AddAiLegalDocumentSectionSummaries")]
+    partial class AddAiLegalDocumentSectionSummaries
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -102,39 +105,6 @@ namespace LawAfrica.API.Migrations
                     b.ToTable("AiUsages");
                 });
 
-            modelBuilder.Entity("LawAfrica.API.Models.Ai.Sections.AiDailyAiUsage", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<DateTime>("DayUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Feature")
-                        .IsRequired()
-                        .HasMaxLength(60)
-                        .HasColumnType("character varying(60)");
-
-                    b.Property<int>("Requests")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("UserId")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("UserId", "DayUtc", "Feature")
-                        .IsUnique();
-
-                    b.ToTable("AiDailyAiUsage");
-                });
-
             modelBuilder.Entity("LawAfrica.API.Models.Ai.Sections.AiLegalDocumentSectionSummary", b =>
                 {
                     b.Property<int>("Id")
@@ -164,7 +134,7 @@ namespace LawAfrica.API.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<int?>("TocEntryId")
+                    b.Property<int>("TocEntryId")
                         .HasColumnType("integer");
 
                     b.Property<int?>("TokensIn")
