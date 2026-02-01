@@ -34,7 +34,7 @@ namespace LawAfrica.API.Services.Documents.Indexing
         public PdfPigLegalDocumentTextIndexer(ApplicationDbContext db)
         {
             _db = db;
-            _storageRoot = Environment.GetEnvironmentVariable("DOCUMENT_STORAGE_ROOT") ?? "";
+            _storageRoot = Environment.GetEnvironmentVariable("STORAGE_ROOT") ?? "";
         }
 
         public async Task<IndexResult> IndexAsync(int legalDocumentId, bool force, CancellationToken ct)
@@ -62,37 +62,52 @@ namespace LawAfrica.API.Services.Documents.Indexing
                 };
             }
 
-            // If already indexed and not forcing, skip (you can refine this later with FileHashSha256 checks)
+            // If already indexed AND we actually have page text rows, skip (unless forcing)
             if (!force && doc.LastIndexedAt.HasValue)
             {
-                return new IndexResult
+                var existingCount = await _db.LegalDocumentPageTexts
+                    .CountAsync(x => x.LegalDocumentId == legalDocumentId, ct);
+
+                if (existingCount > 0)
                 {
-                    LegalDocumentId = legalDocumentId,
-                    Skipped = true,
-                    SkipReason = $"Already indexed at {doc.LastIndexedAt:O}."
-                };
+                    return new IndexResult
+                    {
+                        LegalDocumentId = legalDocumentId,
+                        Skipped = true,
+                        SkipReason = $"Already indexed at {doc.LastIndexedAt:O} (pageTextRows={existingCount})."
+                    };
+                }
+                // else: LastIndexedAt is set but rows are missing → proceed to rebuild.
             }
 
-            var path = ResolvePath(doc.FilePath);
-            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            var resolved = ResolvePath(doc.FilePath);
+
+            if (string.IsNullOrWhiteSpace(resolved) || !File.Exists(resolved))
             {
                 return new IndexResult
                 {
                     LegalDocumentId = legalDocumentId,
                     Skipped = true,
-                    SkipReason = "PDF file not found on server storage (FilePath)."
+                    SkipReason = $"PDF file not found on server storage (FilePath). ResolvedPath='{resolved ?? ""}'."
                 };
             }
 
-            // Extract
-            using var pdf = PdfDocument.Open(path);
+            // If forcing, wipe existing extracted pages first (clean rebuild)
+            if (force)
+            {
+                await _db.LegalDocumentPageTexts
+                    .Where(x => x.LegalDocumentId == legalDocumentId)
+                    .ExecuteDeleteAsync(ct);
+            }
+
+            using var pdf = PdfDocument.Open(resolved);
 
             var total = pdf.NumberOfPages;
             var pagesIndexed = 0;
             var pagesEmpty = 0;
             var emptyPages = new List<int>();
 
-            // Optional: pre-load existing page rows for quick upsert
+            // Pre-load existing page rows for quick upsert (when not force)
             var existing = await _db.LegalDocumentPageTexts
                 .Where(x => x.LegalDocumentId == legalDocumentId)
                 .ToDictionaryAsync(x => x.PageNumber, ct);
@@ -110,13 +125,11 @@ namespace LawAfrica.API.Services.Documents.Indexing
                 {
                     pagesEmpty++;
                     emptyPages.Add(p);
-                    // still store empty? recommended: yes, to mark it processed
-                    normalized = string.Empty;
+                    normalized = string.Empty; // still mark page as processed
                 }
 
                 if (existing.TryGetValue(p, out var row))
                 {
-                    // Only update if changed (reduces churn)
                     if (!string.Equals(row.Text, normalized, StringComparison.Ordinal))
                     {
                         row.Text = normalized;
@@ -164,20 +177,45 @@ namespace LawAfrica.API.Services.Documents.Indexing
         {
             if (string.IsNullOrWhiteSpace(filePath)) return filePath;
 
-            // If already absolute
-            if (Path.IsPathRooted(filePath)) return filePath;
+            // Normalize slashes
+            var fp = filePath.Trim().Replace('\\', '/');
 
-            // Otherwise join with configured root
-            if (string.IsNullOrWhiteSpace(_storageRoot)) return filePath;
+            // Absolute path: use as-is
+            if (Path.IsPathRooted(fp)) return fp;
 
-            return Path.Combine(_storageRoot, filePath.TrimStart('/', '\\'));
+            // If filePath begins with "Storage/", strip it when combining with STORAGE_ROOT that already points to ".../Storage"
+            // Example:
+            //   STORAGE_ROOT = "/app/Storage"
+            //   FilePath     = "Storage/LegalDocuments/x.pdf"
+            // We want:
+            //   "/app/Storage/LegalDocuments/x.pdf"  (not "/app/Storage/Storage/...")
+            if (fp.StartsWith("storage/", StringComparison.OrdinalIgnoreCase))
+            {
+                fp = fp.Substring("storage/".Length);
+            }
+
+            // Prefer STORAGE_ROOT when set
+            if (!string.IsNullOrWhiteSpace(_storageRoot))
+            {
+                var root = _storageRoot.Trim().Replace('\\', '/').TrimEnd('/');
+
+                // If root itself ends with "/Storage" and fp still starts with "Storage/", strip again (extra safety)
+                if (fp.StartsWith("storage/", StringComparison.OrdinalIgnoreCase))
+                {
+                    fp = fp.Substring("storage/".Length);
+                }
+
+                return Path.Combine(root, fp.Replace('/', Path.DirectorySeparatorChar));
+            }
+
+            // Fallback: combine with current directory
+            return Path.Combine(Directory.GetCurrentDirectory(), fp.Replace('/', Path.DirectorySeparatorChar));
         }
 
         private static string NormalizeText(string input)
         {
             if (string.IsNullOrWhiteSpace(input)) return string.Empty;
 
-            // Keep it simple: trim + collapse repeated whitespace a bit
             var sb = new StringBuilder(input.Length);
             bool lastWasWs = false;
 
