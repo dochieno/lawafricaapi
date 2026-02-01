@@ -37,19 +37,54 @@ namespace LawAfrica.API.Services.Ai.Sections
                 ? "basic"
                 : request.Type.Trim().ToLowerInvariant();
 
-            // ✅ Capture requested pages (raw)
-            var requestedStart = request.StartPage;
-            var requestedEnd = request.EndPage;
+            // ✅ Raw request pages (nullable now)
+            var rawRequestedStart = request.StartPage; // int?
+            var rawRequestedEnd = request.EndPage;     // int?
 
-            // ✅ Normalize + clamp range (backend is final authority)
-            var (startPage, endPage, warnings) = NormalizeAndClampRange(
+            // ✅ What we will actually normalize/clamp (may come from ToC)
+            int? requestedStart = rawRequestedStart;
+            int? requestedEnd = rawRequestedEnd;
+
+            var tocId = request.TocEntryId; // int? (optional)
+            var warnings = new List<string>();
+
+            // ✅ If ToC entry is provided, resolve pages from DB (preferred path)
+            if (tocId.HasValue && tocId.Value > 0)
+            {
+                var (tocStart, tocEnd, tocWarn) = await TryResolveRangeFromTocAsync(
+                    request.LegalDocumentId,
+                    tocId.Value,
+                    ct);
+
+                if (tocWarn != null) warnings.Add(tocWarn);
+
+                if (tocStart.HasValue)
+                {
+                    requestedStart = tocStart;
+                    requestedEnd = tocEnd ?? tocStart;
+                    warnings.Add("Page range was resolved from ToC entry.");
+                }
+                else
+                {
+                    // If ToC lookup fails, we fallback to any provided pages (if any)
+                    warnings.Add("Could not resolve pages from ToC entry; falling back to request pages if provided.");
+                }
+            }
+
+            // ✅ Normalize + clamp (backend is final authority)
+            var (startPage, endPage, clampWarnings) = NormalizeAndClampRange(
                 requestedStart,
                 requestedEnd,
                 type,
                 GetMaxPdfPagesFallback()
             );
 
-            var tocId = request.TocEntryId; // int? (optional)
+            // Merge warnings (ToC + clamp)
+            warnings.AddRange(clampWarnings);
+
+            // ✅ For response: keep "raw request" as what client sent (or 0 when missing)
+            var responseRequestedStart = rawRequestedStart ?? 0;
+            var responseRequestedEnd = rawRequestedEnd ?? 0;
 
             // 1) Cache lookup (unless force)
             if (!request.ForceRegenerate)
@@ -75,8 +110,8 @@ namespace LawAfrica.API.Services.Ai.Sections
                         TocEntryId = tocId,
                         Type = type,
 
-                        RequestedStartPage = requestedStart,
-                        RequestedEndPage = requestedEnd,
+                        RequestedStartPage = responseRequestedStart,
+                        RequestedEndPage = responseRequestedEnd,
 
                         StartPage = startPage,
                         EndPage = endPage,
@@ -84,9 +119,7 @@ namespace LawAfrica.API.Services.Ai.Sections
                         Summary = cached.Summary,
                         FromCache = true,
 
-                        // ✅ we can’t know exact char count without extracting again,
-                        // but to keep it cheap we leave 0 on cached responses for now.
-                        // In Step 4 we can store char count in cache if you want.
+                        // cheap on cache hit (optional upgrade later: store this in cache table)
                         InputCharCount = 0,
 
                         Warnings = warnings,
@@ -137,8 +170,8 @@ namespace LawAfrica.API.Services.Ai.Sections
                     TocEntryId = tocId,
                     Type = type,
 
-                    RequestedStartPage = requestedStart,
-                    RequestedEndPage = requestedEnd,
+                    RequestedStartPage = responseRequestedStart,
+                    RequestedEndPage = responseRequestedEnd,
 
                     StartPage = startPage,
                     EndPage = endPage,
@@ -151,7 +184,7 @@ namespace LawAfrica.API.Services.Ai.Sections
                 };
             }
 
-            // 4) Still stub output for now (OpenAI comes in Step 3)
+            // 4) Still stub output for now (OpenAI comes later)
             var output =
                 $"[stub/{type}] Summary for doc #{request.LegalDocumentId}, toc #{tocId?.ToString() ?? "—"}, pages {startPage}-{endPage}. " +
                 $"(input chars: {extraction.CharCount})";
@@ -172,8 +205,8 @@ namespace LawAfrica.API.Services.Ai.Sections
                 TocEntryId = tocId,
                 Type = type,
 
-                RequestedStartPage = requestedStart,
-                RequestedEndPage = requestedEnd,
+                RequestedStartPage = responseRequestedStart,
+                RequestedEndPage = responseRequestedEnd,
 
                 StartPage = startPage,
                 EndPage = endPage,
@@ -184,6 +217,44 @@ namespace LawAfrica.API.Services.Ai.Sections
                 Warnings = warnings,
                 GeneratedAt = DateTime.UtcNow
             };
+        }
+
+        /// <summary>
+        /// ✅ Resolve pages from ToC entry.
+        /// IMPORTANT: rename DbSet/property names here to match your ToC table.
+        /// </summary>
+        private async Task<(int? start, int? end, string? warning)> TryResolveRangeFromTocAsync(
+            int legalDocumentId,
+            int tocEntryId,
+            CancellationToken ct)
+        {
+            // 🔁 Rename this DbSet to match your real ToC table:
+            // e.g. _db.LegalDocumentTocEntries / _db.TocEntries / _db.LegalDocumentOutlineEntries ...
+            var toc = await _db.LegalDocumentTocEntries
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x =>
+                    x.LegalDocumentId == legalDocumentId &&
+                    x.Id == tocEntryId,
+                    ct);
+
+            if (toc == null)
+                return (null, null, "ToC entry was not found for this document.");
+
+            // ✅ Adjust property names to match your model:
+            // e.g. toc.StartPage / toc.EndPage
+            var start = (int?)toc.StartPage;
+            var end = (int?)toc.EndPage;
+
+            if (!start.HasValue || start.Value <= 0)
+                return (null, null, "ToC entry has no StartPage mapping.");
+
+            if (!end.HasValue || end.Value <= 0)
+                end = start;
+
+            if (end.Value < start.Value)
+                (start, end) = (end, start);
+
+            return (start, end, null);
         }
 
         private async Task UpsertCacheAsync(
@@ -235,35 +306,36 @@ namespace LawAfrica.API.Services.Ai.Sections
 
         /// <summary>
         /// ✅ Strong normalization that never throws and always returns a safe effective range.
+        /// Now supports nullable requestedStart/requestedEnd.
         /// </summary>
         private static (int start, int end, List<string> warnings) NormalizeAndClampRange(
-            int requestedStart,
-            int requestedEnd,
+            int? requestedStart,
+            int? requestedEnd,
             string type,
             int maxPdfPages)
         {
             var warnings = new List<string>();
 
             // Defensive defaults
-            var start = requestedStart;
-            var end = requestedEnd;
+            var start = requestedStart ?? 0;
+            var end = requestedEnd ?? 0;
 
             if (start <= 0)
             {
                 start = 1;
-                warnings.Add("StartPage was <= 0 and was set to 1.");
+                warnings.Add("StartPage was missing/invalid and was set to 1.");
             }
 
             if (end <= 0)
             {
                 end = start;
-                warnings.Add("EndPage was <= 0 and was set to StartPage.");
+                warnings.Add("EndPage was missing/invalid and was set to StartPage.");
             }
 
             if (end < start)
             {
                 (start, end) = (end, start);
-                if (start <= 0) start = 1; // keep safe even if both were bad
+                if (start <= 0) start = 1;
                 warnings.Add("EndPage was < StartPage; values were swapped.");
             }
 
@@ -306,13 +378,8 @@ namespace LawAfrica.API.Services.Ai.Sections
             return (start, end, warnings);
         }
 
-        /// <summary>
-        /// For now we use a safe fallback bound.
-        /// Later you can replace this with the real PDF page count lookup if/when you store it.
-        /// </summary>
         private static int GetMaxPdfPagesFallback()
         {
-            // Optional env override
             var raw = Environment.GetEnvironmentVariable("AI_PDF_MAX_PAGES");
             return int.TryParse(raw, out var n) && n > 0 ? n : DEFAULT_MAX_PDF_PAGES_FALLBACK;
         }

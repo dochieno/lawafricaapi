@@ -35,18 +35,45 @@ namespace LawAfrica.API.Controllers.Ai
             if (request.LegalDocumentId <= 0)
                 return BadRequest(new { message = "LegalDocumentId must be a positive integer." });
 
-            // TocEntryId is optional (nullable) in your DTO. If provided, it must be > 0.
+            // TocEntryId optional but if provided must be > 0
             if (request.TocEntryId.HasValue && request.TocEntryId.Value <= 0)
                 return BadRequest(new { message = "TocEntryId must be a positive integer when provided." });
 
-            if (request.StartPage <= 0)
-                return BadRequest(new { message = "StartPage must be >= 1." });
+            var type = (request.Type ?? "basic").Trim().ToLowerInvariant();
+            if (type != "basic" && type != "extended")
+                return BadRequest(new { message = "Type must be 'basic' or 'extended'." });
 
-            if (request.EndPage <= 0)
-                return BadRequest(new { message = "EndPage must be >= 1." });
+            // ✅ Validation rule:
+            // - If TocEntryId is provided: pages optional (backend resolves from ToC)
+            // - If TocEntryId is NOT provided: StartPage + EndPage required
+            var hasToc = request.TocEntryId.HasValue && request.TocEntryId.Value > 0;
 
-            if (request.EndPage < request.StartPage)
-                return BadRequest(new { message = "EndPage must be >= StartPage." });
+            if (!hasToc)
+            {
+                if (!request.StartPage.HasValue || request.StartPage.Value <= 0)
+                    return BadRequest(new { message = "StartPage must be >= 1 when TocEntryId is not provided." });
+
+                if (!request.EndPage.HasValue || request.EndPage.Value <= 0)
+                    return BadRequest(new { message = "EndPage must be >= 1 when TocEntryId is not provided." });
+
+                if (request.EndPage.Value < request.StartPage.Value)
+                    return BadRequest(new { message = "EndPage must be >= StartPage." });
+            }
+            else
+            {
+                // If client did send pages anyway, validate them consistently (optional but nice)
+                if (request.StartPage.HasValue && request.StartPage.Value <= 0)
+                    return BadRequest(new { message = "StartPage must be >= 1 when provided." });
+
+                if (request.EndPage.HasValue && request.EndPage.Value <= 0)
+                    return BadRequest(new { message = "EndPage must be >= 1 when provided." });
+
+                if (request.StartPage.HasValue && request.EndPage.HasValue && request.EndPage.Value < request.StartPage.Value)
+                    return BadRequest(new { message = "EndPage must be >= StartPage." });
+            }
+
+            // normalize back (so downstream uses consistent Type)
+            request.Type = type;
 
             var userId = GetUserIdIntOrThrow();
 
@@ -57,8 +84,6 @@ namespace LawAfrica.API.Controllers.Ai
             }
             catch (InvalidOperationException ex)
             {
-                // quota exceeded / business guardrails
-                // return 429 to mirror "limit reached" semantics used elsewhere
                 return StatusCode(429, new { message = ex.Message });
             }
             catch (Exception ex)
@@ -74,7 +99,6 @@ namespace LawAfrica.API.Controllers.Ai
 
         private int GetUserIdIntOrThrow()
         {
-            // Works with Identity/JWT; fallback to "sub" / "userId" if needed
             var raw =
                 User.FindFirstValue(ClaimTypes.NameIdentifier) ??
                 User.FindFirstValue("sub") ??
