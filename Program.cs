@@ -8,6 +8,7 @@ using LawAfrica.API.Services;
 using LawAfrica.API.Services.Ai;
 using LawAfrica.API.Services.Ai.Sections;
 using LawAfrica.API.Services.Documents;
+using LawAfrica.API.Services.Documents.Indexing;
 using LawAfrica.API.Services.Emails;
 using LawAfrica.API.Services.Institutions;
 using LawAfrica.API.Services.LawReportsContent;
@@ -205,6 +206,9 @@ builder.Services.AddSingleton<ChatClient>(_ =>
     return new ChatClient(model: model, apiKey: apiKey);
 });
 
+builder.Services.AddSingleton<ILegalDocumentIndexingQueue, LegalDocumentIndexingQueue>();
+builder.Services.AddScoped<ILegalDocumentTextIndexer, PdfPigLegalDocumentTextIndexer>();
+builder.Services.AddHostedService<LegalDocumentIndexingWorker>();
 builder.Services.AddScoped<ILawReportSummarizer, OpenAiLawReportSummarizer>();
 builder.Services.AddScoped<ISectionTextExtractor, SectionTextExtractor>();
 builder.Services.AddScoped<ILegalDocumentSectionSummarizer, LegalDocumentSectionSummarizer>();
