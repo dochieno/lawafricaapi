@@ -487,17 +487,80 @@ namespace LawAfrica.API.Services
             await _emailService.SendEmailAsync(user.Email, rendered.Subject ?? subject, rendered.Html);
         }
 
-        // =========================================================
-        // Password reset email (unchanged)
-        // =========================================================
+        //Send Email.
         private async Task SendPasswordResetEmail(User user)
         {
-            if (string.IsNullOrWhiteSpace(user.Email))
-                return;
+            if (user == null) return;
 
-            var appUrl = (_configuration["AppUrl"] ?? "").Trim().TrimEnd('/');
-            var token = user.PasswordResetToken ?? string.Empty;
-            var resetUrl = $"{appUrl}/api/auth/reset-password?token={Uri.EscapeDataString(token)}";
+            var email = (user.Email ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(email)) return;
+
+            var token = (user.PasswordResetToken ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(token)) return;
+
+            // ------------------------------------------------------------
+            // Build ABSOLUTE reset URL
+            // Priority:
+            // 1) FrontendResetPasswordUrl (direct web reset page)
+            // 2) AppUrl + /api/Auth/reset-password (API redirect endpoint)
+            // 3) FrontendUrl/FrontendBaseUrl + /reset-password (fallback)
+            // ------------------------------------------------------------
+            var frontendResetUrl = (_configuration["FrontendResetPasswordUrl"] ?? "").Trim();
+            var appUrl = (_configuration["AppUrl"] ?? "").Trim();
+            var frontendUrl = (_configuration["FrontendUrl"] ?? "").Trim();
+            var frontendBaseUrl = (_configuration["FrontendBaseUrl"] ?? "").Trim();
+
+            static string EnsureNoTrailingSlash(string s) => (s ?? "").Trim().TrimEnd('/');
+            static string EnsureLeadingSlash(string s)
+            {
+                s = (s ?? "").Trim();
+                if (string.IsNullOrEmpty(s)) return "/";
+                return s.StartsWith("/") ? s : "/" + s;
+            }
+
+            static string AddToken(string baseUrl, string token)
+            {
+                baseUrl = (baseUrl ?? "").Trim();
+                var sep = baseUrl.Contains("?") ? "&" : "?";
+                return $"{baseUrl}{sep}token={Uri.EscapeDataString(token)}";
+            }
+
+            static bool LooksAbsoluteUrl(string s)
+            {
+                if (string.IsNullOrWhiteSpace(s)) return false;
+                return Uri.TryCreate(s, UriKind.Absolute, out var u)
+                       && (u.Scheme == Uri.UriSchemeHttp || u.Scheme == Uri.UriSchemeHttps);
+            }
+
+            string resetUrl;
+
+            if (!string.IsNullOrWhiteSpace(frontendResetUrl) && LooksAbsoluteUrl(frontendResetUrl))
+            {
+                // e.g. https://lawafrica.co.ke/reset-password
+                resetUrl = AddToken(frontendResetUrl.TrimEnd('/'), token);
+            }
+            else if (!string.IsNullOrWhiteSpace(appUrl) && LooksAbsoluteUrl(appUrl))
+            {
+                // e.g. https://lawafricaapi.onrender.com/api/Auth/reset-password?token=...
+                var baseApi = EnsureNoTrailingSlash(appUrl) + "/api/Auth/reset-password";
+                resetUrl = AddToken(baseApi, token);
+            }
+            else
+            {
+                // last resort: frontendUrl / frontendBaseUrl
+                var baseUrl = !string.IsNullOrWhiteSpace(frontendUrl) ? frontendUrl : frontendBaseUrl;
+
+                if (!string.IsNullOrWhiteSpace(baseUrl) && LooksAbsoluteUrl(baseUrl))
+                {
+                    var url = EnsureNoTrailingSlash(baseUrl) + EnsureLeadingSlash("reset-password");
+                    resetUrl = AddToken(url, token);
+                }
+                else
+                {
+                    // cannot build absolute URL; still provide token (not ideal, but better than nothing)
+                    resetUrl = $"Token: {token}";
+                }
+            }
 
             var subject = "Reset your LawAfrica password";
 
@@ -511,7 +574,6 @@ namespace LawAfrica.API.Services
                     ProductName = "LawAfrica",
                     Year = DateTime.UtcNow.Year.ToString(),
                     SupportEmail = "support@lawafrica.com",
-
                     DisplayName = (user.FirstName ?? user.Username),
                     ResetUrl = resetUrl
                 },
@@ -519,15 +581,33 @@ namespace LawAfrica.API.Services
                 ct: CancellationToken.None
             );
 
-            await _emailService.SendEmailAsync(user.Email, rendered.Subject ?? subject, rendered.Html);
+            await _emailService.SendEmailAsync(
+                email,
+                rendered.Subject ?? subject,
+                rendered.Html
+            );
         }
+
 
         public async Task<bool> RequestPasswordResetAsync(string email)
         {
-            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email);
-            if (user == null)
-                return true;
+            email = (email ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(email))
+                return true; // do not reveal anything
 
+            // ✅ normalize lookup (case-insensitive + trimmed)
+            var emailLower = email.ToLowerInvariant();
+
+            var user = await _db.Users
+                .FirstOrDefaultAsync(u =>
+                    u.Email != null &&
+                    u.Email.Trim().ToLower() == emailLower
+                );
+
+            if (user == null)
+                return true; // do not reveal anything
+
+            // ✅ generate new token (keep as-is to avoid DB changes)
             var tokenBytes = RandomNumberGenerator.GetBytes(64);
             var token = Convert.ToBase64String(tokenBytes);
 
@@ -536,6 +616,8 @@ namespace LawAfrica.API.Services
             user.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync();
+
+            // fire-and-forget is tempting but DON'T: you want failures to be visible in logs
             await SendPasswordResetEmail(user);
 
             return true;
