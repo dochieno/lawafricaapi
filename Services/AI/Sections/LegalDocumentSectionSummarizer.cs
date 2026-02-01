@@ -8,6 +8,7 @@ namespace LawAfrica.API.Services.Ai.Sections
     public class LegalDocumentSectionSummarizer : ILegalDocumentSectionSummarizer
     {
         private readonly ApplicationDbContext _db;
+        private readonly ISectionTextExtractor _textExtractor;
 
         // Bump when prompt changes
         private const string PROMPT_VERSION = "v1";
@@ -20,9 +21,10 @@ namespace LawAfrica.API.Services.Ai.Sections
         private const int BASIC_MAX_SPAN_PAGES = 6;      // inclusive span
         private const int EXTENDED_MAX_SPAN_PAGES = 12;  // inclusive span
 
-        public LegalDocumentSectionSummarizer(ApplicationDbContext db)
+        public LegalDocumentSectionSummarizer(ApplicationDbContext db, ISectionTextExtractor textExtractor)
         {
             _db = db;
+            _textExtractor = textExtractor;
         }
 
         public async Task<SectionSummaryResponseDto> SummarizeAsync(
@@ -81,7 +83,12 @@ namespace LawAfrica.API.Services.Ai.Sections
 
                         Summary = cached.Summary,
                         FromCache = true,
-                        InputCharCount = 0, // filled later once we extract text
+
+                        // ✅ we can’t know exact char count without extracting again,
+                        // but to keep it cheap we leave 0 on cached responses for now.
+                        // In Step 4 we can store char count in cache if you want.
+                        InputCharCount = 0,
+
                         Warnings = warnings,
                         GeneratedAt = cached.CreatedAt
                     };
@@ -91,47 +98,73 @@ namespace LawAfrica.API.Services.Ai.Sections
             // 2) Quota guardrail (only if not cached)
             await EnforceAndIncrementQuotaAsync(userId, ct);
 
-            // 3) Generate summary (still stub for now)
-            // Next step we’ll replace this with: extract text -> OpenAI -> summary.
-            var output =
-                $"[stub/{type}] Summary for doc #{request.LegalDocumentId}, toc #{tocId?.ToString() ?? "—"}, pages {startPage}-{endPage}.";
+            // 3) Extract stored text for pages (DB)
+            var extraction = await _textExtractor.ExtractAsync(
+                request.LegalDocumentId,
+                startPage,
+                endPage,
+                ct);
 
-            // 4) Upsert cache row (keyed by SAFE effective pages)
-            var existing = await _db.AiLegalDocumentSectionSummaries
-                .Where(x =>
-                    x.UserId == userId &&
-                    x.LegalDocumentId == request.LegalDocumentId &&
-                    x.TocEntryId == tocId &&
-                    x.StartPage == startPage &&
-                    x.EndPage == endPage &&
-                    x.Type == type &&
-                    x.PromptVersion == PROMPT_VERSION)
-                .FirstOrDefaultAsync(ct);
-
-            if (existing == null)
+            // Add warnings for missing pages (cap list so it doesn’t explode)
+            if (extraction.MissingPages.Count > 0)
             {
-                existing = new AiLegalDocumentSectionSummary
+                var cap = 30;
+                var shown = extraction.MissingPages.Take(cap).ToList();
+                var suffix = extraction.MissingPages.Count > cap ? $" … (+{extraction.MissingPages.Count - cap} more)" : "";
+                warnings.Add($"Missing stored text for pages: {string.Join(", ", shown)}{suffix}.");
+            }
+
+            // If empty text, return safe message and cache it
+            if (string.IsNullOrWhiteSpace(extraction.Text))
+            {
+                warnings.Add("No extracted text was found for this section. Index the document text to enable summaries.");
+
+                var emptyOutput = "No content was found for this section.";
+
+                await UpsertCacheAsync(
+                    userId,
+                    request.LegalDocumentId,
+                    tocId,
+                    startPage,
+                    endPage,
+                    type,
+                    emptyOutput,
+                    ct);
+
+                return new SectionSummaryResponseDto
                 {
-                    UserId = userId,
                     LegalDocumentId = request.LegalDocumentId,
                     TocEntryId = tocId,
+                    Type = type,
+
+                    RequestedStartPage = requestedStart,
+                    RequestedEndPage = requestedEnd,
+
                     StartPage = startPage,
                     EndPage = endPage,
-                    Type = type,
-                    PromptVersion = PROMPT_VERSION,
-                    Summary = output,
-                    CreatedAt = DateTime.UtcNow
+
+                    Summary = emptyOutput,
+                    FromCache = false,
+                    InputCharCount = 0,
+                    Warnings = warnings,
+                    GeneratedAt = DateTime.UtcNow
                 };
-
-                _db.AiLegalDocumentSectionSummaries.Add(existing);
-            }
-            else
-            {
-                existing.Summary = output;
-                existing.UpdatedAt = DateTime.UtcNow;
             }
 
-            await _db.SaveChangesAsync(ct);
+            // 4) Still stub output for now (OpenAI comes in Step 3)
+            var output =
+                $"[stub/{type}] Summary for doc #{request.LegalDocumentId}, toc #{tocId?.ToString() ?? "—"}, pages {startPage}-{endPage}. " +
+                $"(input chars: {extraction.CharCount})";
+
+            await UpsertCacheAsync(
+                userId,
+                request.LegalDocumentId,
+                tocId,
+                startPage,
+                endPage,
+                type,
+                output,
+                ct);
 
             return new SectionSummaryResponseDto
             {
@@ -147,10 +180,57 @@ namespace LawAfrica.API.Services.Ai.Sections
 
                 Summary = output,
                 FromCache = false,
-                InputCharCount = 0, // filled later once we extract text
+                InputCharCount = extraction.CharCount,
                 Warnings = warnings,
                 GeneratedAt = DateTime.UtcNow
             };
+        }
+
+        private async Task UpsertCacheAsync(
+            int userId,
+            int legalDocumentId,
+            int? tocId,
+            int startPage,
+            int endPage,
+            string type,
+            string summary,
+            CancellationToken ct)
+        {
+            var existing = await _db.AiLegalDocumentSectionSummaries
+                .Where(x =>
+                    x.UserId == userId &&
+                    x.LegalDocumentId == legalDocumentId &&
+                    x.TocEntryId == tocId &&
+                    x.StartPage == startPage &&
+                    x.EndPage == endPage &&
+                    x.Type == type &&
+                    x.PromptVersion == PROMPT_VERSION)
+                .FirstOrDefaultAsync(ct);
+
+            if (existing == null)
+            {
+                existing = new AiLegalDocumentSectionSummary
+                {
+                    UserId = userId,
+                    LegalDocumentId = legalDocumentId,
+                    TocEntryId = tocId,
+                    StartPage = startPage,
+                    EndPage = endPage,
+                    Type = type,
+                    PromptVersion = PROMPT_VERSION,
+                    Summary = summary,
+                    CreatedAt = DateTime.UtcNow
+                };
+
+                _db.AiLegalDocumentSectionSummaries.Add(existing);
+            }
+            else
+            {
+                existing.Summary = summary;
+                existing.UpdatedAt = DateTime.UtcNow;
+            }
+
+            await _db.SaveChangesAsync(ct);
         }
 
         /// <summary>

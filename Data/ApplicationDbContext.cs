@@ -89,6 +89,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<InstitutionSubscriptionAudit> InstitutionSubscriptionAudits => Set<InstitutionSubscriptionAudit>();
     public DbSet<ContentProductLegalDocument> ContentProductLegalDocuments { get; set; } = null!;
     public DbSet<LegalDocumentTocEntry> LegalDocumentTocEntries => Set<LegalDocumentTocEntry>();
+    public DbSet<LegalDocumentPageText> LegalDocumentPageTexts { get; set; } = null!;
+
     public DbSet<UserLegalDocumentPurchase> UserLegalDocumentPurchases { get; set; } = null!;
     public DbSet<AdminPermission> AdminPermissions => Set<AdminPermission>();
     public DbSet<UserAdminPermission> UserAdminPermissions => Set<UserAdminPermission>();
@@ -258,6 +260,11 @@ public class ApplicationDbContext : DbContext
                     .HasForeignKey<LawReportContentJsonCache>(x => x.LawReportId)
                     .OnDelete(DeleteBehavior.Cascade);
             });
+
+        modelBuilder.Entity<LegalDocumentPageText>()
+                    .HasIndex(x => new { x.LegalDocumentId, x.PageNumber })
+                    .IsUnique();
+
 
         modelBuilder.Entity<RegistrationResumeOtp>(b =>
         {

@@ -206,6 +206,7 @@ builder.Services.AddSingleton<ChatClient>(_ =>
 });
 
 builder.Services.AddScoped<ILawReportSummarizer, OpenAiLawReportSummarizer>();
+builder.Services.AddScoped<ISectionTextExtractor, SectionTextExtractor>();
 builder.Services.AddScoped<ILegalDocumentSectionSummarizer, LegalDocumentSectionSummarizer>();
 builder.Services.AddScoped<ILawReportRelatedCasesService, OpenAiLawReportRelatedCasesService>();
 builder.Services.AddScoped<ILawReportContentBuilder, LawReportContentBuilder>();
