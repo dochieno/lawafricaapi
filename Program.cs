@@ -195,16 +195,19 @@ builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
 // --------------------------------------------------
 // OpenAI / AI
 // --------------------------------------------------
-builder.Services.AddSingleton<ChatClient>(_ =>
+builder.Services.AddSingleton<ChatClient>(sp =>
 {
-    var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-    var model = Environment.GetEnvironmentVariable("AI_MODEL") ?? "gpt-4o-mini";
+    var config = sp.GetRequiredService<IConfiguration>();
+
+    var apiKey = config["OPENAI_API_KEY"];
+    var model = config["AI_MODEL"] ?? "gpt-4o-mini";
 
     if (string.IsNullOrWhiteSpace(apiKey))
         throw new InvalidOperationException("OPENAI_API_KEY is missing. Add it to Render env vars.");
 
     return new ChatClient(model: model, apiKey: apiKey);
 });
+
 
 builder.Services.AddSingleton<ILegalDocumentIndexingQueue, LegalDocumentIndexingQueue>();
 builder.Services.AddScoped<ILegalDocumentTextIndexer, PdfPigLegalDocumentTextIndexer>();

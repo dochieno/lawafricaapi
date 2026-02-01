@@ -2,6 +2,7 @@
 using LawAfrica.API.Models.Ai.Sections;
 using LawAfrica.API.Models.DTOs.Ai.Sections;
 using Microsoft.EntityFrameworkCore;
+using OpenAI.Chat;
 
 namespace LawAfrica.API.Services.Ai.Sections
 {
@@ -9,6 +10,8 @@ namespace LawAfrica.API.Services.Ai.Sections
     {
         private readonly ApplicationDbContext _db;
         private readonly ISectionTextExtractor _textExtractor;
+        private readonly ChatClient _chatClient;
+        private readonly IConfiguration _config;
 
         // Bump when prompt changes
         private const string PROMPT_VERSION = "v1";
@@ -21,10 +24,16 @@ namespace LawAfrica.API.Services.Ai.Sections
         private const int BASIC_MAX_SPAN_PAGES = 6;      // inclusive span
         private const int EXTENDED_MAX_SPAN_PAGES = 12;  // inclusive span
 
-        public LegalDocumentSectionSummarizer(ApplicationDbContext db, ISectionTextExtractor textExtractor)
+        public LegalDocumentSectionSummarizer(
+            ApplicationDbContext db,
+            ISectionTextExtractor textExtractor,
+            ChatClient chatClient,
+            IConfiguration config)
         {
             _db = db;
             _textExtractor = textExtractor;
+            _chatClient = chatClient;
+            _config = config;
         }
 
         public async Task<SectionSummaryResponseDto> SummarizeAsync(
@@ -56,7 +65,8 @@ namespace LawAfrica.API.Services.Ai.Sections
                     tocId.Value,
                     ct);
 
-                if (tocWarn != null) warnings.Add(tocWarn);
+                if (!string.IsNullOrWhiteSpace(tocWarn))
+                    warnings.Add(tocWarn);
 
                 if (tocStart.HasValue)
                 {
@@ -66,7 +76,6 @@ namespace LawAfrica.API.Services.Ai.Sections
                 }
                 else
                 {
-                    // If ToC lookup fails, we fallback to any provided pages (if any)
                     warnings.Add("Could not resolve pages from ToC entry; falling back to request pages if provided.");
                 }
             }
@@ -79,7 +88,6 @@ namespace LawAfrica.API.Services.Ai.Sections
                 GetMaxPdfPagesFallback()
             );
 
-            // Merge warnings (ToC + clamp)
             warnings.AddRange(clampWarnings);
 
             // ✅ For response: keep "raw request" as what client sent (or 0 when missing)
@@ -119,8 +127,8 @@ namespace LawAfrica.API.Services.Ai.Sections
                         Summary = cached.Summary,
                         FromCache = true,
 
-                        // cheap on cache hit (optional upgrade later: store this in cache table)
-                        InputCharCount = 0,
+                        // ✅ Option B: return stored InputCharCount from cache table
+                        InputCharCount = cached.InputCharCount ?? 0,
 
                         Warnings = warnings,
                         GeneratedAt = cached.CreatedAt
@@ -143,7 +151,9 @@ namespace LawAfrica.API.Services.Ai.Sections
             {
                 var cap = 30;
                 var shown = extraction.MissingPages.Take(cap).ToList();
-                var suffix = extraction.MissingPages.Count > cap ? $" … (+{extraction.MissingPages.Count - cap} more)" : "";
+                var suffix = extraction.MissingPages.Count > cap
+                    ? $" … (+{extraction.MissingPages.Count - cap} more)"
+                    : "";
                 warnings.Add($"Missing stored text for pages: {string.Join(", ", shown)}{suffix}.");
             }
 
@@ -162,6 +172,9 @@ namespace LawAfrica.API.Services.Ai.Sections
                     endPage,
                     type,
                     emptyOutput,
+                    inputCharCount: 0,
+                    tokensIn: null,
+                    tokensOut: null,
                     ct);
 
                 return new SectionSummaryResponseDto
@@ -184,10 +197,76 @@ namespace LawAfrica.API.Services.Ai.Sections
                 };
             }
 
-            // 4) Still stub output for now (OpenAI comes later)
-            var output =
-                $"[stub/{type}] Summary for doc #{request.LegalDocumentId}, toc #{tocId?.ToString() ?? "—"}, pages {startPage}-{endPage}. " +
-                $"(input chars: {extraction.CharCount})";
+            // =========================================================
+            // ✅ Prepare "effective" text for the LLM (truncate by char budget)
+            // effectiveCharCount MUST reflect the final text passed to OpenAI.
+            // =========================================================
+            var effectiveText = (extraction.Text ?? "").Trim();
+
+            var maxInputChars = GetInt(
+                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
+                    ? "AI_SECTION_MAX_INPUT_CHARS_EXTENDED"
+                    : "AI_SECTION_MAX_INPUT_CHARS_BASIC",
+                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase) ? 24000 : 12000
+            );
+
+            if (effectiveText.Length > maxInputChars)
+            {
+                effectiveText = effectiveText.Substring(0, maxInputChars);
+                warnings.Add($"Input text was truncated to {maxInputChars} characters.");
+            }
+
+            var effectiveCharCount = effectiveText.Length;
+
+            // =========================================================
+            // ✅ OpenAI call (real summary)
+            // =========================================================
+            var maxOutputTokens = GetInt(
+                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
+                    ? "AI_SECTION_MAX_OUTPUT_TOKENS_EXTENDED"
+                    : "AI_SECTION_MAX_OUTPUT_TOKENS_BASIC",
+                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase) ? 700 : 350
+            );
+
+            var system = BuildSystemPrompt(type);
+
+            // Provide light metadata context to help the model stay grounded
+            var header =
+                $"Document #{request.LegalDocumentId}\n" +
+                $"ToC: {(tocId.HasValue ? tocId.Value.ToString() : "—")}\n" +
+                $"Pages: {startPage}-{endPage}\n" +
+                (!string.IsNullOrWhiteSpace(request.SectionTitle) ? $"Title: {request.SectionTitle}\n" : "");
+
+            var messages = new List<ChatMessage>
+            {
+                new SystemChatMessage(system),
+                new UserChatMessage(header + "\nSECTION TEXT (source of truth):\n" + effectiveText)
+            };
+
+            var options = new ChatCompletionOptions
+            {
+                MaxOutputTokenCount = maxOutputTokens,
+                Temperature = 0.2f
+            };
+
+            ChatCompletion completion = await _chatClient.CompleteChatAsync(messages, options, ct);
+
+            var output = completion?.Content?.FirstOrDefault()?.Text?.Trim() ?? "";
+            if (string.IsNullOrWhiteSpace(output))
+                throw new InvalidOperationException("AI returned an empty summary.");
+
+            // Token usage (defensive: SDK versions differ)
+            int? tokensIn = null;
+            int? tokensOut = null;
+            try
+            {
+                tokensIn = completion?.Usage?.InputTokenCount;
+                tokensOut = completion?.Usage?.OutputTokenCount;
+            }
+            catch
+            {
+                // ignore
+            }
 
             await UpsertCacheAsync(
                 userId,
@@ -197,6 +276,9 @@ namespace LawAfrica.API.Services.Ai.Sections
                 endPage,
                 type,
                 output,
+                inputCharCount: effectiveCharCount,
+                tokensIn: tokensIn,
+                tokensOut: tokensOut,
                 ct);
 
             return new SectionSummaryResponseDto
@@ -213,7 +295,7 @@ namespace LawAfrica.API.Services.Ai.Sections
 
                 Summary = output,
                 FromCache = false,
-                InputCharCount = extraction.CharCount,
+                InputCharCount = effectiveCharCount,
                 Warnings = warnings,
                 GeneratedAt = DateTime.UtcNow
             };
@@ -221,15 +303,13 @@ namespace LawAfrica.API.Services.Ai.Sections
 
         /// <summary>
         /// ✅ Resolve pages from ToC entry.
-        /// IMPORTANT: rename DbSet/property names here to match your ToC table.
+        /// Uses your model: LegalDocumentTocEntry (StartPage/EndPage).
         /// </summary>
         private async Task<(int? start, int? end, string? warning)> TryResolveRangeFromTocAsync(
             int legalDocumentId,
             int tocEntryId,
             CancellationToken ct)
         {
-            // 🔁 Rename this DbSet to match your real ToC table:
-            // e.g. _db.LegalDocumentTocEntries / _db.TocEntries / _db.LegalDocumentOutlineEntries ...
             var toc = await _db.LegalDocumentTocEntries
                 .AsNoTracking()
                 .FirstOrDefaultAsync(x =>
@@ -240,10 +320,10 @@ namespace LawAfrica.API.Services.Ai.Sections
             if (toc == null)
                 return (null, null, "ToC entry was not found for this document.");
 
-            // ✅ Adjust property names to match your model:
-            // e.g. toc.StartPage / toc.EndPage
-            var start = (int?)toc.StartPage;
-            var end = (int?)toc.EndPage;
+            // Only support PageRange here (Anchor is not page-based)
+            // If you want: if toc.TargetType == TocTargetType.Anchor => return warning.
+            var start = toc.StartPage;
+            var end = toc.EndPage;
 
             if (!start.HasValue || start.Value <= 0)
                 return (null, null, "ToC entry has no StartPage mapping.");
@@ -265,6 +345,9 @@ namespace LawAfrica.API.Services.Ai.Sections
             int endPage,
             string type,
             string summary,
+            int? inputCharCount,
+            int? tokensIn,
+            int? tokensOut,
             CancellationToken ct)
         {
             var existing = await _db.AiLegalDocumentSectionSummaries
@@ -290,6 +373,9 @@ namespace LawAfrica.API.Services.Ai.Sections
                     Type = type,
                     PromptVersion = PROMPT_VERSION,
                     Summary = summary,
+                    InputCharCount = inputCharCount,
+                    TokensIn = tokensIn,
+                    TokensOut = tokensOut,
                     CreatedAt = DateTime.UtcNow
                 };
 
@@ -298,6 +384,9 @@ namespace LawAfrica.API.Services.Ai.Sections
             else
             {
                 existing.Summary = summary;
+                existing.InputCharCount = inputCharCount;
+                existing.TokensIn = tokensIn;
+                existing.TokensOut = tokensOut;
                 existing.UpdatedAt = DateTime.UtcNow;
             }
 
@@ -306,7 +395,7 @@ namespace LawAfrica.API.Services.Ai.Sections
 
         /// <summary>
         /// ✅ Strong normalization that never throws and always returns a safe effective range.
-        /// Now supports nullable requestedStart/requestedEnd.
+        /// Supports nullable requestedStart/requestedEnd.
         /// </summary>
         private static (int start, int end, List<string> warnings) NormalizeAndClampRange(
             int? requestedStart,
@@ -413,6 +502,41 @@ namespace LawAfrica.API.Services.Ai.Sections
             row.UpdatedAt = DateTime.UtcNow;
 
             await _db.SaveChangesAsync(ct);
+        }
+
+        private int GetInt(string key, int fallback)
+        {
+            var raw = _config[key];
+            return int.TryParse(raw, out var n) ? n : fallback;
+        }
+
+        private static string BuildSystemPrompt(string type)
+        {
+            if (string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase))
+            {
+                return
+                @"You are a legal summarization assistant.
+                You MUST summarize ONLY the text provided by the user. Do not add outside facts or citations.
+                If something is not clearly stated, write: ""Not stated in the section.""
+
+                Return the summary in this structure:
+
+                OVERVIEW: 2–4 sentences
+                KEY POINTS: 5–10 bullet points
+                IMPORTANT TERMS: bullets (if any)
+                PRACTICAL TAKEAWAYS: 3–6 bullet points
+
+                Be concise and clear.";
+                            }
+
+                            return
+                @"You are a legal summarization assistant.
+                Summarize ONLY the text provided by the user. Do not add outside facts or citations.
+                If something is unclear, say: ""Not stated in the section.""
+
+                Output:
+                - A 1–2 paragraph summary
+                - Then 3–6 key bullet points.";
         }
     }
 }

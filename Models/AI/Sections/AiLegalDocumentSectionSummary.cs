@@ -32,6 +32,8 @@ namespace LawAfrica.API.Models.Ai.Sections
         // Output
         [Required]
         public string Summary { get; set; } = string.Empty;
+        // Optional metadata
+        public int? InputCharCount { get; set; }
 
         // Optional metadata
         public int? TokensIn { get; set; }
