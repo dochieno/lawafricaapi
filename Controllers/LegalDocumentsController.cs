@@ -469,7 +469,7 @@ namespace LawAfrica.API.Controllers
             var userCtx = await _db.Users
                 .AsNoTracking()
                 .Where(u => u.Id == userId)
-                .Select(u => new { u.Id, u.InstitutionId })
+                .Select(u => new { u.Id, u.InstitutionId, u.UserType })
                 .FirstOrDefaultAsync();
 
             if (userCtx == null)
@@ -482,6 +482,7 @@ namespace LawAfrica.API.Controllers
             if (doc == null)
                 return NotFound("Document not found.");
 
+            // Non-premium => full access
             if (!doc.IsPremium)
             {
                 return Ok(new DocumentAccessDto
@@ -494,18 +495,35 @@ namespace LawAfrica.API.Controllers
                     IsBlocked = false,
                     BlockMessage = null,
                     BlockReason = null,
+
                     CanPurchaseIndividually = true,
-                    PurchaseDisabledReason = null
+                    PurchaseDisabledReason = null,
+
+                    // new fields
+                    RequiredProductId = null,
+                    RequiredProductName = null,
+                    RequiredAction = "None",
+                    CtaLabel = null,
+                    CtaUrl = null,
+                    SecondaryCtaLabel = null,
+                    SecondaryCtaUrl = null,
+                    PreviewMaxChars = null,
+                    PreviewMaxParagraphs = null,
+                    HardStop = false,
+                    GrantSource = "Free",
+                    DebugNote = "Non-premium document."
                 });
             }
 
             var decision = await entitlementService.GetEntitlementDecisionAsync(userId, doc);
 
-            bool canPurchaseIndividually = decision.CanPurchaseIndividually;
-            string? purchaseDisabledReason = decision.PurchaseDisabledReason;
+            // Institution hard blocks (seat / inactive) => BLOCKED
+            var isHardBlocked =
+                !decision.IsAllowed &&
+                (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
+                 decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded);
 
-            if (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
-                decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded)
+            if (isHardBlocked)
             {
                 return Ok(new DocumentAccessDto
                 {
@@ -517,11 +535,32 @@ namespace LawAfrica.API.Controllers
                     IsBlocked = true,
                     BlockReason = decision.DenyReason.ToString(),
                     BlockMessage = decision.Message ?? "Access blocked. Please contact your administrator.",
-                    CanPurchaseIndividually = canPurchaseIndividually,
-                    PurchaseDisabledReason = purchaseDisabledReason
+
+                    CanPurchaseIndividually = decision.CanPurchaseIndividually,
+                    PurchaseDisabledReason = decision.PurchaseDisabledReason,
+
+                    // new gate fields
+                    RequiredProductId = decision.RequiredProductId,
+                    RequiredProductName = decision.RequiredProductName,
+                    RequiredAction = decision.RequiredAction switch
+                    {
+                        EntitlementRequiredAction.Subscribe => "Subscribe",
+                        EntitlementRequiredAction.Buy => "Buy",
+                        _ => "None"
+                    },
+                    CtaLabel = decision.CtaLabel,
+                    CtaUrl = decision.CtaUrl,
+                    SecondaryCtaLabel = decision.SecondaryCtaLabel,
+                    SecondaryCtaUrl = decision.SecondaryCtaUrl,
+                    PreviewMaxChars = decision.PreviewMaxChars,
+                    PreviewMaxParagraphs = decision.PreviewMaxParagraphs,
+                    HardStop = decision.HardStop,
+                    GrantSource = decision.GrantSource.ToString(),
+                    DebugNote = decision.DebugNote
                 });
             }
 
+            // Full access
             if (decision.AccessLevel == DocumentAccessLevel.FullAccess)
             {
                 return Ok(new DocumentAccessDto
@@ -530,30 +569,67 @@ namespace LawAfrica.API.Controllers
                     IsPremium = true,
                     HasFullAccess = true,
                     PreviewMaxPages = int.MaxValue,
-                    Message = "Premium document. Full access granted.",
+                    Message = "Access granted.",
                     IsBlocked = false,
                     BlockMessage = null,
                     BlockReason = null,
-                    CanPurchaseIndividually = true,
-                    PurchaseDisabledReason = null
+
+                    CanPurchaseIndividually = decision.CanPurchaseIndividually,
+                    PurchaseDisabledReason = decision.PurchaseDisabledReason,
+
+
+                    RequiredProductId = decision.RequiredProductId,
+                    RequiredProductName = decision.RequiredProductName,
+                    RequiredAction = decision.RequiredAction.ToString(),
+                    CtaLabel = decision.CtaLabel,
+                    CtaUrl = decision.CtaUrl,
+                    SecondaryCtaLabel = decision.SecondaryCtaLabel,
+                    SecondaryCtaUrl = decision.SecondaryCtaUrl,
+                    PreviewMaxChars = null,
+                    PreviewMaxParagraphs = null,
+                    HardStop = false,
+                    GrantSource = decision.GrantSource.ToString(),
+                    DebugNote = decision.DebugNote
                 });
             }
 
-            // Preview-only
+            // Preview-only (includes reports subscription gate + buy/subscribe gates)
+            // For reports: UI should use PreviewMaxChars/Paragraphs + HardStop.
+            // For PDFs: keep PreviewMaxPages for existing UI (backward compatibility).
             return Ok(new DocumentAccessDto
             {
                 DocumentId = id,
                 IsPremium = true,
                 HasFullAccess = false,
                 PreviewMaxPages = DEFAULT_PREVIEW_MAX_PAGES,
-                Message = $"Preview mode: first {DEFAULT_PREVIEW_MAX_PAGES} pages available.",
+                Message = decision.Message ?? $"Preview mode: first {DEFAULT_PREVIEW_MAX_PAGES} pages available.",
                 IsBlocked = false,
                 BlockMessage = null,
                 BlockReason = null,
-                CanPurchaseIndividually = canPurchaseIndividually,
-                PurchaseDisabledReason = purchaseDisabledReason
+
+                CanPurchaseIndividually = decision.CanPurchaseIndividually,
+                PurchaseDisabledReason = decision.PurchaseDisabledReason,
+
+                RequiredProductId = decision.RequiredProductId,
+                RequiredProductName = decision.RequiredProductName,
+                RequiredAction = decision.RequiredAction switch
+                {
+                    EntitlementRequiredAction.Subscribe => "Subscribe",
+                    EntitlementRequiredAction.Buy => "Buy",
+                    _ => "None"
+                },
+                CtaLabel = decision.CtaLabel,
+                CtaUrl = decision.CtaUrl,
+                SecondaryCtaLabel = decision.SecondaryCtaLabel,
+                SecondaryCtaUrl = decision.SecondaryCtaUrl,
+                PreviewMaxChars = decision.PreviewMaxChars,
+                PreviewMaxParagraphs = decision.PreviewMaxParagraphs,
+                HardStop = decision.HardStop,
+                GrantSource = decision.GrantSource.ToString(),
+                DebugNote = decision.DebugNote
             });
         }
+
 
         // ✅ Reader Outline (Table of Contents) - logged-in users
         // GET /api/legal-documents/{id}/outline

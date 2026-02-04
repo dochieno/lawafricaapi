@@ -5,14 +5,13 @@ using Microsoft.EntityFrameworkCore;
 namespace LawAfrica.API.Services.Subscriptions
 {
     /// <summary>
-    /// Central policy guard for subscription lifecycle enforcement.
-    /// Controllers/services call this to avoid scattering status/date checks everywhere.
+    /// Central policy guard for institution subscription lifecycle enforcement.
     ///
-    /// Key behaviors:
-    /// - Institution must be active, otherwise institution access is not applicable.
-    /// - Personal purchase still overrides everything (handled by caller).
-    /// - If an institution has a subscription covering a product but it is inactive (Expired/Suspended/NotStarted),
-    ///   the caller may choose to HARD-BLOCK access even if the user has a library grant.
+    /// Returns:
+    /// - Allowed: at least one covering subscription is ACTIVE and within date window (or grace).
+    /// - Lock: there exists at least one subscription row for the product(s), but not granting right now
+    ///         (Expired / Suspended / NotStarted etc). Caller may choose to hard-block.
+    /// - Deny: no relationship rows / invalid inputs / institution inactive etc.
     /// </summary>
     public class SubscriptionAccessGuard
     {
@@ -23,17 +22,6 @@ namespace LawAfrica.API.Services.Subscriptions
             _db = db;
         }
 
-        /// <summary>
-        /// Evaluate institution subscription coverage for a set of productIds.
-        ///
-        /// Returns:
-        /// - Allowed: at least one covering subscription is ACTIVE and within date window (or grace).
-        /// - IsInstitutionLock: there exists a covering subscription but it is inactive (Expired/Suspended/NotStarted),
-        ///   meaning institution-managed access should be blocked for covered documents (even library grants),
-        ///   depending on caller rules.
-        ///
-        /// If the institution has NO subscription row for those products, IsInstitutionLock = false.
-        /// </summary>
         public async Task<SubscriptionAccessDecision> EvaluateInstitutionCoverageAsync(
             int institutionId,
             IReadOnlyCollection<int> productIds,
@@ -42,21 +30,25 @@ namespace LawAfrica.API.Services.Subscriptions
             CancellationToken ct = default)
         {
             if (institutionId <= 0)
-            {
                 return SubscriptionAccessDecision.Deny(SubscriptionAccessDenyReason.NoInstitution);
-            }
 
             if (productIds == null || productIds.Count == 0)
-            {
                 return SubscriptionAccessDecision.Deny(SubscriptionAccessDenyReason.NoProducts);
-            }
+
+            // Clamp grace to safe range
+            if (graceDays < 0) graceDays = 0;
+            if (graceDays > 365) graceDays = 365;
+
+            // ✅ Grace cutoff: treat subscription as still valid if EndDate >= (now - graceDays)
+            // (Still must have started)
+            var graceCutoff = graceDays > 0 ? nowUtc.AddDays(-graceDays) : nowUtc;
 
             // 1) Institution active?
             var institutionIsActive = await _db.Institutions
                 .AsNoTracking()
                 .Where(i => i.Id == institutionId)
                 .Select(i => i.IsActive)
-                .FirstOrDefaultAsync(ct); // false when not found => safe
+                .FirstOrDefaultAsync(ct); // false when not found => safe deny
 
             if (!institutionIsActive)
             {
@@ -66,7 +58,7 @@ namespace LawAfrica.API.Services.Subscriptions
                 );
             }
 
-            // 2) Pull only the relevant subscriptions
+            // 2) Load only relevant subscriptions
             var subs = await _db.InstitutionProductSubscriptions
                 .AsNoTracking()
                 .Where(s => s.InstitutionId == institutionId && productIds.Contains(s.ContentProductId))
@@ -82,41 +74,38 @@ namespace LawAfrica.API.Services.Subscriptions
 
             if (subs.Count == 0)
             {
-                // No subscription relationship for these products => no lock from institution policy
+                // No institution subscription relationship for these products => no lock (caller may allow other unlock paths)
                 return SubscriptionAccessDecision.Deny(SubscriptionAccessDenyReason.NoSubscriptionRow);
             }
 
-            // Grace window (if you later want it)
-            var graceEnd = graceDays > 0 ? nowUtc.AddDays(-graceDays) : nowUtc;
-
-            // 3) Determine any ACTIVE coverage
-            bool anyActiveCover =
-                subs.Any(s =>
-                    s.Status == SubscriptionStatus.Active &&
-                    s.StartDate <= nowUtc &&
-                    s.EndDate >= nowUtc);
+            // 3) Any ACTIVE coverage? (✅ apply graceCutoff)
+            // Must have started (StartDate <= nowUtc)
+            // EndDate >= graceCutoff allows grace window.
+            bool anyActiveCover = subs.Any(s =>
+                s.Status == SubscriptionStatus.Active &&
+                s.StartDate <= nowUtc &&
+                s.EndDate >= graceCutoff);
 
             if (anyActiveCover)
             {
-                return SubscriptionAccessDecision.Allow(
-                    message: "Institution subscription active."
-                );
+                return SubscriptionAccessDecision.Allow("Institution subscription active.");
             }
 
-            // 4) Determine lock reasons (institution has a subscription row but not granting)
-            // If ANY covering sub exists and is inactive, caller may choose to hard-block.
-            // Order of precedence for reason:
-            // Suspended > Expired > NotStarted > InactiveDates/Unknown
+            // 4) Institution lock reasons (there IS a row, but it isn't granting now)
+            // Precedence: Suspended > Expired > NotStarted > NotEntitled
+
             if (subs.Any(s => s.Status == SubscriptionStatus.Suspended))
             {
                 return SubscriptionAccessDecision.Lock(
                     SubscriptionAccessDenyReason.Suspended,
-                    "Institution subscription expired. Please contact your administrator."
+                    "Institution subscription is suspended. Please contact your administrator."
                 );
             }
 
-            // Expired by status OR expired by end date
-            if (subs.Any(s => s.Status == SubscriptionStatus.Expired || s.EndDate < graceEnd))
+            // Expired by status OR by end-date (consider grace)
+            if (subs.Any(s =>
+                    s.Status == SubscriptionStatus.Expired ||
+                    s.EndDate < graceCutoff))
             {
                 return SubscriptionAccessDecision.Lock(
                     SubscriptionAccessDenyReason.Expired,
@@ -124,8 +113,10 @@ namespace LawAfrica.API.Services.Subscriptions
                 );
             }
 
-            // Not started yet
-            if (subs.Any(s => s.StartDate > nowUtc || s.Status == SubscriptionStatus.Pending))
+            // Not started yet (Pending OR start in future)
+            if (subs.Any(s =>
+                    s.Status == SubscriptionStatus.Pending ||
+                    s.StartDate > nowUtc))
             {
                 return SubscriptionAccessDecision.Lock(
                     SubscriptionAccessDenyReason.NotStarted,
@@ -133,7 +124,7 @@ namespace LawAfrica.API.Services.Subscriptions
                 );
             }
 
-            // Fallback: there is a subscription row but it isn't granting access
+            // Fallback: there is a subscription row, but it isn't granting access
             return SubscriptionAccessDecision.Lock(
                 SubscriptionAccessDenyReason.NotEntitled,
                 "Institution subscription is not active. Please contact your administrator."
