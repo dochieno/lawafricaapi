@@ -1,16 +1,18 @@
-﻿using LawAfrica.API.Data;
+﻿using System.Linq.Expressions;
+using LawAfrica.API.Data;
 using LawAfrica.API.DTOs.Reports;
+using LawAfrica.API.Helpers;
 using LawAfrica.API.Models;
+using LawAfrica.API.Models.Documents;
 using LawAfrica.API.Models.LawReports.Enums;
 using LawAfrica.API.Models.Locations;
-using LawAfrica.API.Models;
 using LawAfrica.API.Models.Reports;
+using LawAfrica.API.Services.Documents;
+using LawAfrica.API.Services.LawReports;
 using LawAfrica.API.Services.LawReportsContent;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Linq.Expressions;
-using Ganss.Xss;
 
 namespace LawAfrica.API.Controllers
 {
@@ -19,30 +21,106 @@ namespace LawAfrica.API.Controllers
     public class LawReportsController : ControllerBase
     {
         private readonly ApplicationDbContext _db;
+        private readonly ILawReportContentBuilder _builder;
+        private readonly DocumentEntitlementService _entitlement;
 
         // ✅ enum (matches LegalDocument.Category type)
         private const LegalDocumentCategory LLR_CATEGORY = LegalDocumentCategory.LLRServices;
-        private readonly ILawReportContentBuilder _builder;
-        public LawReportsController(ApplicationDbContext db, ILawReportContentBuilder builder)
+
+        public LawReportsController(
+            ApplicationDbContext db,
+            ILawReportContentBuilder builder,
+            DocumentEntitlementService entitlement)
         {
             _db = db;
             _builder = builder;
+            _entitlement = entitlement;
         }
 
         // -------------------------
-        // GET single
-        // -------------------------
+        // GET single (GATED)
+        [Authorize]
         [HttpGet("{id:int}")]
-        public async Task<ActionResult<LawReportDto>> Get(int id)
+        public async Task<ActionResult<LawReportDto>> Get(int id, CancellationToken ct)
         {
             var r = await _db.LawReports
                 .Include(x => x.LegalDocument)
                 .Include(x => x.TownRef)
-                .FirstOrDefaultAsync(x => x.Id == id);
+                .FirstOrDefaultAsync(x => x.Id == id, ct);
 
-            if (r == null) return NotFound();
-            return Ok(ToDto(r, includeContent: true));
+            if (r == null) return NotFound(new { message = "Law report not found." });
+
+            if (r.LegalDocument == null)
+                return StatusCode(500, new { message = "Law report is missing LegalDocument." });
+
+            // ✅ Only gate published report docs
+            if (r.LegalDocument.Status != LegalDocumentStatus.Published ||
+                r.LegalDocument.Kind != LegalDocumentKind.Report ||
+                r.LegalDocument.FileType != "report")
+            {
+                return NotFound(new { message = "Law report not available." });
+            }
+
+            var userId = User.GetUserId();
+
+            // ✅ SINGLE SOURCE OF TRUTH for access
+            var decision = await _entitlement.GetEntitlementDecisionAsync(userId, r.LegalDocument);
+
+            // Hard blocks => return blocked meta, no content
+            var isHardBlocked =
+                !decision.IsAllowed &&
+                (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
+                 decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded);
+
+            if (isHardBlocked)
+            {
+                var dto = ToDto(r, includeContent: false);
+
+                dto.ContentText = ""; // no preview on hard block
+                ApplyEntitlementMeta(dto, decision, previewMaxChars: null, previewMaxParagraphs: null);
+
+                dto.IsBlocked = true;
+                dto.BlockReason = decision.DenyReason.ToString();
+                dto.BlockMessage = decision.Message ?? "Access blocked. Please contact your administrator.";
+
+                dto.HardStop = true; // stop user completely
+                dto.AccessLevel = "PreviewOnly";
+
+                return Ok(dto);
+            }
+
+            // Full access => return full content
+            if (decision.AccessLevel == DocumentAccessLevel.FullAccess)
+            {
+                var dto = ToDto(r, includeContent: true);
+                dto.AccessLevel = "FullAccess";
+                dto.HardStop = false;
+                dto.IsBlocked = false;
+
+                ApplyEntitlementMeta(dto, decision, previewMaxChars: null, previewMaxParagraphs: null);
+                return Ok(dto);
+            }
+
+            // Preview-only => truncate server-side
+            var (maxChars, maxParas) = GetPreviewLimits(decision);
+
+            var raw = r.ContentText ?? "";
+            var preview = ReportPreviewTruncator.MakePreview(raw, maxChars, maxParas);
+
+            var previewDto = ToDto(r, includeContent: false);
+            previewDto.ContentText = preview;
+
+            previewDto.AccessLevel = "PreviewOnly";
+            previewDto.IsBlocked = false;
+
+            // If decision says hard stop for reports without subscription, enforce it
+            previewDto.HardStop = decision.HardStop;
+
+            ApplyEntitlementMeta(previewDto, decision, maxChars, maxParas);
+
+            return Ok(previewDto);
         }
+
 
         // -------------------------
         // ADMIN LIST
@@ -170,7 +248,6 @@ namespace LawAfrica.API.Controllers
             _db.LawReports.Add(report);
             await _db.SaveChangesAsync();
 
-            // Attach TownRef for DTO convenience
             if (report.TownId.HasValue)
                 report.TownRef = await _db.Towns.AsNoTracking().FirstOrDefaultAsync(t => t.Id == report.TownId.Value);
 
@@ -197,7 +274,6 @@ namespace LawAfrica.API.Controllers
             try { resolvedTown = await ResolveTownAsync(dto); }
             catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
 
-            // ✅ If citation is blank, auto-generate; otherwise keep user-provided
             var ensuredCitation = await EnsureCitationAsync(dto, resolvedTown, CancellationToken.None);
 
             var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName, ensuredCitation);
@@ -263,7 +339,6 @@ namespace LawAfrica.API.Controllers
             return NoContent();
         }
 
-
         // -------------------------
         // UPDATE CONTENT ONLY (Admin Report Content screen)
         // -------------------------
@@ -272,8 +347,6 @@ namespace LawAfrica.API.Controllers
         public async Task<IActionResult> UpdateContent(int id, [FromBody] LawReportContentUpdateDto dto, CancellationToken ct)
         {
             if (dto == null) return BadRequest(new { message = "Payload is required." });
-
-            // Only ContentText is required here
             if (string.IsNullOrWhiteSpace(dto.ContentText))
                 return BadRequest(new { message = "ContentText is required." });
 
@@ -287,7 +360,6 @@ namespace LawAfrica.API.Controllers
             r.ContentText = LawAfrica.API.Services.Html.ReportHtmlSanitizer.Sanitize(normalized);
             r.UpdatedAt = DateTime.UtcNow;
 
-            // Optional: allow updating these from content page if you want
             if (dto.DecisionType.HasValue) r.DecisionType = dto.DecisionType.Value;
             if (dto.CaseType.HasValue) r.CaseType = dto.CaseType.Value;
 
@@ -295,235 +367,450 @@ namespace LawAfrica.API.Controllers
             return NoContent();
         }
 
-        // Minimal DTO for content updates
         public class LawReportContentUpdateDto
         {
             public string ContentText { get; set; } = "";
-
-            // optional – keep/remove depending on your content screen
             public ReportDecisionType? DecisionType { get; set; }
             public ReportCaseType? CaseType { get; set; }
         }
 
         // ============================================================
-        // ✅ NEW: BULK IMPORT ENDPOINT (FAST)
-        // POST /api/law-reports/import
-        // Body: { items: [...], batchSize?: 200, stopOnError?: false, dryRun?: false }
+        // END-USER LIST/SEARCH (Paged) - returns PreviewText only
         // ============================================================
-        [Authorize(Roles = "Admin")]
-        [HttpPost("import")]
-        public async Task<ActionResult<LawReportBulkImportResponse>> Import([FromBody] LawReportBulkImportRequest req, CancellationToken ct)
+        [Authorize]
+        [HttpGet("search")]
+        public async Task<ActionResult<LawReportSearchResponse>> Search(
+            [FromQuery] string? q = null,
+            [FromQuery] string? reportNumber = null,
+            [FromQuery] string? parties = null,
+            [FromQuery] string? citation = null,
+            [FromQuery] int? year = null,
+            [FromQuery] string? courtType = null,
+            [FromQuery] string? townOrPostCode = null,
+            [FromQuery] string? caseType = null,
+            [FromQuery] string? decisionType = null,
+            [FromQuery] string? sort = "year_desc",
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 18,
+            CancellationToken ct = default
+        )
         {
-            req ??= new LawReportBulkImportRequest();
+            page = page < 1 ? 1 : page;
+            pageSize = Math.Clamp(pageSize, 1, 50);
 
-            var items = req.Items ?? new List<LawReportUpsertDto>();
-            if (items.Count == 0)
-                return BadRequest(new { message = "items is required and cannot be empty." });
+            q = (q ?? "").Trim();
+            reportNumber = (reportNumber ?? "").Trim();
+            parties = (parties ?? "").Trim();
+            citation = (citation ?? "").Trim();
+            courtType = (courtType ?? "").Trim();
+            townOrPostCode = (townOrPostCode ?? "").Trim();
+            decisionType = (decisionType ?? "").Trim();
+            caseType = (caseType ?? "").Trim();
 
-            var batchSize = Math.Clamp(req.BatchSize ?? 200, 1, 500);
-            var stopOnError = req.StopOnError ?? false;
-            var dryRun = req.DryRun ?? false;
+            var query = _db.LawReports
+                .AsNoTracking()
+                .Include(x => x.LegalDocument)
+                .Include(x => x.TownRef)
+                .Where(r =>
+                    r.LegalDocument != null &&
+                    r.LegalDocument.Category == LLR_CATEGORY &&
+                    r.LegalDocument.Kind == LegalDocumentKind.Report &&
+                    r.LegalDocument.FileType == "report" &&
+                    r.LegalDocument.Status == LegalDocumentStatus.Published
+                )
+                .AsQueryable();
 
-            var response = new LawReportBulkImportResponse
+            if (!string.IsNullOrWhiteSpace(q))
             {
-                Total = items.Count,
-                BatchSize = batchSize,
-                DryRun = dryRun,
-                StopOnError = stopOnError
-            };
+                if (q.Length > 120) q = q[..120];
+                var term = q.Trim();
+                var like = $"%{EscapeLike(term)}%";
 
-            // Track citations used in this import to prevent same-batch collisions
-            var usedCitations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                query = query.Where(r =>
+                    EF.Functions.ILike(r.ContentText, like) ||
+                    (r.ReportNumber != null && EF.Functions.ILike(r.ReportNumber, like)) ||
+                    (r.Citation != null && EF.Functions.ILike(r.Citation, like)) ||
+                    (r.CaseNumber != null && EF.Functions.ILike(r.CaseNumber, like)) ||
+                    (r.Parties != null && EF.Functions.ILike(r.Parties, like)) ||
+                    (r.Court != null && EF.Functions.ILike(r.Court, like)) ||
+                    (r.Town != null && EF.Functions.ILike(r.Town, like)) ||
+                    (r.Judges != null && EF.Functions.ILike(r.Judges, like)) ||
+                    (r.LegalDocument != null && r.LegalDocument.Title != null && EF.Functions.ILike(r.LegalDocument.Title, like)) ||
+                    (r.TownRef != null && r.TownRef.PostCode != null && EF.Functions.ILike(r.TownRef.PostCode, like))
+                );
+            }
 
-            for (int offset = 0; offset < items.Count; offset += batchSize)
+            if (!string.IsNullOrWhiteSpace(reportNumber))
             {
-                var batch = items.Skip(offset).Take(batchSize).ToList();
+                var v = reportNumber.ToLower();
+                query = query.Where(r => r.ReportNumber != null && r.ReportNumber.ToLower().Contains(v));
+            }
 
-                // ✅ Resolve towns in bulk for this batch (TownId + TownPostCode)
-                var resolvedTownMap = await ResolveTownsForBatchAsync(batch, ct);
+            if (!string.IsNullOrWhiteSpace(parties))
+            {
+                var v = parties.ToLower();
+                query = query.Where(r => r.Parties != null && r.Parties.ToLower().Contains(v));
+            }
 
-                // Build entities for valid rows (in-memory), but still return per-row result
-                var pendingReports = new List<LawReport>();
-                var rowBindings = new List<(int index, LawReport report, LegalDocument doc, string? citation)>();
+            if (!string.IsNullOrWhiteSpace(citation))
+            {
+                var v = citation.ToLower();
+                query = query.Where(r => r.Citation != null && r.Citation.ToLower().Contains(v));
+            }
 
-                for (int i = 0; i < batch.Count; i++)
+            if (year.HasValue)
+                query = query.Where(r => r.Year == year.Value);
+
+            if (!string.IsNullOrWhiteSpace(courtType))
+            {
+                if (TryParseCourtType(courtType, out var ctEnum))
+                    query = query.Where(r => r.CourtType == ctEnum);
+                else
                 {
-                    var globalIndex = offset + i;
-                    var dto = batch[i];
-
-                    var result = new LawReportImportItemResult
-                    {
-                        Index = globalIndex
-                    };
-
-                    // Basic required fields validation (same intent as UI)
-                    var validationError = ValidateForImport(dto);
-                    if (!string.IsNullOrWhiteSpace(validationError))
-                    {
-                        result.Status = "failed";
-                        result.Message = validationError;
-                        response.Items.Add(result);
-                        response.Failed++;
-                        if (stopOnError) return Ok(response);
-                        continue;
-                    }
-
-                    // Town resolution result
-                    var rt = resolvedTownMap.TryGetValue(i, out var tv)
-                        ? tv
-                        : (townId: (int?)null, townName: TrimOrNull(dto.Town), postCode: TrimOrNull(dto.TownPostCode));
-
-                    try
-                    {
-                        // Ensure citation (blank => generate)
-                        var ensuredCitation = await EnsureCitationAsync(dto, rt, ct);
-
-                        // Enforce same-batch uniqueness
-                        if (!string.IsNullOrWhiteSpace(ensuredCitation))
-                        {
-                            ensuredCitation = EnsureUniqueWithinBatch(ensuredCitation, usedCitations);
-                            usedCitations.Add(ensuredCitation);
-                        }
-
-                        // Duplicate check (fast): citation-first, else composite check
-                        var dup = await FindExistingByDedupe(dto, rt.townId, rt.townName, ensuredCitation, ct);
-                        if (dup != null)
-                        {
-                            result.Status = "duplicate";
-                            result.Message = "Duplicate report exists.";
-                            result.ExistingLawReportId = dup.Id;
-                            response.Items.Add(result);
-                            response.Duplicates++;
-                            continue;
-                        }
-
-                        // Build doc + report (linked) for one SaveChanges
-                        var title = BuildReportTitle(dto, rt.townName, ensuredCitation);
-
-                        var doc = new LegalDocument
-                        {
-                            Title = title,
-                            Description = $"Law Report {dto.ReportNumber} ({dto.Year})",
-                            Category = LLR_CATEGORY,
-                            CountryId = dto.CountryId,
-                            FilePath = "",
-                            FileType = "report",
-                            FileSizeBytes = 0,
-                            IsPremium = true,
-                            Version = "1",
-                            Status = LegalDocumentStatus.Published,
-                            AllowPublicPurchase = true,
-                            Kind = LegalDocumentKind.Report,
-                            PublicCurrency = "KES",
-                            PublicPrice = 0,
-                            CreatedAt = DateTime.UtcNow,
-                            PublishedAt = DateTime.UtcNow
-                        };
-
-                        var report = new LawReport
-                        {
-                            LegalDocument = doc,
-
-                            CountryId = dto.CountryId,
-                            Service = dto.Service,
-
-                            TownId = rt.townId,
-                            Town = rt.townName,
-
-                            Citation = ensuredCitation,
-                            ReportNumber = dto.ReportNumber.Trim(),
-                            Year = dto.Year,
-                            CaseNumber = TrimOrNull(dto.CaseNumber),
-
-                            DecisionType = dto.DecisionType,
-                            CaseType = dto.CaseType,
-
-                            CourtType = (CourtType)dto.CourtType,
-                            Court = TrimOrNull(dto.Court),
-
-                            Parties = TrimOrNull(dto.Parties),
-                            Judges = TrimOrNull(dto.Judges),
-                            DecisionDate = dto.DecisionDate,
-                            ContentText = dto.ContentText,
-
-                            CreatedAt = DateTime.UtcNow
-                        };
-
-                        pendingReports.Add(report);
-                        rowBindings.Add((globalIndex, report, doc, ensuredCitation));
-
-                        // Mark “planned” created (final IDs after SaveChanges)
-                        result.Status = dryRun ? "ready" : "pending";
-                        result.Message = dryRun ? "Validated and ready (dry-run)." : "Pending insert.";
-                        result.Citation = ensuredCitation;
-                        response.Items.Add(result);
-                    }
-                    catch (Exception ex)
-                    {
-                        result.Status = "failed";
-                        result.Message = ex.Message;
-                        response.Items.Add(result);
-                        response.Failed++;
-                        if (stopOnError) return Ok(response);
-                    }
-                }
-
-                if (dryRun) continue;
-                if (pendingReports.Count == 0) continue;
-
-                // ✅ Insert batch (1 SaveChanges)
-                try
-                {
-                    _db.LawReports.AddRange(pendingReports);
-                    await _db.SaveChangesAsync(ct);
-
-                    // Fill success IDs into response items
-                    // We find the response item by Index
-                    var itemByIndex = response.Items
-                        .Where(x => x.Status == "pending" && x.LawReportId == null)
-                        .ToDictionary(x => x.Index, x => x);
-
-                    foreach (var b in rowBindings)
-                    {
-                        if (itemByIndex.TryGetValue(b.index, out var it))
-                        {
-                            it.Status = "created";
-                            it.Message = "Created.";
-                            it.LawReportId = b.report.Id;
-                            it.LegalDocumentId = b.doc.Id;
-                            it.Citation = b.citation;
-                            response.Created++;
-                        }
-                    }
-                }
-                catch (DbUpdateException dbEx)
-                {
-                    // Most common: unique index violation (Citation). Provide friendly message
-                    // For speed we do NOT retry per-row here — we return failures for this batch.
-                    // If you want a retry strategy, tell me and I’ll add it safely.
-                    foreach (var b in rowBindings)
-                    {
-                        var it = response.Items.FirstOrDefault(x => x.Index == b.index);
-                        if (it != null && (it.Status == "pending" || it.Status == "ready"))
-                        {
-                            it.Status = "failed";
-                            it.Message = "Database rejected one or more rows (likely duplicate unique value such as Citation).";
-                            it.Detail = dbEx.InnerException?.Message ?? dbEx.Message;
-                            response.Failed++;
-                        }
-                    }
-
-                    if (stopOnError) return Ok(response);
+                    var v = courtType.ToLower();
+                    query = query.Where(r =>
+                        (r.Court != null && r.Court.ToLower().Contains(v)) ||
+                        (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.ToLower().Contains(v))
+                    );
                 }
             }
 
-            return Ok(response);
+            if (!string.IsNullOrWhiteSpace(townOrPostCode))
+            {
+                var v = townOrPostCode.ToLower();
+                query = query.Where(r =>
+                    (r.Town != null && r.Town.ToLower().Contains(v)) ||
+                    (r.TownRef != null && r.TownRef.PostCode != null && r.TownRef.PostCode.ToLower().Contains(v))
+                );
+            }
+
+            if (!string.IsNullOrWhiteSpace(caseType) && TryParseCaseType(caseType, out var caseEnum))
+                query = query.Where(r => r.CaseType == caseEnum);
+
+            if (!string.IsNullOrWhiteSpace(decisionType) && TryParseDecisionType(decisionType, out var decEnum))
+                query = query.Where(r => r.DecisionType == decEnum);
+
+            var total = await query.CountAsync(ct);
+
+            query = sort switch
+            {
+                "year_asc" => query.OrderBy(r => r.Year).ThenByDescending(r => r.Id),
+                "date_desc" => query.OrderByDescending(r => r.DecisionDate).ThenByDescending(r => r.Id),
+                "reportno_asc" => query.OrderBy(r => r.ReportNumber).ThenByDescending(r => r.Id),
+                "parties_asc" => query.OrderBy(r => r.Parties).ThenByDescending(r => r.Id),
+                _ => query.OrderByDescending(r => r.Year).ThenByDescending(r => r.Id),
+            };
+
+            var skip = (page - 1) * pageSize;
+            const int PREVIEW_LEN = 520;
+
+            var items = await query
+                .Skip(skip)
+                .Take(pageSize)
+                .Select(r => new LawReportListItemDto
+                {
+                    Id = r.Id,
+                    LegalDocumentId = r.LegalDocumentId,
+
+                    Title = r.LegalDocument != null ? (r.LegalDocument.Title ?? "") : "",
+                    IsPremium = r.LegalDocument != null && r.LegalDocument.IsPremium,
+
+                    ReportNumber = r.ReportNumber,
+                    Year = r.Year,
+                    CaseNumber = r.CaseNumber,
+                    Citation = r.Citation,
+
+                    CourtType = (int)r.CourtType,
+                    CourtTypeLabel = CourtTypeLabel(r.CourtType),
+
+                    DecisionType = r.DecisionType,
+                    DecisionTypeLabel = DecisionTypeLabel(r.DecisionType),
+
+                    CaseType = r.CaseType,
+                    CaseTypeLabel = CaseTypeLabel(r.CaseType),
+
+                    Court = r.Court,
+
+                    Town = r.Town,
+                    TownId = r.TownId,
+                    TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
+
+                    Parties = r.Parties,
+                    Judges = r.Judges,
+                    DecisionDate = r.DecisionDate,
+
+                    PreviewText =
+                        r.ContentText == null ? "" :
+                        (r.ContentText.Length <= PREVIEW_LEN ? r.ContentText : r.ContentText.Substring(0, PREVIEW_LEN))
+                })
+                .ToListAsync(ct);
+
+            foreach (var it in items)
+                it.PreviewText = CleanPreview(it.PreviewText);
+
+            return Ok(new LawReportSearchResponse
+            {
+                Items = items,
+                Total = total,
+                Page = page,
+                PageSize = pageSize
+            });
         }
 
         // ============================================================
-        // ✅ helpers (Town resolver + dedupe + citation)
+        // Case Types / Decision Types
         // ============================================================
+        [Authorize]
+        [HttpGet("case-types")]
+        public async Task<ActionResult<List<LawReportCaseTypeOptionDto>>> GetCaseTypes(CancellationToken ct)
+        {
+            var raw = await (
+                from r in _db.LawReports.AsNoTracking()
+                join d in _db.LegalDocuments.AsNoTracking() on r.LegalDocumentId equals d.Id
+                where d.Category == LLR_CATEGORY
+                      && d.Kind == LegalDocumentKind.Report
+                      && d.FileType == "report"
+                      && d.Status == LegalDocumentStatus.Published
+                group r by r.CaseType into g
+                select new { Value = (int)g.Key, Count = g.Count() }
+            ).ToListAsync(ct);
 
+            var data = raw
+                .Where(x => x.Value > 0)
+                .Select(x =>
+                {
+                    var enumVal = (ReportCaseType)x.Value;
+                    string label;
+                    try { label = CaseTypeLabel(enumVal) ?? enumVal.ToString(); }
+                    catch { label = enumVal.ToString(); }
+
+                    return new LawReportCaseTypeOptionDto { Value = x.Value, Label = label, Count = x.Count };
+                })
+                .OrderBy(x => x.Label)
+                .ToList();
+
+            return Ok(data);
+        }
+
+        [Authorize]
+        [HttpGet("decision-types")]
+        public async Task<ActionResult<List<LawReportDecisionTypeOptionDto>>> GetDecisionTypes(CancellationToken ct)
+        {
+            var raw = await (
+                from r in _db.LawReports.AsNoTracking()
+                join d in _db.LegalDocuments.AsNoTracking() on r.LegalDocumentId equals d.Id
+                where d.Category == LLR_CATEGORY
+                      && d.Kind == LegalDocumentKind.Report
+                      && d.FileType == "report"
+                      && d.Status == LegalDocumentStatus.Published
+                group r by r.DecisionType into g
+                select new { Value = (int)g.Key, Count = g.Count() }
+            ).ToListAsync(ct);
+
+            var data = raw
+                .Where(x => x.Value > 0)
+                .Select(x =>
+                {
+                    var enumVal = (ReportDecisionType)x.Value;
+                    string label;
+                    try { label = DecisionTypeLabel(enumVal) ?? enumVal.ToString(); }
+                    catch { label = enumVal.ToString(); }
+
+                    return new LawReportDecisionTypeOptionDto { Value = x.Value, Label = label, Count = x.Count };
+                })
+                .OrderBy(x => x.Label)
+                .ToList();
+
+            return Ok(data);
+        }
+
+        // -------------------------
+        // RELATED CASES (DB-only, heuristic)
+        // -------------------------
+        [Authorize]
+        [HttpGet("{id:int}/related")]
+        public async Task<ActionResult<List<LawReportListItemDto>>> Related(
+            int id,
+            [FromQuery] int take = 8,
+            CancellationToken ct = default)
+        {
+            take = Math.Clamp(take, 1, 20);
+
+            var seed = await _db.LawReports
+                .AsNoTracking()
+                .Include(x => x.LegalDocument)
+                .FirstOrDefaultAsync(x => x.Id == id, ct);
+
+            if (seed == null) return NotFound(new { message = "Law report not found." });
+
+            var parties = (seed.Parties ?? "").Trim();
+            var partyTokens = parties
+                .Split(new[] { " v ", " vs ", " v. ", " vs. ", "&", "and", ",", ";", "  " }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => x.Length >= 4)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(6)
+                .ToList();
+
+            var q = _db.LawReports
+                .AsNoTracking()
+                .Include(x => x.LegalDocument)
+                .Include(x => x.TownRef)
+                .Where(r =>
+                    r.Id != seed.Id &&
+                    r.LegalDocument != null &&
+                    r.LegalDocument.Category == LLR_CATEGORY &&
+                    r.LegalDocument.Kind == LegalDocumentKind.Report &&
+                    r.LegalDocument.FileType == "report" &&
+                    r.LegalDocument.Status == LegalDocumentStatus.Published
+                )
+                .AsQueryable();
+
+            q = q.Where(r => r.CourtType == seed.CourtType);
+            q = q.Where(r => r.CaseType == seed.CaseType || r.DecisionType == seed.DecisionType);
+
+            if (partyTokens.Count > 0)
+            {
+                var likes = partyTokens
+                    .Select(t => $"%{EscapeLike(t)}%")
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                Expression<Func<LawReport, bool>> predicate = r => false;
+
+                foreach (var like in likes)
+                {
+                    Expression<Func<LawReport, bool>> one = r =>
+                        (r.Parties != null && EF.Functions.ILike(r.Parties, like)) ||
+                        (r.Citation != null && EF.Functions.ILike(r.Citation, like)) ||
+                        (r.LegalDocument != null && r.LegalDocument.Title != null && EF.Functions.ILike(r.LegalDocument.Title, like));
+
+                    predicate = OrElse(predicate, one);
+                }
+
+                q = q.Where(predicate);
+            }
+            else
+            {
+                q = q.Where(r => r.Year == seed.Year);
+            }
+
+            var list = await q
+                .OrderByDescending(r => r.UpdatedAt ?? r.CreatedAt)
+                .ThenByDescending(r => r.Year)
+                .ThenByDescending(r => r.Id)
+                .Take(take)
+                .Select(r => new LawReportListItemDto
+                {
+                    Id = r.Id,
+                    LegalDocumentId = r.LegalDocumentId,
+
+                    Title = r.LegalDocument != null ? (r.LegalDocument.Title ?? "") : "",
+                    IsPremium = r.LegalDocument != null && r.LegalDocument.IsPremium,
+
+                    ReportNumber = r.ReportNumber,
+                    Year = r.Year,
+                    CaseNumber = r.CaseNumber,
+                    Citation = r.Citation,
+
+                    CourtType = (int)r.CourtType,
+                    CourtTypeLabel = CourtTypeLabel(r.CourtType),
+
+                    DecisionType = r.DecisionType,
+                    DecisionTypeLabel = DecisionTypeLabel(r.DecisionType),
+
+                    CaseType = r.CaseType,
+                    CaseTypeLabel = CaseTypeLabel(r.CaseType),
+
+                    Court = r.Court,
+
+                    Town = r.Town,
+                    TownId = r.TownId,
+                    TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
+
+                    Parties = r.Parties,
+                    Judges = r.Judges,
+                    DecisionDate = r.DecisionDate,
+
+                    PreviewText = ""
+                })
+                .ToListAsync(ct);
+
+            return Ok(list);
+        }
+
+        // ============================================================
+        // DTO mapping
+        // ============================================================
+        private LawReportDto ToDto(LawReport r, bool includeContent)
+        {
+            return new LawReportDto
+            {
+                Id = r.Id,
+                LegalDocumentId = r.LegalDocumentId,
+
+                CountryId = r.CountryId,
+                Service = r.Service,
+                CourtType = (int)r.CourtType,
+
+                ReportNumber = r.ReportNumber,
+                Year = r.Year,
+                CaseNumber = r.CaseNumber,
+                Citation = r.Citation,
+
+                DecisionType = r.DecisionType,
+                CaseType = r.CaseType,
+
+                Court = r.Court,
+
+                Town = r.Town,
+                TownId = r.TownId,
+                TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
+
+                Parties = r.Parties,
+                Judges = r.Judges,
+                DecisionDate = r.DecisionDate,
+
+                // ✅ IMPORTANT: never leak full transcript unless includeContent == true
+                ContentText = includeContent ? (r.ContentText ?? "") : "",
+
+                Title = r.LegalDocument?.Title ?? "",
+
+                ServiceLabel = ServiceLabel(r.Service),
+                CourtTypeLabel = CourtTypeLabel(r.CourtType),
+                DecisionTypeLabel = DecisionTypeLabel(r.DecisionType),
+                CaseTypeLabel = CaseTypeLabel(r.CaseType),
+
+                // ✅ defaults for gating meta (NEW fields you added)
+                IsBlocked = false,
+                BlockReason = null,
+                BlockMessage = null,
+
+                HardStop = false,
+                AccessLevel = includeContent ? "FullAccess" : "PreviewOnly",
+
+                RequiredProductId = null,
+                RequiredProductName = null,
+                RequiredAction = "None",
+
+                CtaLabel = null,
+                CtaUrl = null,
+                SecondaryCtaLabel = null,
+                SecondaryCtaUrl = null,
+
+                PreviewMaxChars = null,
+                PreviewMaxParagraphs = null,
+
+                FromCache = false,
+                GrantSource = null,
+                DebugNote = null
+            };
+        }
+
+
+        // ============================================================
+        // helpers (Town resolver + dedupe + citation)
+        // ============================================================
         private static string? TrimOrNull(string? s)
         {
             var t = (s ?? "").Trim();
@@ -542,16 +829,8 @@ namespace LawAfrica.API.Controllers
             return null;
         }
 
-        /// <summary>
-        /// Resolve town input without breaking old clients:
-        /// priority:
-        /// 1) dto.TownId
-        /// 2) dto.TownPostCode (country-scoped)
-        /// 3) dto.Town free text fallback
-        /// </summary>
         private async Task<(int? townId, string? townName, string? postCode)> ResolveTownAsync(LawReportUpsertDto dto)
         {
-            // 1) TownId
             if (dto.TownId.HasValue)
             {
                 if (dto.TownId.Value <= 0)
@@ -567,7 +846,6 @@ namespace LawAfrica.API.Controllers
                 return (t.Id, t.Name, t.PostCode);
             }
 
-            // 2) TownPostCode
             var pc = TrimOrNull(dto.TownPostCode);
             if (!string.IsNullOrWhiteSpace(pc))
             {
@@ -580,19 +858,13 @@ namespace LawAfrica.API.Controllers
                 return (t.Id, t.Name, t.PostCode);
             }
 
-            // 3) free text fallback
             var townText = TrimOrNull(dto.Town);
             return (null, townText, null);
         }
 
-        /// <summary>
-        /// ✅ Bulk resolver: resolves all TownIds/PostCodes in one DB hit for speed.
-        /// returns map keyed by batch-local index (0..batchCount-1)
-        /// </summary>
         private async Task<Dictionary<int, (int? townId, string? townName, string? postCode)>> ResolveTownsForBatchAsync(
             List<LawReportUpsertDto> batch,
-            CancellationToken ct
-        )
+            CancellationToken ct)
         {
             var map = new Dictionary<int, (int? townId, string? townName, string? postCode)>();
 
@@ -619,7 +891,6 @@ namespace LawAfrica.API.Controllers
                 townsById = towns.ToDictionary(t => t.Id, t => t);
             }
 
-            // Pull superset by countries + postcodes
             var townsByCountryAndPc = new Dictionary<string, Town>(StringComparer.OrdinalIgnoreCase);
             if (pcs.Count > 0)
             {
@@ -643,7 +914,6 @@ namespace LawAfrica.API.Controllers
                     continue;
                 }
 
-                // TownId
                 if (dto.TownId.HasValue && dto.TownId.Value > 0)
                 {
                     if (townsById.TryGetValue(dto.TownId.Value, out var t))
@@ -657,7 +927,6 @@ namespace LawAfrica.API.Controllers
                     throw new InvalidOperationException($"Row {i + 1}: Selected TownId does not exist.");
                 }
 
-                // PostCode
                 var pc = TrimOrNull(dto.TownPostCode);
                 if (!string.IsNullOrWhiteSpace(pc))
                 {
@@ -669,25 +938,18 @@ namespace LawAfrica.API.Controllers
                     throw new InvalidOperationException($"Row {i + 1}: Town not found for PostCode '{pc}' in the selected country.");
                 }
 
-                // Free text fallback
                 map[i] = (null, TrimOrNull(dto.Town), null);
             }
 
             return map;
         }
 
-        /// <summary>
-        /// ✅ Dedupe:
-        /// - if citation exists => strongest identity
-        /// - else composite with TownId when available; otherwise Town string
-        /// </summary>
         private async Task<LawReport?> FindExistingByDedupe(
             LawReportUpsertDto dto,
             int? resolvedTownId,
             string? resolvedTownName,
             string? ensuredCitation,
-            CancellationToken ct = default
-        )
+            CancellationToken ct = default)
         {
             var citation = TrimOrNull(ensuredCitation ?? dto.Citation);
             var reportNumber = dto.ReportNumber.Trim();
@@ -722,41 +984,27 @@ namespace LawAfrica.API.Controllers
             , ct);
         }
 
-        /// <summary>
-        /// ✅ Citation auto-generator:
-        /// - If dto.Citation provided => keep it
-        /// - Else generate using DecisionDate year (your rule)
-        /// - Enforces DecisionDate present when auto-generating
-        /// - Ensures DB uniqueness by checking existing citations (best-effort)
-        /// </summary>
         private async Task<string?> EnsureCitationAsync(
             LawReportUpsertDto dto,
             (int? townId, string? townName, string? postCode) resolvedTown,
-            CancellationToken ct
-        )
+            CancellationToken ct)
         {
             var existing = TrimOrNull(dto.Citation);
             if (!string.IsNullOrWhiteSpace(existing))
                 return existing;
 
-            // You clarified: citation year must be DecisionDate year.
             if (dto.DecisionDate == null)
                 throw new InvalidOperationException("DecisionDate is required to auto-generate Citation year. Provide Citation or DecisionDate.");
 
             var citationYear = dto.DecisionDate.Value.Year;
 
-            // NOTE: adapt these pieces to your exact citation style.
-            // I’m keeping it safe + predictable and easy to tweak.
-            var series = ServiceShortCode(dto.Service);               // e.g. "LLR"
-            var court = CourtShortCode((CourtType)dto.CourtType);     // e.g. "HC"
-            var townCode = TownShortCode(resolvedTown.townName);      // e.g. "K" from Kakamega (optional)
+            var series = ServiceShortCode(dto.Service);
+            var court = CourtShortCode((CourtType)dto.CourtType);
+            var townCode = TownShortCode(resolvedTown.townName);
             var tail = !string.IsNullOrWhiteSpace(dto.CaseNumber) ? dto.CaseNumber!.Trim() : $"{dto.ReportNumber.Trim()}/{dto.Year}";
 
-            var baseCitation = $"[{citationYear}] {series} ({court}{(string.IsNullOrWhiteSpace(townCode) ? "" : "-" + townCode)}) {tail}";
-            baseCitation = baseCitation.Trim();
+            var baseCitation = $"[{citationYear}] {series} ({court}{(string.IsNullOrWhiteSpace(townCode) ? "" : "-" + townCode)}) {tail}".Trim();
 
-            // Best-effort uniqueness against DB (fast):
-            // If it exists, append -2, -3, ...
             var candidate = baseCitation;
             int n = 2;
 
@@ -786,9 +1034,6 @@ namespace LawAfrica.API.Controllers
             return candidate;
         }
 
-        /// <summary>
-        /// ✅ Title includes court + town and citation if present (stable)
-        /// </summary>
         private static string BuildReportTitle(LawReportUpsertDto dto, string? resolvedTownName, string? ensuredCitation)
         {
             var parts = new List<string> { $"{dto.ReportNumber.Trim()} ({dto.Year})" };
@@ -815,51 +1060,8 @@ namespace LawAfrica.API.Controllers
             return string.Join(" - ", parts);
         }
 
-        // -------------------------
-        // DTO mapping + LABELS
-        // -------------------------
-        private LawReportDto ToDto(LawReport r, bool includeContent)
-        {
-            return new LawReportDto
-            {
-                Id = r.Id,
-                LegalDocumentId = r.LegalDocumentId,
-
-                CountryId = r.CountryId,
-                Service = r.Service,
-                CourtType = (int)r.CourtType,
-
-                ReportNumber = r.ReportNumber,
-                Year = r.Year,
-                CaseNumber = r.CaseNumber,
-                Citation = r.Citation,
-
-                DecisionType = r.DecisionType,
-                CaseType = r.CaseType,
-
-                Court = r.Court,
-
-                Town = r.Town,
-                TownId = r.TownId,
-                TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
-
-                Parties = r.Parties,
-                Judges = r.Judges,
-                DecisionDate = r.DecisionDate,
-
-                ContentText = includeContent ? (r.ContentText ?? "") : "",
-
-                Title = r.LegalDocument?.Title ?? "",
-
-                ServiceLabel = ServiceLabel(r.Service),
-                CourtTypeLabel = CourtTypeLabel(r.CourtType),
-                DecisionTypeLabel = DecisionTypeLabel(r.DecisionType),
-                CaseTypeLabel = CaseTypeLabel(r.CaseType)
-            };
-        }
-
         // ============================================================
-        // Citation pieces (safe defaults; tweak to your standard)
+        // Labels + short codes
         // ============================================================
         private static string ServiceShortCode(ReportService service) => service switch
         {
@@ -894,7 +1096,6 @@ namespace LawAfrica.API.Controllers
             _ => "HC"
         };
 
-        // Optional: 1–3 letter town code. You can replace with your own mapping later.
         private static string? TownShortCode(string? townName)
         {
             var t = TrimOrNull(townName);
@@ -903,9 +1104,6 @@ namespace LawAfrica.API.Controllers
             return char.IsLetter(c) ? char.ToUpperInvariant(c).ToString() : null;
         }
 
-        // -------------------------
-        // LABEL HELPERS (unchanged)
-        // -------------------------
         private static string ServiceLabel(ReportService service) => service switch
         {
             ReportService.LawAfricaLawReports_LLR => "LawAfrica Law Reports (LLR)",
@@ -963,500 +1161,12 @@ namespace LawAfrica.API.Controllers
             _ => "—"
         };
 
-
-
-        //Additional controllers:
-
-        // ✅ NEW: END-USER LIST/SEARCH (Paged)  ✅ Step 4A
-        // GET /api/law-reports/search?...filters...
-        //
-        // Returns lightweight list items + PreviewText from ContentText.
-        // Does NOT return full ContentText.
         // ============================================================
-        [Authorize]
-        [HttpGet("search")]
-        public async Task<ActionResult<LawReportSearchResponse>> Search(
-            [FromQuery] string? q = null,
-            [FromQuery] string? reportNumber = null,
-            [FromQuery] string? parties = null,
-            [FromQuery] string? citation = null,
-            [FromQuery] int? year = null,
-            [FromQuery] string? courtType = null,
-            [FromQuery] string? townOrPostCode = null,
-            [FromQuery] string? caseType = null,
-            [FromQuery] string? decisionType = null, // ✅ NEW
-            [FromQuery] string? sort = "year_desc",
-            [FromQuery] int page = 1,
-            [FromQuery] int pageSize = 18,
-            CancellationToken ct = default
-        )
-        {
-            // Defensive paging
-            page = page < 1 ? 1 : page;
-            pageSize = Math.Clamp(pageSize, 1, 50);
-
-            // Normalize strings
-            q = (q ?? "").Trim();
-            reportNumber = (reportNumber ?? "").Trim();
-            parties = (parties ?? "").Trim();
-            citation = (citation ?? "").Trim();
-            courtType = (courtType ?? "").Trim();
-            townOrPostCode = (townOrPostCode ?? "").Trim();
-            decisionType = (decisionType ?? "").Trim();
-            caseType = (caseType ?? "").Trim();
-
-            // Start query: only LLRServices reports
-            var query = _db.LawReports
-                .AsNoTracking()
-                .Include(x => x.LegalDocument)
-                .Include(x => x.TownRef)
-                .Where(r =>
-                    r.LegalDocument != null &&
-                    r.LegalDocument.Category == LLR_CATEGORY &&
-                    r.LegalDocument.Kind == LegalDocumentKind.Report &&
-                    r.LegalDocument.FileType == "report" &&
-                    r.LegalDocument.Status == LegalDocumentStatus.Published
-                )
-                .AsQueryable();
-
-            // ---------- Quick search ----------
-            // ---------- Quick search (Postgres ILIKE, includes ContentText) ----------
-            if (!string.IsNullOrWhiteSpace(q))
-            {
-                // Optional: guardrail to prevent abuse / huge scans
-                if (q.Length > 120) q = q[..120];
-
-                var term = q.Trim();
-                var like = $"%{EscapeLike(term)}%";
-
-                query = query.Where(r =>
-                    // transcript content search ✅
-                    EF.Functions.ILike(r.ContentText, like) ||
-
-                    // metadata search ✅
-                    (r.ReportNumber != null && EF.Functions.ILike(r.ReportNumber, like)) ||
-                    (r.Citation != null && EF.Functions.ILike(r.Citation, like)) ||
-                    (r.CaseNumber != null && EF.Functions.ILike(r.CaseNumber, like)) ||
-                    (r.Parties != null && EF.Functions.ILike(r.Parties, like)) ||
-                    (r.Court != null && EF.Functions.ILike(r.Court, like)) ||
-                    (r.Town != null && EF.Functions.ILike(r.Town, like)) ||
-                    (r.Judges != null && EF.Functions.ILike(r.Judges, like)) ||
-                    (r.LegalDocument != null && r.LegalDocument.Title != null && EF.Functions.ILike(r.LegalDocument.Title, like)) ||
-                    (r.TownRef != null && r.TownRef.PostCode != null && EF.Functions.ILike(r.TownRef.PostCode, like))
-                );
-            }
-
-            // ---------- Specific filters ----------
-            if (!string.IsNullOrWhiteSpace(reportNumber))
-            {
-                var v = reportNumber.ToLower();
-                query = query.Where(r => r.ReportNumber != null && r.ReportNumber.ToLower().Contains(v));
-            }
-
-            if (!string.IsNullOrWhiteSpace(parties))
-            {
-                var v = parties.ToLower();
-                query = query.Where(r => r.Parties != null && r.Parties.ToLower().Contains(v));
-            }
-
-            if (!string.IsNullOrWhiteSpace(citation))
-            {
-                var v = citation.ToLower();
-                query = query.Where(r => r.Citation != null && r.Citation.ToLower().Contains(v));
-            }
-
-            if (year.HasValue)
-            {
-                query = query.Where(r => r.Year == year.Value);
-            }
-
-            // CourtType: prefer enum matching if client sends int/name; fallback to Court text contains
-            if (!string.IsNullOrWhiteSpace(courtType))
-            {
-                if (TryParseCourtType(courtType, out var ctEnum))
-                {
-                    query = query.Where(r => r.CourtType == ctEnum);
-                }
-                else
-                {
-                    var v = courtType.ToLower();
-                    query = query.Where(r =>
-                        (r.Court != null && r.Court.ToLower().Contains(v)) ||
-                        (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.ToLower().Contains(v))
-                    );
-                }
-            }
-
-            // Town / PostCode
-            if (!string.IsNullOrWhiteSpace(townOrPostCode))
-            {
-                var v = townOrPostCode.ToLower();
-
-                query = query.Where(r =>
-                    (r.Town != null && r.Town.ToLower().Contains(v)) ||
-                    (r.TownRef != null && r.TownRef.PostCode != null && r.TownRef.PostCode.ToLower().Contains(v))
-                );
-            }
-
-            // CaseType: prefer enum matching if client sends int/name
-            if (!string.IsNullOrWhiteSpace(caseType))
-            {
-                if (TryParseCaseType(caseType, out var caseEnum))
-                {
-                    query = query.Where(r => r.CaseType == caseEnum);
-                }
-                else
-                {
-                    // If not parseable, we don't apply filter (avoid false negatives).
-                    // Frontend should send int or enum name (Civil/Criminal/...).
-                }
-            }
-            // DecisionType: prefer enum matching if client sends int/name (Judgment/Ruling/Award/...)
-            if (!string.IsNullOrWhiteSpace(decisionType))
-            {
-                if (TryParseDecisionType(decisionType, out var decEnum))
-                {
-                    query = query.Where(r => r.DecisionType == decEnum);
-                }
-                else
-                {
-                    // If not parseable, do not filter (avoid false negatives)
-                }
-            }
-
-            // Total count BEFORE paging
-            var total = await query.CountAsync(ct);
-
-            // ---------- Sorting ----------
-            // supported:
-            // year_desc, year_asc, date_desc, reportno_asc, parties_asc
-            query = sort switch
-            {
-                "year_asc" => query.OrderBy(r => r.Year).ThenByDescending(r => r.Id),
-                "date_desc" => query.OrderByDescending(r => r.DecisionDate).ThenByDescending(r => r.Id),
-                "reportno_asc" => query.OrderBy(r => r.ReportNumber).ThenByDescending(r => r.Id),
-                "parties_asc" => query.OrderBy(r => r.Parties).ThenByDescending(r => r.Id),
-                _ => query.OrderByDescending(r => r.Year).ThenByDescending(r => r.Id), // year_desc default
-            };
-
-            // Page slice
-            var skip = (page - 1) * pageSize;
-
-            // Pull only page rows; create PreviewText from ContentText (SQL-translatable substring)
-            const int PREVIEW_LEN = 520;
-
-            var items = await query
-                .Skip(skip)
-                .Take(pageSize)
-                .Select(r => new LawReportListItemDto
-                {
-                    Id = r.Id,
-                    LegalDocumentId = r.LegalDocumentId,
-
-                    Title = r.LegalDocument != null ? (r.LegalDocument.Title ?? "") : "",
-                    IsPremium = r.LegalDocument != null && r.LegalDocument.IsPremium,
-
-                    ReportNumber = r.ReportNumber,
-                    Year = r.Year,
-                    CaseNumber = r.CaseNumber,
-                    Citation = r.Citation,
-
-                    CourtType = (int)r.CourtType,
-                    CourtTypeLabel = CourtTypeLabel(r.CourtType),
-
-                    DecisionType = r.DecisionType,
-                    DecisionTypeLabel = DecisionTypeLabel(r.DecisionType),
-
-                    CaseType = r.CaseType,
-                    CaseTypeLabel = CaseTypeLabel(r.CaseType),
-
-                    Court = r.Court,
-
-                    Town = r.Town,
-                    TownId = r.TownId,
-                    TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
-
-                    Parties = r.Parties,
-                    Judges = r.Judges,
-                    DecisionDate = r.DecisionDate,
-
-                    // ✅ Key: preview snippet (not full content)
-                    PreviewText =
-                        r.ContentText == null ? "" :
-                        (r.ContentText.Length <= PREVIEW_LEN ? r.ContentText : r.ContentText.Substring(0, PREVIEW_LEN))
-                })
-                .ToListAsync(ct);
-
-            // Light cleanup for nicer previews (page-only; safe)
-            foreach (var it in items)
-            {
-                it.PreviewText = CleanPreview(it.PreviewText);
-            }
-
-            return Ok(new LawReportSearchResponse
-            {
-                Items = items,
-                Total = total,
-                Page = page,
-                PageSize = pageSize
-            });
-        }
-
+        // Parsing helpers
         // ============================================================
-        // ✅ NEW: Case Types (distinct from DB)  ✅ Step 4B
-        // GET /api/law-reports/case-types
-        // Returns only case types that exist in DB (with counts)
-        // ============================================================
-        [Authorize]
-        [HttpGet("case-types")]
-        public async Task<ActionResult<List<LawReportCaseTypeOptionDto>>> GetCaseTypes(CancellationToken ct)
-        {
-            // 1) Get raw distinct values + counts from SQL (no label mapping here)
-            var raw = await (
-                from r in _db.LawReports.AsNoTracking()
-                join d in _db.LegalDocuments.AsNoTracking() on r.LegalDocumentId equals d.Id
-                where d.Category == LLR_CATEGORY
-                      && d.Kind == LegalDocumentKind.Report
-                      && d.FileType == "report"
-                      && d.Status == LegalDocumentStatus.Published
-                group r by r.CaseType into g
-                select new
-                {
-                    Value = (int)g.Key,
-                    Count = g.Count()
-                }
-            ).ToListAsync(ct);
-
-            // 2) Map labels in-memory (safe)
-            var data = raw
-                .Where(x => x.Value > 0) // ignore 0 / unknown if present
-                .Select(x =>
-                {
-                    var enumVal = (ReportCaseType)x.Value;
-
-                    // Safe label: never throw
-                    string label;
-                    try { label = CaseTypeLabel(enumVal) ?? enumVal.ToString(); }
-                    catch { label = enumVal.ToString(); }
-
-                    return new LawReportCaseTypeOptionDto
-                    {
-                        Value = x.Value,
-                        Label = label,
-                        Count = x.Count
-                    };
-                })
-                .OrderBy(x => x.Label)
-                .ToList();
-
-            return Ok(data);
-        }
-
-
-        [Authorize]
-        [HttpGet("decision-types")]
-        public async Task<ActionResult<List<LawReportDecisionTypeOptionDto>>> GetDecisionTypes(CancellationToken ct)
-        {
-            var raw = await (
-                from r in _db.LawReports.AsNoTracking()
-                join d in _db.LegalDocuments.AsNoTracking() on r.LegalDocumentId equals d.Id
-                where d.Category == LLR_CATEGORY
-                      && d.Kind == LegalDocumentKind.Report
-                      && d.FileType == "report"
-                      && d.Status == LegalDocumentStatus.Published
-                group r by r.DecisionType into g
-                select new
-                {
-                    Value = (int)g.Key,
-                    Count = g.Count()
-                }
-            ).ToListAsync(ct);
-
-            var data = raw
-                .Where(x => x.Value > 0)
-                .Select(x =>
-                {
-                    var enumVal = (ReportDecisionType)x.Value;
-
-                    string label;
-                    try { label = DecisionTypeLabel(enumVal) ?? enumVal.ToString(); }
-                    catch { label = enumVal.ToString(); }
-
-                    return new LawReportDecisionTypeOptionDto
-                    {
-                        Value = x.Value,
-                        Label = label,
-                        Count = x.Count
-                    };
-                })
-                .OrderBy(x => x.Label)
-                .ToList();
-
-            return Ok(data);
-        }
-
-        //Lightweight Related Cases API:
-
-        // -------------------------
-        // ✅ RELATED CASES (DB-only, heuristic)
-        // GET /api/law-reports/{id}/related?take=8
-        // -------------------------
-        [Authorize]
-        [HttpGet("{id:int}/related")]
-        public async Task<ActionResult<List<LawReportListItemDto>>> Related(
-            int id,
-            [FromQuery] int take = 8,
-            CancellationToken ct = default
-        )
-        {
-            take = Math.Clamp(take, 1, 20);
-
-            var seed = await _db.LawReports
-                .AsNoTracking()
-                .Include(x => x.LegalDocument)
-                .FirstOrDefaultAsync(x => x.Id == id, ct);
-
-            if (seed == null) return NotFound(new { message = "Law report not found." });
-
-            // Defensive strings
-            var parties = (seed.Parties ?? "").Trim();
-            var partyTokens = parties
-                .Split(new[] { " v ", " vs ", " v. ", " vs. ", "&", "and", ",", ";", "  " }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(x => x.Trim())
-                .Where(x => x.Length >= 4) // avoid noise
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Take(6)
-                .ToList();
-
-            // Base query: only published reports in same category/kind
-            var q = _db.LawReports
-                .AsNoTracking()
-                .Include(x => x.LegalDocument)
-                .Include(x => x.TownRef)
-                .Where(r =>
-                    r.Id != seed.Id &&
-                    r.LegalDocument != null &&
-                    r.LegalDocument.Category == LLR_CATEGORY &&
-                    r.LegalDocument.Kind == LegalDocumentKind.Report &&
-                    r.LegalDocument.FileType == "report" &&
-                    r.LegalDocument.Status == LegalDocumentStatus.Published
-                )
-                .AsQueryable();
-
-            // Prefer same court/case/decision
-            q = q.Where(r => r.CourtType == seed.CourtType);
-
-            // Soft match: same case type / decision type
-            q = q.Where(r => r.CaseType == seed.CaseType || r.DecisionType == seed.DecisionType);
-
-            // Party token match (optional)
-            if (partyTokens.Count > 0)
-            {
-                // escape OUTSIDE the query
-                var likes = partyTokens
-                    .Select(t => $"%{EscapeLike(t)}%")
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                // build (A OR B OR C ...) as a SQL-translatable expression
-                Expression<Func<LawReport, bool>> predicate = r => false;
-
-                foreach (var like in likes)
-                {
-                    Expression<Func<LawReport, bool>> one = r =>
-                        (r.Parties != null && EF.Functions.ILike(r.Parties, like)) ||
-                        (r.Citation != null && EF.Functions.ILike(r.Citation, like)) ||
-                        (r.LegalDocument != null && r.LegalDocument.Title != null && EF.Functions.ILike(r.LegalDocument.Title, like));
-
-                    predicate = OrElse(predicate, one);
-                }
-
-                q = q.Where(predicate);
-            }
-            else
-            {
-                q = q.Where(r => r.Year == seed.Year);
-            }
-
-            // Rank-ish ordering: most recently updated first, then year desc, then id desc
-            var list = await q
-                .OrderByDescending(r => r.UpdatedAt ?? r.CreatedAt)
-                .ThenByDescending(r => r.Year)
-                .ThenByDescending(r => r.Id)
-                .Take(take)
-                .Select(r => new LawReportListItemDto
-                {
-                    Id = r.Id,
-                    LegalDocumentId = r.LegalDocumentId,
-
-                    Title = r.LegalDocument != null ? (r.LegalDocument.Title ?? "") : "",
-                    IsPremium = r.LegalDocument != null && r.LegalDocument.IsPremium,
-
-                    ReportNumber = r.ReportNumber,
-                    Year = r.Year,
-                    CaseNumber = r.CaseNumber,
-                    Citation = r.Citation,
-
-                    CourtType = (int)r.CourtType,
-                    CourtTypeLabel = CourtTypeLabel(r.CourtType),
-
-                    DecisionType = r.DecisionType,
-                    DecisionTypeLabel = DecisionTypeLabel(r.DecisionType),
-
-                    CaseType = r.CaseType,
-                    CaseTypeLabel = CaseTypeLabel(r.CaseType),
-
-                    Court = r.Court,
-
-                    Town = r.Town,
-                    TownId = r.TownId,
-                    TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
-
-                    Parties = r.Parties,
-                    Judges = r.Judges,
-                    DecisionDate = r.DecisionDate,
-
-                    PreviewText = "" // not needed here
-                })
-                .ToListAsync(ct);
-
-            return Ok(list);
-        }
-
-        public class LawReportDecisionTypeOptionDto
-        {
-            public int Value { get; set; }
-            public string Label { get; set; } = "";
-            public int Count { get; set; }
-        }
-
-
-
-        // DTO for the dropdown
-        public class LawReportCaseTypeOptionDto
-        {
-            public int Value { get; set; }       // enum int (1..6)
-            public string Label { get; set; } = ""; // "Criminal", "Civil", ...
-            public int Count { get; set; }       // helpful for UI
-        }
-
-
-        private static string CleanPreview(string? s)
-        {
-            if (string.IsNullOrWhiteSpace(s)) return "";
-            var t = s.Replace("\r\n", "\n").Replace("\r", "\n").Trim();
-
-            // Collapse excessive whitespace while keeping paragraph breaks
-            // (keeps two newlines, collapses 3+ into 2)
-            while (t.Contains("\n\n\n")) t = t.Replace("\n\n\n", "\n\n");
-
-            return t;
-        }
-
         private static bool TryParseCaseType(string raw, out ReportCaseType v)
         {
             v = default;
-
             var t = (raw ?? "").Trim();
             if (string.IsNullOrWhiteSpace(t)) return false;
 
@@ -1470,9 +1180,9 @@ namespace LawAfrica.API.Controllers
                 return false;
             }
 
-            // Allow names: "Civil", "Criminal", ...
             return Enum.TryParse<ReportCaseType>(t, ignoreCase: true, out v);
         }
+
         private static bool TryParseDecisionType(string input, out ReportDecisionType value)
         {
             value = default;
@@ -1480,14 +1190,12 @@ namespace LawAfrica.API.Controllers
 
             var t = input.Trim();
 
-            // int?
             if (int.TryParse(t, out var n) && Enum.IsDefined(typeof(ReportDecisionType), n))
             {
                 value = (ReportDecisionType)n;
                 return true;
             }
 
-            // name / label (case-insensitive, ignore spaces & punctuation)
             var norm = new string(t.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
 
             foreach (var v in Enum.GetValues(typeof(ReportDecisionType)).Cast<ReportDecisionType>())
@@ -1520,50 +1228,61 @@ namespace LawAfrica.API.Controllers
                 return false;
             }
 
-            // Allow names: "HighCourt", "CourtOfAppeal", ...
             return Enum.TryParse<CourtType>(t, ignoreCase: true, out v);
         }
 
         // ============================================================
-        // ✅ Bulk import DTOs (keep here or move to DTOs folder)
+        // Small helpers for LIKE + expressions
         // ============================================================
-        public class LawReportBulkImportRequest
+        private static string EscapeLike(string input)
         {
-            public List<LawReportUpsertDto>? Items { get; set; } = new();
-            public int? BatchSize { get; set; } = 200;
-            public bool? StopOnError { get; set; } = false;
-            public bool? DryRun { get; set; } = false;
+            if (string.IsNullOrEmpty(input)) return input;
+
+            return input
+                .Replace(@"\", @"\\")
+                .Replace("%", @"\%")
+                .Replace("_", @"\_");
         }
 
-        public class LawReportBulkImportResponse
+        private static string CleanPreview(string? s)
         {
-            public int Total { get; set; }
-            public int BatchSize { get; set; }
-            public bool DryRun { get; set; }
-            public bool StopOnError { get; set; }
-
-            public int Created { get; set; }
-            public int Duplicates { get; set; }
-            public int Failed { get; set; }
-
-            public List<LawReportImportItemResult> Items { get; set; } = new();
+            if (string.IsNullOrWhiteSpace(s)) return "";
+            var t = s.Replace("\r\n", "\n").Replace("\r", "\n").Trim();
+            while (t.Contains("\n\n\n")) t = t.Replace("\n\n\n", "\n\n");
+            return t;
         }
 
-        public class LawReportImportItemResult
+        private static Expression<Func<LawReport, bool>> OrElse(
+            Expression<Func<LawReport, bool>> left,
+            Expression<Func<LawReport, bool>> right)
         {
-            public int Index { get; set; }                  // 0-based index in submitted array
-            public string Status { get; set; } = "pending"; // created | duplicate | failed | pending | ready
-            public string Message { get; set; } = "";
-            public string? Detail { get; set; }
+            var p = Expression.Parameter(typeof(LawReport), "r");
 
-            public int? LawReportId { get; set; }
-            public int? LegalDocumentId { get; set; }
-            public int? ExistingLawReportId { get; set; }
+            var leftBody = Expression.Invoke(left, p);
+            var rightBody = Expression.Invoke(right, p);
 
-            public string? Citation { get; set; }
+            return Expression.Lambda<Func<LawReport, bool>>(
+                Expression.OrElse(leftBody, rightBody),
+                p
+            );
         }
 
-        //To handle searches:
+        // ============================================================
+        // Nested DTOs used by this controller (kept as you had)
+        // ============================================================
+        public class LawReportDecisionTypeOptionDto
+        {
+            public int Value { get; set; }
+            public string Label { get; set; } = "";
+            public int Count { get; set; }
+        }
+
+        public class LawReportCaseTypeOptionDto
+        {
+            public int Value { get; set; }
+            public string Label { get; set; } = "";
+            public int Count { get; set; }
+        }
 
         public class LawReportSearchResponse
         {
@@ -1608,31 +1327,51 @@ namespace LawAfrica.API.Controllers
             public string PreviewText { get; set; } = "";
         }
 
-        private static string EscapeLike(string input)
+        private (int maxChars, int maxParagraphs) GetPreviewLimits(DocumentEntitlementDecision decision)
         {
-            if (string.IsNullOrEmpty(input))
-                return input;
+            // Prefer decision-defined preview limits (reports flow)
+            var maxChars = decision.PreviewMaxChars ?? 2200;
+            var maxParas = decision.PreviewMaxParagraphs ?? 6;
 
-            // Escape LIKE wildcards so user input doesn't become a pattern
-            return input
-                .Replace(@"\", @"\\")
-                .Replace("%", @"\%")
-                .Replace("_", @"\_");
+            // Clamp for safety
+            if (maxChars < 200) maxChars = 200;
+            if (maxChars > 50_000) maxChars = 50_000;
+
+            if (maxParas < 1) maxParas = 1;
+            if (maxParas > 200) maxParas = 200;
+
+            return (maxChars, maxParas);
         }
 
-        private static Expression<Func<LawReport, bool>> OrElse(
-        Expression<Func<LawReport, bool>> left,
-        Expression<Func<LawReport, bool>> right)
+        private void ApplyEntitlementMeta(
+            LawReportDto dto,
+            DocumentEntitlementDecision decision,
+            int? previewMaxChars,
+            int? previewMaxParagraphs)
         {
-            var p = Expression.Parameter(typeof(LawReport), "r");
+            dto.RequiredProductId = decision.RequiredProductId;
+            dto.RequiredProductName = decision.RequiredProductName;
 
-            var leftBody = Expression.Invoke(left, p);
-            var rightBody = Expression.Invoke(right, p);
+            dto.RequiredAction = decision.RequiredAction switch
+            {
+                EntitlementRequiredAction.Subscribe => "Subscribe",
+                EntitlementRequiredAction.Buy => "Buy",
+                _ => "None"
+            };
 
-            return Expression.Lambda<Func<LawReport, bool>>(
-                Expression.OrElse(leftBody, rightBody),
-                p
-            );
+            dto.CtaLabel = decision.CtaLabel;
+            dto.CtaUrl = decision.CtaUrl;
+            dto.SecondaryCtaLabel = decision.SecondaryCtaLabel;
+            dto.SecondaryCtaUrl = decision.SecondaryCtaUrl;
+
+            dto.PreviewMaxChars = previewMaxChars ?? decision.PreviewMaxChars;
+            dto.PreviewMaxParagraphs = previewMaxParagraphs ?? decision.PreviewMaxParagraphs;
+
+            dto.HardStop = decision.HardStop;
+
+            dto.GrantSource = decision.GrantSource.ToString();
+            dto.DebugNote = decision.DebugNote;
         }
+
     }
 }
