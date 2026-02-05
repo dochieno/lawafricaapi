@@ -95,6 +95,7 @@ namespace LawAfrica.API.Controllers
             try
             {
                 // ✅ Validate with SERVER amount (not the UI amount)
+                // ✅ Subscription pricing is server-controlled (plan-based), UI amount is ignored
                 await _paymentValidation.ValidateStkInitiateAsync(
                     request.Purpose,
                     amount,
@@ -103,9 +104,9 @@ namespace LawAfrica.API.Controllers
                     request.ContentProductId,
                     request.InstitutionId,
                     request.DurationInMonths,
-                    request.LegalDocumentId
+                    request.LegalDocumentId,
+                    contentProductPriceId: request.ContentProductPriceId
                 );
-
                 if (request.Purpose == PaymentPurpose.PublicLegalDocumentPurchase)
                 {
                     // ✅ Validate policy only (amount check removed below)
@@ -134,8 +135,12 @@ namespace LawAfrica.API.Controllers
                 RegistrationIntentId = request.RegistrationIntentId,
                 ContentProductId = request.ContentProductId,
                 DurationInMonths = request.DurationInMonths,
-                LegalDocumentId = request.LegalDocumentId
+
+                LegalDocumentId = request.LegalDocumentId,
+
+                ContentProductPriceId = request.ContentProductPriceId // ✅ persist subscription plan for audit & fulfillment
             };
+
 
             _db.PaymentIntents.Add(intent);
             await _db.SaveChangesAsync();

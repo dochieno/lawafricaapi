@@ -30,6 +30,12 @@ namespace LawAfrica.API.Models.Payments
 
         // Optional linkage to your domain objects
         public int? ContentProductId { get; set; }
+
+        /// <summary>
+        /// ✅ NEW: links invoice line to a specific pricing plan (subscription plan).
+        /// </summary>
+        public int? ContentProductPriceId { get; set; }
+
         public int? LegalDocumentId { get; set; }
     }
 }

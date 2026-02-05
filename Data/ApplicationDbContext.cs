@@ -123,6 +123,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<AiLawReportSummary> AiLawReportSummaries => Set<AiLawReportSummary>();
     public DbSet<AiUsage> AiUsages => Set<AiUsage>();
     public DbSet<UserTrialSubscriptionRequest> UserTrialSubscriptionRequests => Set<UserTrialSubscriptionRequest>();
+    public DbSet<ContentProductPrice> ContentProductPrices => Set<ContentProductPrice>();
+
 
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -321,6 +323,40 @@ public class ApplicationDbContext : DbContext
             b.Property(x => x.TokenHash).HasMaxLength(128).IsRequired();
             b.Property(x => x.EmailNormalized).HasMaxLength(256).IsRequired();
         });
+
+        // =========================================================
+        // ContentProductPrice (Pricing Plans)
+        // =========================================================
+        modelBuilder.Entity<ContentProductPrice>(b =>
+        {
+            b.ToTable("ContentProductPrices");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Audience).HasConversion<short>();
+            b.Property(x => x.BillingPeriod).HasConversion<short>();
+
+            b.Property(x => x.Currency)
+                .HasMaxLength(10)
+                .IsRequired();
+
+            // Money precision (Postgres numeric)
+            b.Property(x => x.Amount)
+                .HasColumnType("numeric(18,2)");
+
+            b.HasIndex(x => x.ContentProductId);
+
+            // Fast lookup by audience/period/currency
+            b.HasIndex(x => new { x.ContentProductId, x.Audience, x.BillingPeriod, x.Currency });
+
+            // Optional: make filtering "active" fast
+            b.HasIndex(x => new { x.IsActive, x.EffectiveFromUtc, x.EffectiveToUtc });
+
+            b.HasOne(x => x.ContentProduct)
+                .WithMany()
+                .HasForeignKey(x => x.ContentProductId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
 
         //AI
         modelBuilder.Entity<AiLawReportSummary>()
@@ -615,6 +651,8 @@ public class ApplicationDbContext : DbContext
 
             b.HasIndex(x => x.CheckoutRequestId);
             b.HasIndex(x => x.InvoiceId);
+            b.HasIndex(x => x.ContentProductPriceId);
+
         });
 
         //TOCLegalDocument
@@ -823,6 +861,8 @@ public class ApplicationDbContext : DbContext
             b.HasIndex(x => x.InvoiceId);
             b.Property(x => x.Description).HasMaxLength(200);
             b.Property(x => x.ItemCode).HasMaxLength(50);
+            b.HasIndex(x => x.ContentProductPriceId);
+
         });
 
         modelBuilder.Entity<InvoiceSequence>(b =>

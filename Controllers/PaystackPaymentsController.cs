@@ -1,8 +1,11 @@
-﻿using LawAfrica.API.Data;
+﻿// =======================================================
+// FILE: Controllers/PaystackPaymentsController.cs
+// =======================================================
+using LawAfrica.API.Data;
 using LawAfrica.API.Helpers;
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.DTOs.Payments;
-using LawAfrica.API.Models.LawReports.Enums;
+using LawAfrica.API.Models.Documents;
 using LawAfrica.API.Models.Payments;
 using LawAfrica.API.Services;
 using LawAfrica.API.Services.Documents;
@@ -24,7 +27,6 @@ namespace LawAfrica.API.Controllers
         private readonly PaystackOptions _opts;
         private readonly ILogger<PaystackPaymentsController> _logger;
 
-        // ✅ bring these here (remove PaystackReturnController entirely)
         private readonly PaymentFinalizerService _finalizer;
         private readonly LegalDocumentPurchaseFulfillmentService _legalDocFulfillment;
 
@@ -46,6 +48,7 @@ namespace LawAfrica.API.Controllers
             _legalDocFulfillment = legalDocFulfillment;
         }
 
+        // ✅ API proxy return: Paystack redirects here, then we redirect to correct client/web return
         [AllowAnonymous]
         [HttpGet("return")]
         public async Task<IActionResult> ReturnToFrontend(
@@ -79,12 +82,12 @@ namespace LawAfrica.API.Controllers
 
             targetBase = targetBase.Trim();
 
-            // ✅ Append reference safely (handles if target already has ? )
+            // ✅ Append reference safely
             var sep = targetBase.Contains("?") ? "&" : "?";
             return Redirect($"{targetBase}{sep}reference={Uri.EscapeDataString(r)}");
         }
 
-
+        // Optional: some browsers / flows might use this route name
         [AllowAnonymous]
         [HttpGet("return-visit")]
         public Task<IActionResult> ReturnVisitGetFallback(
@@ -158,27 +161,141 @@ namespace LawAfrica.API.Controllers
                 }
             }
 
-            // ✅ Normalize incoming currency (fallback KES)
+            // ✅ Normalize currency (fallback KES)
             var currency = string.IsNullOrWhiteSpace(request.Currency)
                 ? "KES"
                 : request.Currency.Trim().ToUpperInvariant();
 
-            // ✅ Compute VAT-aware amount/currency for legal doc purchases (gross amount)
+            // ✅ Amount in MAJOR units
             var amountMajor = request.Amount;
 
+            // ✅ VAT-aware legal doc quote (server truth)
             if (request.Purpose == PaymentPurpose.PublicLegalDocumentPurchase && request.LegalDocumentId.HasValue)
             {
                 var quote = await QuoteLegalDocumentAsync(request.LegalDocumentId.Value, ct);
                 amountMajor = quote.Gross;
                 currency = quote.Currency;
 
-                // Tolerant to older frontend sending base price:
-                // we override to server truth and log (do NOT break flow).
                 if (request.Amount > 0 && VatMath.Round2(request.Amount) != quote.Gross)
                 {
                     _logger.LogWarning("[PAYSTACK INIT] Amount overridden by VAT quote. request={Req} quoteGross={Gross} docId={DocId}",
                         request.Amount, quote.Gross, request.LegalDocumentId.Value);
                 }
+            }
+
+            // ✅ Subscription plan truth (server truth) - overrides amount/currency for subscriptions
+            if (request.Purpose == PaymentPurpose.PublicProductSubscription ||
+                request.Purpose == PaymentPurpose.InstitutionProductSubscription)
+            {
+                if (!request.ContentProductId.HasValue || request.ContentProductId.Value <= 0)
+                {
+                    return BadRequest(new ProblemDetails
+                    {
+                        Title = "Missing ContentProductId",
+                        Detail = "ContentProductId is required for subscriptions.",
+                        Status = StatusCodes.Status400BadRequest
+                    });
+                }
+
+                if (!request.ContentProductPriceId.HasValue || request.ContentProductPriceId.Value <= 0)
+                {
+                    return BadRequest(new ProblemDetails
+                    {
+                        Title = "Missing ContentProductPriceId",
+                        Detail = "ContentProductPriceId is required for subscriptions.",
+                        Status = StatusCodes.Status400BadRequest
+                    });
+                }
+
+                var now = DateTime.UtcNow;
+
+                var plan = await _db.ContentProductPrices
+                    .AsNoTracking()
+                    .Where(p => p.Id == request.ContentProductPriceId.Value)
+                    .Select(p => new
+                    {
+                        p.Id,
+                        p.ContentProductId,
+                        p.Amount,
+                        p.Currency,
+                        p.IsActive,
+                        p.EffectiveFromUtc,
+                        p.EffectiveToUtc,
+                        p.Audience,
+                        p.BillingPeriod
+                    })
+                    .FirstOrDefaultAsync(ct);
+
+                if (plan == null)
+                {
+                    return BadRequest(new ProblemDetails
+                    {
+                        Title = "Invalid pricing plan",
+                        Detail = "Pricing plan not found.",
+                        Status = StatusCodes.Status400BadRequest
+                    });
+                }
+
+                if (plan.ContentProductId != request.ContentProductId.Value)
+                {
+                    return BadRequest(new ProblemDetails
+                    {
+                        Title = "Invalid pricing plan",
+                        Detail = "Pricing plan does not match ContentProductId.",
+                        Status = StatusCodes.Status400BadRequest
+                    });
+                }
+
+                if (!plan.IsActive)
+                {
+                    return BadRequest(new ProblemDetails
+                    {
+                        Title = "Pricing plan inactive",
+                        Detail = "Pricing plan is not active.",
+                        Status = StatusCodes.Status400BadRequest
+                    });
+                }
+
+                if (plan.EffectiveFromUtc.HasValue && plan.EffectiveFromUtc.Value > now)
+                {
+                    return BadRequest(new ProblemDetails
+                    {
+                        Title = "Pricing plan not yet effective",
+                        Detail = "Pricing plan is not yet effective.",
+                        Status = StatusCodes.Status400BadRequest
+                    });
+                }
+
+                if (plan.EffectiveToUtc.HasValue && plan.EffectiveToUtc.Value < now)
+                {
+                    return BadRequest(new ProblemDetails
+                    {
+                        Title = "Pricing plan expired",
+                        Detail = "Pricing plan has expired.",
+                        Status = StatusCodes.Status400BadRequest
+                    });
+                }
+
+                var expectedAudience =
+                    request.Purpose == PaymentPurpose.PublicProductSubscription
+                        ? PricingAudience.Public
+                        : PricingAudience.Institution;
+
+                if (plan.Audience != expectedAudience)
+                {
+                    return BadRequest(new ProblemDetails
+                    {
+                        Title = "Pricing plan mismatch",
+                        Detail = "Pricing plan audience mismatch.",
+                        Status = StatusCodes.Status400BadRequest
+                    });
+                }
+
+                // ✅ Server truth
+                amountMajor = plan.Amount;
+                currency = string.IsNullOrWhiteSpace(plan.Currency)
+                    ? currency
+                    : plan.Currency.Trim().ToUpperInvariant();
             }
 
             if (amountMajor <= 0)
@@ -199,7 +316,6 @@ namespace LawAfrica.API.Controllers
                 Purpose = request.Purpose,
                 Status = PaymentStatus.Pending,
 
-                // ✅ Store server-truth amount/currency (VAT-aware for legal docs)
                 Amount = amountMajor,
                 Currency = currency,
 
@@ -207,14 +323,18 @@ namespace LawAfrica.API.Controllers
                 InstitutionId = request.InstitutionId,
                 RegistrationIntentId = request.RegistrationIntentId,
                 ContentProductId = request.ContentProductId,
-                DurationInMonths = request.DurationInMonths,
+                DurationInMonths = request.DurationInMonths, // legacy (still stored)
                 LegalDocumentId = request.LegalDocumentId,
+
+                // ✅ NEW
+                ContentProductPriceId = request.ContentProductPriceId,
 
                 CreatedAt = DateTime.UtcNow
             };
 
             var clientReturn = request.ClientReturnUrl ?? request.CallbackUrl;
             intent.ClientReturnUrl = string.IsNullOrWhiteSpace(clientReturn) ? null : clientReturn.Trim();
+
             _db.PaymentIntents.Add(intent);
             await _db.SaveChangesAsync(ct);
 
@@ -229,20 +349,17 @@ namespace LawAfrica.API.Controllers
             // 3) Call Paystack initialize
             try
             {
-                // ✅ CRITICAL FIX:
-                // - Signup: keep existing behavior (frontend callback URL)
-                // - Non-signup: force callback to API proxy GET /return (anonymous), then redirect to frontend
+                // ✅ always API proxy return (then we redirect to client/web in GET /return)
                 var callbackUrl = ResolvePaystackCallbackUrl(request.Purpose);
 
                 var init = await _paystack.InitializeTransactionAsync(
                     email: email!,
-                    amountMajor: amountMajor,     // ✅ VAT-aware gross amount (legal docs)
-                    currency: currency,           // ✅ currency from doc/config
+                    amountMajor: amountMajor,
+                    currency: currency,
                     reference: reference,
                     callbackUrl: callbackUrl,
                     ct: ct);
 
-                // Save provider reference from Paystack response (often same as ours)
                 intent.ProviderReference = init.Reference;
                 intent.UpdatedAt = DateTime.UtcNow;
                 await _db.SaveChangesAsync(ct);
@@ -284,9 +401,7 @@ namespace LawAfrica.API.Controllers
 
             var intent = await _db.PaymentIntents
                 .AsNoTracking()
-                .Where(x =>
-                    x.Provider == PaymentProvider.Paystack &&
-                    x.ProviderReference == reference)
+                .Where(x => x.Provider == PaymentProvider.Paystack && x.ProviderReference == reference)
                 .Select(x => new
                 {
                     x.Id,
@@ -294,7 +409,8 @@ namespace LawAfrica.API.Controllers
                     x.LegalDocumentId,
                     x.RegistrationIntentId,
                     x.ContentProductId,
-                    x.InstitutionId
+                    x.InstitutionId,
+                    x.ContentProductPriceId
                 })
                 .FirstOrDefaultAsync(ct);
 
@@ -310,13 +426,14 @@ namespace LawAfrica.API.Controllers
                     legalDocumentId = intent.LegalDocumentId,
                     registrationIntentId = intent.RegistrationIntentId,
                     contentProductId = intent.ContentProductId,
-                    institutionId = intent.InstitutionId
+                    institutionId = intent.InstitutionId,
+                    contentProductPriceId = intent.ContentProductPriceId
                 }
             });
         }
 
         // ============================================================
-        // ✅ POST /return-visit (optional logging)
+        // Optional logging endpoint (kept)
         // ============================================================
         public class ReturnVisitRequest
         {
@@ -335,7 +452,7 @@ namespace LawAfrica.API.Controllers
         }
 
         // ============================================================
-        // ✅ POST /confirm (server-to-server verify + fulfill)
+        // ✅ POST /confirm (server-to-server verify + fulfill + finalize)
         // ============================================================
         public class ConfirmPaystackRequest
         {
@@ -351,14 +468,12 @@ namespace LawAfrica.API.Controllers
                 return BadRequest("Reference is required.");
 
             var intent = await _db.PaymentIntents
-                .FirstOrDefaultAsync(x =>
-                    x.Provider == PaymentProvider.Paystack &&
-                    x.ProviderReference == reference, ct);
+                .FirstOrDefaultAsync(x => x.Provider == PaymentProvider.Paystack && x.ProviderReference == reference, ct);
 
             if (intent == null)
                 return NotFound("PaymentIntent not found.");
 
-            // ✅ If caller is authenticated, enforce ownership (prevents hijacking)
+            // ✅ If caller is authenticated, enforce ownership
             if (User?.Identity?.IsAuthenticated == true)
             {
                 var userId = User.GetUserId();
@@ -366,7 +481,7 @@ namespace LawAfrica.API.Controllers
                     return Forbid();
             }
 
-            // ✅ If already success, finalize+fulfill idempotently
+            // ✅ If already success, fulfill+finalize idempotently
             if (intent.Status == PaymentStatus.Success)
             {
                 if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase)
@@ -383,7 +498,7 @@ namespace LawAfrica.API.Controllers
                 });
             }
 
-            // Otherwise verify now (server-to-server truth)
+            // Verify now (server-to-server truth)
             var verify = await _paystack.VerifyTransactionAsync(reference, ct);
 
             if (!verify.IsSuccessful)
@@ -407,11 +522,9 @@ namespace LawAfrica.API.Controllers
 
             await _db.SaveChangesAsync(ct);
 
-            // Fulfill legal doc purchase
             if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase)
                 await _legalDocFulfillment.FulfillAsync(intent);
 
-            // Finalize
             await _finalizer.FinalizeIfNeededAsync(intent.Id);
 
             return Ok(new
@@ -426,45 +539,14 @@ namespace LawAfrica.API.Controllers
         // =========================
         // Helpers
         // =========================
-        /*  private string ResolvePaystackCallbackUrl(PaymentPurpose purpose)
-          {
-              // ✅ DO NOT mess signup flow
-              if (purpose == PaymentPurpose.PublicSignupFee)
-              {
-                  // For signup, callback goes to FRONTEND return (existing behavior)
-                  var fallbackFrontendReturn = "https://lawafricadigitalhub.pages.dev/payments/paystack/return";
 
-                  var configured = (_opts.CallbackUrl ?? "").Trim();
-                  if (string.IsNullOrWhiteSpace(configured)) return fallbackFrontendReturn;
-
-                  // If someone mistakenly set callback to API return, still fallback to frontend
-                  if (configured.Contains("/api/payments/paystack/return", StringComparison.OrdinalIgnoreCase))
-                      return fallbackFrontendReturn;
-
-                  // If set to return-visit, also fallback
-                  if (configured.Contains("return-visit", StringComparison.OrdinalIgnoreCase))
-                      return fallbackFrontendReturn;
-
-                  return configured.TrimEnd('/');
-              }
-
-              // ✅ Non-signup purchases: go through API proxy return
-              return BuildApiReturnProxyUrl();
-          }*/
-
+        // ✅ Always use API proxy return (Paystack redirects here, then we redirect to client/web)
         private string ResolvePaystackCallbackUrl(PaymentPurpose purpose)
-        {
-
-            return BuildApiReturnProxyUrl();
-        }
+            => BuildApiReturnProxyUrl();
 
         private string BuildApiReturnProxyUrl()
         {
-            // ✅ Best: explicitly configured public API base URL
             var apiBase = (_opts.ApiPublicBaseUrl ?? "").Trim();
-
-            // ✅ SECOND BEST: reuse PublicBaseUrl (you already set Paystack__PublicBaseUrl to your API domain)
-            // This avoids broken forwarded headers behind Render/Cloudflare.
             if (string.IsNullOrWhiteSpace(apiBase))
                 apiBase = (_opts.PublicBaseUrl ?? "").Trim();
 
@@ -474,11 +556,10 @@ namespace LawAfrica.API.Controllers
                 return $"{apiBase}/api/payments/paystack/return";
             }
 
-            // Fallback: derive from request headers
             var forwardedProto = Request.Headers["X-Forwarded-Proto"].ToString();
             var forwardedHost = Request.Headers["X-Forwarded-Host"].ToString();
 
-            string FirstHeaderValue(string v)
+            static string FirstHeaderValue(string v)
                 => string.IsNullOrWhiteSpace(v) ? "" : v.Split(',')[0].Trim();
 
             var scheme = FirstHeaderValue(forwardedProto);
@@ -543,7 +624,10 @@ namespace LawAfrica.API.Controllers
                 (net, vat, gross) = VatMath.FromNet(price, rate);
             }
 
-            var currency = string.IsNullOrWhiteSpace(doc.PublicCurrency) ? "KES" : doc.PublicCurrency!.Trim().ToUpperInvariant();
+            var currency = string.IsNullOrWhiteSpace(doc.PublicCurrency)
+                ? "KES"
+                : doc.PublicCurrency!.Trim().ToUpperInvariant();
+
             return (net, vat, gross, currency);
         }
     }

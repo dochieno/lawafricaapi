@@ -14,7 +14,19 @@ namespace LawAfrica.API.Models.DTOs.Payments
         public int? InstitutionId { get; set; }
         public int? RegistrationIntentId { get; set; }
         public int? ContentProductId { get; set; }
+
+        /// <summary>
+        /// ✅ NEW: Selected pricing plan (recommended for subscriptions).
+        /// Server uses this to compute amount/currency and duration (Monthly/Annual).
+        /// </summary>
+        public int? ContentProductPriceId { get; set; }
+
+        /// <summary>
+        /// Legacy: Used for subscriptions (months), optional.
+        /// If ContentProductPriceId is provided, server ignores this for paid subscriptions.
+        /// </summary>
         public int? DurationInMonths { get; set; }
+
         public int? LegalDocumentId { get; set; }
 
         [JsonPropertyName("clientReturnUrl")]
@@ -23,8 +35,7 @@ namespace LawAfrica.API.Models.DTOs.Payments
         // Accept alias from mobile if sent as callbackUrl
         [JsonPropertyName("callbackUrl")]
         public string? CallbackUrl { get; set; }
+
         public string? Email { get; set; }
-
-
     }
 }

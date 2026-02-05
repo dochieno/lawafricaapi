@@ -1,4 +1,7 @@
-﻿using LawAfrica.API.Data;
+﻿// =======================================================
+// FILE: Services/PaymentFinalizerService.cs
+// =======================================================
+using LawAfrica.API.Data;
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.Payments;
 using Microsoft.EntityFrameworkCore;
@@ -85,12 +88,14 @@ namespace LawAfrica.API.Services
             }
             else if (intent.Purpose == PaymentPurpose.PublicProductSubscription)
             {
-                // ✅ Public individual subscription activation
                 if (intent.UserId == null || intent.ContentProductId == null)
                     throw new InvalidOperationException("Missing UserId or ContentProductId.");
 
-                var months = intent.DurationInMonths ?? 1;
-                if (months <= 0) months = 1;
+                var months = await ResolveSubscriptionMonthsAsync(
+                    contentProductId: intent.ContentProductId.Value,
+                    contentProductPriceId: intent.ContentProductPriceId,
+                    legacyDurationInMonths: intent.DurationInMonths
+                );
 
                 await CreateOrExtendUserSubscriptionAsync(
                     userId: intent.UserId.Value,
@@ -104,12 +109,16 @@ namespace LawAfrica.API.Services
                 if (intent.InstitutionId == null || intent.ContentProductId == null)
                     throw new InvalidOperationException("Missing InstitutionId or ContentProductId.");
 
-                var durationMonths = intent.DurationInMonths ?? 1;
+                var months = await ResolveSubscriptionMonthsAsync(
+                    contentProductId: intent.ContentProductId.Value,
+                    contentProductPriceId: intent.ContentProductPriceId,
+                    legacyDurationInMonths: intent.DurationInMonths
+                );
 
                 await _institutionSubscriptionService.CreateOrExtendSubscriptionAsync(
                     intent.InstitutionId.Value,
                     intent.ContentProductId.Value,
-                    durationMonths
+                    months
                 );
             }
 
@@ -125,7 +134,6 @@ namespace LawAfrica.API.Services
             if (pi.Status != PaymentStatus.Success) throw new InvalidOperationException("Payment not successful.");
             if (pi.IsFinalized) return;
 
-            // Optional: persist admin id
             if (finalizedByAdminId.HasValue)
             {
                 pi.ApprovedByUserId = finalizedByAdminId.Value;
@@ -135,6 +143,56 @@ namespace LawAfrica.API.Services
             }
 
             await FinalizeIfNeededAsync(paymentIntentId);
+        }
+
+        // ✅ Plan-first months (Monthly=1, Annual=12). Fallback to legacy DurationInMonths, then 1.
+        private async Task<int> ResolveSubscriptionMonthsAsync(int contentProductId, int? contentProductPriceId, int? legacyDurationInMonths)
+        {
+            if (contentProductPriceId.HasValue && contentProductPriceId.Value > 0)
+            {
+                var now = DateTime.UtcNow;
+
+                var plan = await _db.ContentProductPrices
+                    .AsNoTracking()
+                    .Where(p => p.Id == contentProductPriceId.Value)
+                    .Select(p => new
+                    {
+                        p.Id,
+                        p.ContentProductId,
+                        p.IsActive,
+                        p.EffectiveFromUtc,
+                        p.EffectiveToUtc,
+                        p.BillingPeriod
+                    })
+                    .FirstOrDefaultAsync();
+
+                if (plan == null)
+                    throw new InvalidOperationException("Pricing plan not found for this payment.");
+
+                if (plan.ContentProductId != contentProductId)
+                    throw new InvalidOperationException("Pricing plan does not match ContentProductId for this payment.");
+
+                if (!plan.IsActive)
+                    throw new InvalidOperationException("Pricing plan is not active for this payment.");
+
+                if (plan.EffectiveFromUtc.HasValue && plan.EffectiveFromUtc.Value > now)
+                    throw new InvalidOperationException("Pricing plan is not yet effective for this payment.");
+
+                if (plan.EffectiveToUtc.HasValue && plan.EffectiveToUtc.Value < now)
+                    throw new InvalidOperationException("Pricing plan has expired for this payment.");
+
+                return plan.BillingPeriod switch
+                {
+                    BillingPeriod.Monthly => 1,
+                    BillingPeriod.Annual => 12,
+                    _ => 1
+                };
+            }
+
+            // legacy fallback
+            var months = legacyDurationInMonths ?? 1;
+            if (months <= 0) months = 1;
+            return months;
         }
 
         private async Task CreateOrExtendUserSubscriptionAsync(int userId, int contentProductId, int months, int? finalizedByAdminId)

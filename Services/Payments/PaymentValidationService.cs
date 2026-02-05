@@ -23,7 +23,9 @@ namespace LawAfrica.API.Services.Payments
             int? contentProductId,
             int? institutionId,
             int? durationInMonths,
-            int? legalDocumentId = null)
+            int? legalDocumentId = null,
+            int? contentProductPriceId = null // ✅ plan id
+        )
         {
             // -------------------------------
             // Basic validation (fail fast)
@@ -34,7 +36,7 @@ namespace LawAfrica.API.Services.Payments
             if (string.IsNullOrWhiteSpace(phoneNumber))
                 throw new InvalidOperationException("PhoneNumber is required.");
 
-            phoneNumber = phoneNumber.Trim().Replace(" ", "");
+            phoneNumber = (phoneNumber ?? "").Trim().Replace(" ", "");
 
             try
             {
@@ -68,6 +70,9 @@ namespace LawAfrica.API.Services.Payments
 
                     if (legalDocumentId.HasValue)
                         throw new InvalidOperationException("LegalDocumentId must be omitted for PublicSignupFee.");
+
+                    if (contentProductPriceId.HasValue)
+                        throw new InvalidOperationException("ContentProductPriceId must be omitted for PublicSignupFee.");
                     break;
 
                 case PaymentPurpose.PublicProductPurchase:
@@ -85,9 +90,12 @@ namespace LawAfrica.API.Services.Payments
 
                     if (legalDocumentId.HasValue)
                         throw new InvalidOperationException("LegalDocumentId must be omitted for PublicProductPurchase.");
+
+                    if (contentProductPriceId.HasValue)
+                        throw new InvalidOperationException("ContentProductPriceId must be omitted for PublicProductPurchase.");
                     break;
 
-                // ✅ NEW: Public subscription
+                // ✅ Public subscription (plan REQUIRED)
                 case PaymentPurpose.PublicProductSubscription:
                     if (!contentProductId.HasValue || contentProductId.Value <= 0)
                         throw new InvalidOperationException("ContentProductId is required for PublicProductSubscription.");
@@ -98,13 +106,18 @@ namespace LawAfrica.API.Services.Payments
                     if (institutionId.HasValue)
                         throw new InvalidOperationException("InstitutionId must be omitted for PublicProductSubscription.");
 
-                    if (!durationInMonths.HasValue || durationInMonths.Value <= 0)
-                        throw new InvalidOperationException("DurationInMonths must be greater than 0 for PublicProductSubscription.");
-
                     if (legalDocumentId.HasValue)
                         throw new InvalidOperationException("LegalDocumentId must be omitted for PublicProductSubscription.");
+
+                    if (!contentProductPriceId.HasValue || contentProductPriceId.Value <= 0)
+                        throw new InvalidOperationException("ContentProductPriceId is required for PublicProductSubscription.");
+
+                    // duration is legacy fallback only
+                    if (durationInMonths.HasValue && durationInMonths.Value <= 0)
+                        throw new InvalidOperationException("DurationInMonths must be greater than 0 if provided.");
                     break;
 
+                // ✅ Institution subscription (plan REQUIRED)
                 case PaymentPurpose.InstitutionProductSubscription:
                     if (!institutionId.HasValue || institutionId.Value <= 0)
                         throw new InvalidOperationException("InstitutionId is required for InstitutionProductSubscription.");
@@ -112,14 +125,17 @@ namespace LawAfrica.API.Services.Payments
                     if (!contentProductId.HasValue || contentProductId.Value <= 0)
                         throw new InvalidOperationException("ContentProductId is required for InstitutionProductSubscription.");
 
-                    if (!durationInMonths.HasValue || durationInMonths.Value <= 0)
-                        throw new InvalidOperationException("DurationInMonths must be greater than 0 for InstitutionProductSubscription.");
-
                     if (registrationIntentId.HasValue)
                         throw new InvalidOperationException("RegistrationIntentId must be omitted for InstitutionProductSubscription.");
 
                     if (legalDocumentId.HasValue)
                         throw new InvalidOperationException("LegalDocumentId must be omitted for InstitutionProductSubscription.");
+
+                    if (!contentProductPriceId.HasValue || contentProductPriceId.Value <= 0)
+                        throw new InvalidOperationException("ContentProductPriceId is required for InstitutionProductSubscription.");
+
+                    if (durationInMonths.HasValue && durationInMonths.Value <= 0)
+                        throw new InvalidOperationException("DurationInMonths must be greater than 0 if provided.");
                     break;
 
                 case PaymentPurpose.PublicLegalDocumentPurchase:
@@ -137,6 +153,9 @@ namespace LawAfrica.API.Services.Payments
 
                     if (durationInMonths.HasValue)
                         throw new InvalidOperationException("DurationInMonths must be omitted for PublicLegalDocumentPurchase.");
+
+                    if (contentProductPriceId.HasValue)
+                        throw new InvalidOperationException("ContentProductPriceId must be omitted for PublicLegalDocumentPurchase.");
                     break;
 
                 default:
@@ -175,7 +194,6 @@ namespace LawAfrica.API.Services.Payments
                 if (product == null)
                     throw new InvalidOperationException("Content product not found.");
 
-                // ✅ Public subscription must be allowed & must be subscription-based
                 if (purpose == PaymentPurpose.PublicProductSubscription)
                 {
                     if (!product.AvailableToPublic)
@@ -183,6 +201,27 @@ namespace LawAfrica.API.Services.Payments
 
                     if (product.PublicAccessModel != ProductAccessModel.Subscription)
                         throw new InvalidOperationException("This product is not available as a public subscription.");
+                }
+
+                if (purpose == PaymentPurpose.InstitutionProductSubscription)
+                {
+                    if (!product.AvailableToInstitutions)
+                        throw new InvalidOperationException("This product is not available to institutions.");
+
+                    if (product.InstitutionAccessModel != ProductAccessModel.Subscription)
+                        throw new InvalidOperationException("This product is not available as an institution subscription.");
+                }
+
+                // ✅ Validate plan (ContentProductPriceId) for subscription purposes
+                if (purpose == PaymentPurpose.PublicProductSubscription ||
+                    purpose == PaymentPurpose.InstitutionProductSubscription)
+                {
+                    await ValidatePlanAsync(
+                        contentProductId: contentProductId!.Value,
+                        contentProductPriceId: contentProductPriceId!.Value,
+                        purpose: purpose,
+                        amount: amount
+                    );
                 }
             }
 
@@ -221,6 +260,61 @@ namespace LawAfrica.API.Services.Payments
                 if (Math.Abs(a - e) > 0.01m)
                     throw new InvalidOperationException("Amount does not match current document price.");
             }
+        }
+
+        private async Task ValidatePlanAsync(
+            int contentProductId,
+            int contentProductPriceId,
+            PaymentPurpose purpose,
+            decimal amount)
+        {
+            var now = DateTime.UtcNow;
+
+            var plan = await _db.ContentProductPrices
+                .AsNoTracking()
+                .Where(x => x.Id == contentProductPriceId)
+                .Select(x => new
+                {
+                    x.Id,
+                    x.ContentProductId,
+                    x.Amount,
+                    x.Currency,
+                    x.IsActive,
+                    x.EffectiveFromUtc,
+                    x.EffectiveToUtc,
+                    x.Audience,
+                    x.BillingPeriod
+                })
+                .FirstOrDefaultAsync();
+
+            if (plan == null)
+                throw new InvalidOperationException("Invalid subscription plan (ContentProductPriceId not found).");
+
+            if (plan.ContentProductId != contentProductId)
+                throw new InvalidOperationException("Subscription plan does not belong to the selected product.");
+
+            if (!plan.IsActive)
+                throw new InvalidOperationException("This subscription plan is currently not available.");
+
+            if (plan.EffectiveFromUtc.HasValue && plan.EffectiveFromUtc.Value > now)
+                throw new InvalidOperationException("This subscription plan is not yet active.");
+
+            if (plan.EffectiveToUtc.HasValue && plan.EffectiveToUtc.Value < now)
+                throw new InvalidOperationException("This subscription plan has expired.");
+
+            // Audience must match purpose
+            if (purpose == PaymentPurpose.PublicProductSubscription && plan.Audience != PricingAudience.Public)
+                throw new InvalidOperationException("This plan is not available for public subscriptions.");
+
+            if (purpose == PaymentPurpose.InstitutionProductSubscription && plan.Audience != PricingAudience.Institution)
+                throw new InvalidOperationException("This plan is not available for institution subscriptions.");
+
+            // Amount must match plan amount (server truth)
+            var a = Round2(amount);
+            var e = Round2(plan.Amount);
+
+            if (Math.Abs(a - e) > 0.01m)
+                throw new InvalidOperationException("Amount does not match the selected subscription plan.");
         }
 
         public async Task ValidateManualInstitutionSubscriptionAsync(

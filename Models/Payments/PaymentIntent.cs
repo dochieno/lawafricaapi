@@ -23,6 +23,11 @@ namespace LawAfrica.API.Models.Payments
         public int? RegistrationIntentId { get; set; }
         public int? ContentProductId { get; set; }
 
+        /// <summary>
+        /// ✅ NEW: Selected pricing plan for subscriptions (or future priced purchases).
+        /// </summary>
+        public int? ContentProductPriceId { get; set; }
+
         // Amount & currency
         public decimal Amount { get; set; }
         public string Currency { get; set; } = "KES";
@@ -66,19 +71,20 @@ namespace LawAfrica.API.Models.Payments
 
         public bool IsFinalized { get; set; } = false;
 
+        /// <summary>
+        /// Legacy: months-based duration (kept for backwards compatibility).
+        /// If ContentProductPriceId is provided, duration can be derived from BillingPeriod.
+        /// </summary>
         public int? DurationInMonths { get; set; }
 
         // ✅ NEW: Legal document purchase
         public int? LegalDocumentId { get; set; }
 
-            public string? ProviderReference { get; set; }
+        public string? ProviderReference { get; set; }
 
-    
         public string? ProviderTransactionId { get; set; }
 
-
         public string? ProviderChannel { get; set; }
-
 
         public DateTime? ProviderPaidAt { get; set; }
 
@@ -87,6 +93,5 @@ namespace LawAfrica.API.Models.Payments
         public int? InvoiceId { get; set; }
         public Invoice? Invoice { get; set; }
         public string? ClientReturnUrl { get; set; }
-
     }
 }
