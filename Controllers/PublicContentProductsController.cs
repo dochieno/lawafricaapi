@@ -1,4 +1,4 @@
-﻿// ✅ src/Controllers/PublicContentProductsController.cs
+﻿// Controllers/PublicContentProductsController.cs
 using LawAfrica.API.Data;
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.DTOs.Products;
