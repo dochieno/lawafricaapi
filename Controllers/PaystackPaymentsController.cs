@@ -9,6 +9,7 @@ using LawAfrica.API.Models.Documents;
 using LawAfrica.API.Models.Payments;
 using LawAfrica.API.Services;
 using LawAfrica.API.Services.Documents;
+using LawAfrica.API.Services.Emails; // ✅ NEW (invoice email)
 using LawAfrica.API.Services.Payments;
 using LawAfrica.API.Services.Tax; // ✅ VAT math
 using Microsoft.AspNetCore.Authorization;
@@ -30,13 +31,19 @@ namespace LawAfrica.API.Controllers
         private readonly PaymentFinalizerService _finalizer;
         private readonly LegalDocumentPurchaseFulfillmentService _legalDocFulfillment;
 
+        // ✅ NEW (invoice generation + email)
+        private readonly InvoiceNumberGenerator _invoiceNumberGenerator;
+        private readonly EmailComposer _emailComposer;
+
         public PaystackPaymentsController(
             ApplicationDbContext db,
             PaystackService paystack,
             IOptions<PaystackOptions> opts,
             ILogger<PaystackPaymentsController> logger,
             PaymentFinalizerService finalizer,
-            LegalDocumentPurchaseFulfillmentService legalDocFulfillment
+            LegalDocumentPurchaseFulfillmentService legalDocFulfillment,
+            InvoiceNumberGenerator invoiceNumberGenerator,   // ✅ NEW
+            EmailComposer emailComposer                      // ✅ NEW
         )
         {
             _db = db;
@@ -46,6 +53,9 @@ namespace LawAfrica.API.Controllers
 
             _finalizer = finalizer;
             _legalDocFulfillment = legalDocFulfillment;
+
+            _invoiceNumberGenerator = invoiceNumberGenerator; // ✅ NEW
+            _emailComposer = emailComposer;                   // ✅ NEW
         }
 
         // ✅ API proxy return: Paystack redirects here, then we redirect to correct client/web return
@@ -452,7 +462,7 @@ namespace LawAfrica.API.Controllers
         }
 
         // ============================================================
-        // ✅ POST /confirm (server-to-server verify + fulfill + finalize)
+        // ✅ POST /confirm (server-to-server verify + invoice + fulfill + finalize)
         // ============================================================
         public class ConfirmPaystackRequest
         {
@@ -481,9 +491,17 @@ namespace LawAfrica.API.Controllers
                     return Forbid();
             }
 
-            // ✅ If already success, fulfill+finalize idempotently
+            // ✅ If already success, invoice+fulfill+finalize idempotently
             if (intent.Status == PaymentStatus.Success)
             {
+                await EnsureInvoiceForIntentAsync(intent, ct);
+
+                if (intent.InvoiceId.HasValue)
+                {
+                    try { await _emailComposer.SendInvoiceEmailAsync(intent.InvoiceId.Value, ct); }
+                    catch (Exception ex) { _logger.LogError(ex, "Invoice email failed for InvoiceId={InvoiceId}", intent.InvoiceId.Value); }
+                }
+
                 if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase)
                     await _legalDocFulfillment.FulfillAsync(intent);
 
@@ -494,7 +512,8 @@ namespace LawAfrica.API.Controllers
                     ok = true,
                     status = intent.Status.ToString(),
                     paymentIntentId = intent.Id,
-                    legalDocumentId = intent.LegalDocumentId
+                    legalDocumentId = intent.LegalDocumentId,
+                    invoiceId = intent.InvoiceId
                 });
             }
 
@@ -522,6 +541,15 @@ namespace LawAfrica.API.Controllers
 
             await _db.SaveChangesAsync(ct);
 
+            // ✅ Create invoice here (webhook may be delayed/missed)
+            await EnsureInvoiceForIntentAsync(intent, ct);
+
+            if (intent.InvoiceId.HasValue)
+            {
+                try { await _emailComposer.SendInvoiceEmailAsync(intent.InvoiceId.Value, ct); }
+                catch (Exception ex) { _logger.LogError(ex, "Invoice email failed for InvoiceId={InvoiceId}", intent.InvoiceId.Value); }
+            }
+
             if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase)
                 await _legalDocFulfillment.FulfillAsync(intent);
 
@@ -532,7 +560,8 @@ namespace LawAfrica.API.Controllers
                 ok = true,
                 status = intent.Status.ToString(),
                 paymentIntentId = intent.Id,
-                legalDocumentId = intent.LegalDocumentId
+                legalDocumentId = intent.LegalDocumentId,
+                invoiceId = intent.InvoiceId
             });
         }
 
@@ -576,6 +605,209 @@ namespace LawAfrica.API.Controllers
             if (string.IsNullOrWhiteSpace(value)) return "";
             value = value.Trim();
             return value.Length <= max ? value : value.Substring(0, max);
+        }
+
+        // ✅ Invoice creation (idempotent)
+        private async Task EnsureInvoiceForIntentAsync(PaymentIntent intent, CancellationToken ct)
+        {
+            if (intent.Status != PaymentStatus.Success)
+                return;
+
+            if (intent.InvoiceId.HasValue && intent.InvoiceId.Value > 0)
+                return;
+
+            var invoiceNo = await _invoiceNumberGenerator.GenerateAsync(ct);
+
+            // Default: tax-free
+            decimal net = VatMath.Round2(intent.Amount);
+            decimal vat = 0m;
+            decimal gross = VatMath.Round2(intent.Amount);
+
+            string? vatCode = null;
+            decimal vatRatePercent = 0m;
+
+            // ✅ VAT breakdown for legal document purchases
+            if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase && intent.LegalDocumentId.HasValue)
+            {
+                var doc = await _db.LegalDocuments
+                    .AsNoTracking()
+                    .Include(d => d.VatRate)
+                    .Where(d => d.Id == intent.LegalDocumentId.Value)
+                    .Select(d => new
+                    {
+                        d.PublicPrice,
+                        d.VatRateId,
+                        VatRateCode = d.VatRate != null ? d.VatRate.Code : null,
+                        VatRatePercent = d.VatRate != null ? d.VatRate.RatePercent : 0m,
+                        d.IsTaxInclusive
+                    })
+                    .FirstOrDefaultAsync(ct);
+
+                if (doc != null &&
+                    doc.PublicPrice.HasValue &&
+                    doc.PublicPrice.Value > 0 &&
+                    doc.VatRateId.HasValue &&
+                    doc.VatRatePercent > 0m)
+                {
+                    vatCode = doc.VatRateCode;
+                    vatRatePercent = doc.VatRatePercent;
+
+                    if (doc.IsTaxInclusive)
+                        (net, vat, gross) = VatMath.FromGrossInclusive(doc.PublicPrice.Value, vatRatePercent);
+                    else
+                        (net, vat, gross) = VatMath.FromNet(doc.PublicPrice.Value, vatRatePercent);
+
+                    if (VatMath.Round2(intent.Amount) != gross)
+                    {
+                        gross = VatMath.Round2(intent.Amount);
+                        (net, vat, _) = VatMath.FromGrossInclusive(gross, vatRatePercent);
+                    }
+                }
+            }
+
+            var invoice = new Invoice
+            {
+                InvoiceNumber = invoiceNo,
+                Status = InvoiceStatus.Paid,
+                Purpose = intent.Purpose,
+
+                Currency = intent.Currency,
+
+                Subtotal = net,
+                TaxTotal = vat,
+                DiscountTotal = 0m,
+                Total = gross,
+
+                AmountPaid = gross,
+                PaidAt = intent.ProviderPaidAt ?? DateTime.UtcNow,
+
+                InstitutionId = intent.InstitutionId,
+                UserId = intent.UserId,
+
+                CustomerName = await ResolveInvoiceCustomerNameAsync(intent, ct),
+
+                IssuedAt = DateTime.UtcNow,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            invoice.Lines.Add(new InvoiceLine
+            {
+                Description = BuildLineDescription(intent) +
+                              (vatRatePercent > 0m ? $" | VAT={vatCode ?? "VAT"} {vatRatePercent:0.##}%" : ""),
+                ItemCode = BuildItemCode(intent),
+                Quantity = 1m,
+
+                UnitPrice = net,
+                LineSubtotal = net,
+                TaxAmount = vat,
+                DiscountAmount = 0m,
+                LineTotal = gross,
+
+                ContentProductId = intent.ContentProductId,
+                LegalDocumentId = intent.LegalDocumentId
+            });
+
+            _db.Invoices.Add(invoice);
+
+            await _db.SaveChangesAsync(ct);
+
+            intent.InvoiceId = invoice.Id;
+            intent.UpdatedAt = DateTime.UtcNow;
+
+            await _db.SaveChangesAsync(ct);
+        }
+
+        private static string BuildLineDescription(PaymentIntent intent)
+        {
+            var parts = new List<string> { intent.Purpose.ToString() };
+
+            if (intent.ContentProductId.HasValue) parts.Add($"ContentProductId={intent.ContentProductId.Value}");
+            if (intent.ContentProductPriceId.HasValue) parts.Add($"ContentProductPriceId={intent.ContentProductPriceId.Value}");
+            if (intent.LegalDocumentId.HasValue) parts.Add($"LegalDocumentId={intent.LegalDocumentId.Value}");
+            if (intent.DurationInMonths.HasValue) parts.Add($"DurationMonths={intent.DurationInMonths.Value}");
+            if (intent.InstitutionId.HasValue) parts.Add($"InstitutionId={intent.InstitutionId.Value}");
+
+            return string.Join(" | ", parts);
+        }
+
+        private static string BuildItemCode(PaymentIntent intent)
+        {
+            if (intent.Purpose == PaymentPurpose.InstitutionProductSubscription) return "SUBSCRIPTION";
+            if (intent.Purpose == PaymentPurpose.PublicProductSubscription) return "SUBSCRIPTION"; // ✅ NEW
+            if (intent.Purpose == PaymentPurpose.PublicLegalDocumentPurchase) return "LEGALDOC";
+            if (intent.Purpose == PaymentPurpose.PublicSignupFee) return "SIGNUP";
+            return "PAYMENT";
+        }
+
+        private async Task<string?> ResolveInvoiceCustomerNameAsync(PaymentIntent intent, CancellationToken ct)
+        {
+            if (intent.Purpose == PaymentPurpose.InstitutionProductSubscription)
+            {
+                if (intent.InstitutionId.HasValue && intent.InstitutionId.Value > 0)
+                {
+                    var instName = await _db.Institutions
+                        .AsNoTracking()
+                        .Where(x => x.Id == intent.InstitutionId.Value)
+                        .Select(x => x.Name)
+                        .FirstOrDefaultAsync(ct);
+
+                    if (!string.IsNullOrWhiteSpace(instName))
+                        return instName.Trim();
+                }
+
+                return "Institution";
+            }
+
+            if (intent.Purpose == PaymentPurpose.PublicSignupFee)
+            {
+                if (intent.RegistrationIntentId.HasValue && intent.RegistrationIntentId.Value > 0)
+                {
+                    var reg = await _db.RegistrationIntents
+                        .AsNoTracking()
+                        .Where(x => x.Id == intent.RegistrationIntentId.Value)
+                        .Select(x => new { x.FirstName, x.LastName, x.Username, x.Email })
+                        .FirstOrDefaultAsync(ct);
+
+                    if (reg != null)
+                    {
+                        var full = JoinName(reg.FirstName, reg.LastName);
+                        if (!string.IsNullOrWhiteSpace(full)) return full;
+
+                        if (!string.IsNullOrWhiteSpace(reg.Username)) return reg.Username.Trim();
+                        if (!string.IsNullOrWhiteSpace(reg.Email)) return reg.Email.Trim();
+                    }
+                }
+
+                return "Public User";
+            }
+
+            if (intent.UserId.HasValue && intent.UserId.Value > 0)
+            {
+                var u = await _db.Users
+                    .AsNoTracking()
+                    .Where(x => x.Id == intent.UserId.Value)
+                    .Select(x => new { x.FirstName, x.LastName, x.Username, x.Email })
+                    .FirstOrDefaultAsync(ct);
+
+                if (u != null)
+                {
+                    var full = JoinName(u.FirstName, u.LastName);
+                    if (!string.IsNullOrWhiteSpace(full)) return full;
+
+                    if (!string.IsNullOrWhiteSpace(u.Username)) return u.Username.Trim();
+                    if (!string.IsNullOrWhiteSpace(u.Email)) return u.Email.Trim();
+                }
+            }
+
+            return null;
+        }
+
+        private static string? JoinName(string? first, string? last)
+        {
+            var f = (first ?? "").Trim();
+            var l = (last ?? "").Trim();
+            var full = $"{f} {l}".Trim();
+            return string.IsNullOrWhiteSpace(full) ? null : full;
         }
 
         // ✅ VAT Quote helper (legal docs)
