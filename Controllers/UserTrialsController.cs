@@ -19,12 +19,35 @@ namespace LawAfrica.API.Controllers
             _db = db;
         }
 
+        // -------------------------
+        // Config
+        // -------------------------
+        private static int GetTrialDays()
+        {
+            var raw = Environment.GetEnvironmentVariable("TRIAL_DAYS");
+            if (int.TryParse(raw, out var d))
+            {
+                if (d < 1) d = 1;
+                if (d > 60) d = 60;
+                return d;
+            }
+            return 7;
+        }
+
+        // ==========================
+        // USER
+        // ==========================
+
         /// <summary>
         /// User requests a trial (pending approval).
+        /// Only allowed for products: AvailableToPublic=true AND PublicAccessModel=Subscription.
+        /// Only allowed for public individual accounts (non-institution).
         /// </summary>
         [Authorize]
         [HttpPost("request")]
-        public async Task<ActionResult<TrialRequestCreatedDto>> RequestTrial([FromBody] RequestTrialDto dto, CancellationToken ct)
+        public async Task<ActionResult<TrialRequestCreatedDto>> RequestTrial(
+            [FromBody] RequestTrialDto dto,
+            CancellationToken ct)
         {
             if (!ModelState.IsValid) return ValidationProblem(ModelState);
 
@@ -37,6 +60,7 @@ namespace LawAfrica.API.Controllers
                 .Select(p => new
                 {
                     p.Id,
+                    p.Name,
                     p.AvailableToPublic,
                     p.PublicAccessModel
                 })
@@ -64,8 +88,9 @@ namespace LawAfrica.API.Controllers
             if (!isPublicIndividual)
                 return BadRequest("Trials are only available for public individual accounts.");
 
-            // If already has active subscription (trial or paid), deny
             var now = DateTime.UtcNow;
+
+            // If already has active subscription (trial or paid), deny
             var alreadyActive = await _db.UserProductSubscriptions
                 .AsNoTracking()
                 .AnyAsync(s =>
@@ -101,12 +126,23 @@ namespace LawAfrica.API.Controllers
             };
 
             _db.UserTrialSubscriptionRequests.Add(req);
-            await _db.SaveChangesAsync(ct);
+
+            try
+            {
+                await _db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException)
+            {
+                // If you add the partial unique index, this becomes your safety net
+                return Conflict("A pending trial request already exists for this product.");
+            }
 
             return Ok(new TrialRequestCreatedDto
             {
                 RequestId = req.Id,
-                Status = req.Status.ToString()
+                Status = req.Status.ToString(),
+                ContentProductId = product.Id,
+                ContentProductName = product.Name
             });
         }
 
@@ -127,7 +163,9 @@ namespace LawAfrica.API.Controllers
         /// </summary>
         [Authorize]
         [HttpGet("admin/requests")]
-        public async Task<ActionResult<List<TrialRequestListItemDto>>> ListRequests([FromQuery] TrialRequestStatus? status, CancellationToken ct)
+        public async Task<ActionResult<List<TrialRequestListItemDto>>> ListRequests(
+            [FromQuery] TrialRequestStatus? status,
+            CancellationToken ct)
         {
             var me = await GetCurrentUserAsync(ct);
             if (!IsGlobalAdmin(me)) return Forbid();
@@ -169,11 +207,15 @@ namespace LawAfrica.API.Controllers
         }
 
         /// <summary>
-        /// Admin approves: creates/resets UserProductSubscription as a 7-day trial.
+        /// Admin approves: creates/resets UserProductSubscription as a trial.
+        /// ✅ Safety: do not override an active paid subscription.
         /// </summary>
         [Authorize]
         [HttpPost("admin/requests/{requestId:int}/approve")]
-        public async Task<ActionResult<TrialApprovalResultDto>> Approve(int requestId, [FromBody] ReviewTrialDto dto, CancellationToken ct)
+        public async Task<ActionResult<TrialApprovalResultDto>> Approve(
+            int requestId,
+            [FromBody] ReviewTrialDto dto,
+            CancellationToken ct)
         {
             var me = await GetCurrentUserAsync(ct);
             if (!IsGlobalAdmin(me)) return Forbid();
@@ -189,6 +231,23 @@ namespace LawAfrica.API.Controllers
 
             var now = DateTime.UtcNow;
 
+            // ✅ Do NOT override an active PAID subscription
+            var hasActivePaid = await _db.UserProductSubscriptions
+                .AsNoTracking()
+                .AnyAsync(s =>
+                    s.UserId == req.UserId &&
+                    s.ContentProductId == req.ContentProductId &&
+                    s.Status == SubscriptionStatus.Active &&
+                    s.IsTrial == false &&
+                    s.StartDate <= now &&
+                    s.EndDate >= now,
+                    ct);
+
+            if (hasActivePaid)
+                return Conflict("User already has an active paid subscription for this product.");
+
+            var days = GetTrialDays();
+
             var sub = await _db.UserProductSubscriptions
                 .FirstOrDefaultAsync(s => s.UserId == req.UserId && s.ContentProductId == req.ContentProductId, ct);
 
@@ -200,7 +259,7 @@ namespace LawAfrica.API.Controllers
                     ContentProductId = req.ContentProductId,
                     Status = SubscriptionStatus.Active,
                     StartDate = now,
-                    EndDate = now.AddDays(7),
+                    EndDate = now.AddDays(days),
                     IsTrial = true,
                     GrantedByUserId = me!.Id
                 };
@@ -208,12 +267,12 @@ namespace LawAfrica.API.Controllers
             }
             else
             {
-                // reset to a clean 7 days from now
+                // reset to a clean trial window (safe because active paid is blocked above)
                 sub.Status = SubscriptionStatus.Active;
                 sub.IsTrial = true;
                 sub.GrantedByUserId = me!.Id;
                 sub.StartDate = now;
-                sub.EndDate = now.AddDays(7);
+                sub.EndDate = now.AddDays(days);
             }
 
             req.Status = TrialRequestStatus.Approved;
@@ -245,7 +304,10 @@ namespace LawAfrica.API.Controllers
         /// </summary>
         [Authorize]
         [HttpPost("admin/requests/{requestId:int}/reject")]
-        public async Task<ActionResult<TrialReviewResultDto>> Reject(int requestId, [FromBody] ReviewTrialDto dto, CancellationToken ct)
+        public async Task<ActionResult<TrialReviewResultDto>> Reject(
+            int requestId,
+            [FromBody] ReviewTrialDto dto,
+            CancellationToken ct)
         {
             var me = await GetCurrentUserAsync(ct);
             if (!IsGlobalAdmin(me)) return Forbid();
