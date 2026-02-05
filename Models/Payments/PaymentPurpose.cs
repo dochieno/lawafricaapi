@@ -5,8 +5,7 @@
         PublicSignupFee = 1,
         PublicProductPurchase = 2,
         InstitutionProductSubscription = 3,
-
-        // ✅ NEW:
-        PublicLegalDocumentPurchase = 4
+        PublicLegalDocumentPurchase = 4,
+        PublicProductSubscription = 5
     }
 }

@@ -6,7 +6,6 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LawAfrica.API.Services.Payments
 {
-
     public class PaymentValidationService
     {
         private readonly ApplicationDbContext _db;
@@ -16,12 +15,6 @@ namespace LawAfrica.API.Services.Payments
             _db = db;
         }
 
-        /// <summary>
-        /// Validates the STK initiate request for correctness + existence checks.
-        /// Throws InvalidOperationException with a clear message if invalid.
-        ///
-        /// NOTE: Controllers should convert exceptions to BadRequest.
-        /// </summary>
         public async Task ValidateStkInitiateAsync(
             PaymentPurpose purpose,
             decimal amount,
@@ -30,7 +23,7 @@ namespace LawAfrica.API.Services.Payments
             int? contentProductId,
             int? institutionId,
             int? durationInMonths,
-            int? legalDocumentId = null) // optional (only used for PublicLegalDocumentPurchase)
+            int? legalDocumentId = null)
         {
             // -------------------------------
             // Basic validation (fail fast)
@@ -46,7 +39,6 @@ namespace LawAfrica.API.Services.Payments
             try
             {
                 phoneNumber = FormatToMpesaStandard(phoneNumber);
-                // at this point, phoneNumber is guaranteed to be like: 2547XXXXXXXX or 2541XXXXXXXX
             }
             catch (ArgumentException ex)
             {
@@ -93,6 +85,24 @@ namespace LawAfrica.API.Services.Payments
 
                     if (legalDocumentId.HasValue)
                         throw new InvalidOperationException("LegalDocumentId must be omitted for PublicProductPurchase.");
+                    break;
+
+                // ✅ NEW: Public subscription
+                case PaymentPurpose.PublicProductSubscription:
+                    if (!contentProductId.HasValue || contentProductId.Value <= 0)
+                        throw new InvalidOperationException("ContentProductId is required for PublicProductSubscription.");
+
+                    if (registrationIntentId.HasValue)
+                        throw new InvalidOperationException("RegistrationIntentId must be omitted for PublicProductSubscription.");
+
+                    if (institutionId.HasValue)
+                        throw new InvalidOperationException("InstitutionId must be omitted for PublicProductSubscription.");
+
+                    if (!durationInMonths.HasValue || durationInMonths.Value <= 0)
+                        throw new InvalidOperationException("DurationInMonths must be greater than 0 for PublicProductSubscription.");
+
+                    if (legalDocumentId.HasValue)
+                        throw new InvalidOperationException("LegalDocumentId must be omitted for PublicProductSubscription.");
                     break;
 
                 case PaymentPurpose.InstitutionProductSubscription:
@@ -146,13 +156,34 @@ namespace LawAfrica.API.Services.Payments
             }
 
             if (purpose == PaymentPurpose.PublicProductPurchase ||
+                purpose == PaymentPurpose.PublicProductSubscription ||
                 purpose == PaymentPurpose.InstitutionProductSubscription)
             {
-                var productExists = await _db.ContentProducts
-                    .AnyAsync(p => p.Id == contentProductId!.Value);
+                var product = await _db.ContentProducts
+                    .AsNoTracking()
+                    .Where(p => p.Id == contentProductId!.Value)
+                    .Select(p => new
+                    {
+                        p.Id,
+                        p.AvailableToPublic,
+                        p.AvailableToInstitutions,
+                        p.PublicAccessModel,
+                        p.InstitutionAccessModel
+                    })
+                    .FirstOrDefaultAsync();
 
-                if (!productExists)
+                if (product == null)
                     throw new InvalidOperationException("Content product not found.");
+
+                // ✅ Public subscription must be allowed & must be subscription-based
+                if (purpose == PaymentPurpose.PublicProductSubscription)
+                {
+                    if (!product.AvailableToPublic)
+                        throw new InvalidOperationException("This product is not available to public users.");
+
+                    if (product.PublicAccessModel != ProductAccessModel.Subscription)
+                        throw new InvalidOperationException("This product is not available as a public subscription.");
+                }
             }
 
             if (purpose == PaymentPurpose.InstitutionProductSubscription)
@@ -183,23 +214,15 @@ namespace LawAfrica.API.Services.Payments
                 if (!doc.AllowPublicPurchase || doc.PublicPrice == null || doc.PublicPrice <= 0)
                     throw new InvalidOperationException("This document is not available for individual purchase.");
 
-                // ✅ Expected amount must be the PAYABLE TOTAL (gross)
                 var expectedGross = ComputeExpectedLegalDocGross(doc);
-
-                // Be safe with decimals/rounding
                 var a = Round2(amount);
                 var e = Round2(expectedGross);
 
-                // Tiny tolerance protects against decimal representation issues
                 if (Math.Abs(a - e) > 0.01m)
                     throw new InvalidOperationException("Amount does not match current document price.");
             }
         }
 
-        /// <summary>
-        /// Validates manual (offline) institution subscription payment creation.
-        /// Throws InvalidOperationException if invalid.
-        /// </summary>
         public async Task ValidateManualInstitutionSubscriptionAsync(
             int institutionId,
             int contentProductId,
@@ -235,10 +258,6 @@ namespace LawAfrica.API.Services.Payments
                 throw new InvalidOperationException("Content product not found.");
         }
 
-        // =========================
-        // ✅ Helpers (VAT-aware gross)
-        // =========================
-
         private static decimal ComputeExpectedLegalDocGross(LegalDocument doc)
         {
             var price = doc.PublicPrice ?? 0m;
@@ -246,15 +265,12 @@ namespace LawAfrica.API.Services.Payments
 
             var rate = doc.VatRate != null ? doc.VatRate.RatePercent : 0m;
 
-            // No VAT configured -> payable is base price
             if (rate <= 0m)
                 return Round2(price);
 
-            // If price is tax-inclusive, payable is the shown price
             if (doc.IsTaxInclusive)
                 return Round2(price);
 
-            // VAT added on top: payable = net + VAT
             var vat = price * (rate / 100m);
             return Round2(price + vat);
         }
@@ -272,7 +288,6 @@ namespace LawAfrica.API.Services.Payments
             if (!match.Success)
                 throw new ArgumentException("Invalid phone number format. Expected a Kenyan mobile number (e.g., 07XXXXXXXX, 01XXXXXXXX, +2547XXXXXXXX).", nameof(phoneNumber));
 
-            // M-PESA Daraja API requires 2547XXXXXXXX / 2541XXXXXXXX
             return "254" + match.Groups[1].Value;
         }
     }

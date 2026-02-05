@@ -122,6 +122,8 @@ public class ApplicationDbContext : DbContext
     //AI
     public DbSet<AiLawReportSummary> AiLawReportSummaries => Set<AiLawReportSummary>();
     public DbSet<AiUsage> AiUsages => Set<AiUsage>();
+    public DbSet<UserTrialSubscriptionRequest> UserTrialSubscriptionRequests => Set<UserTrialSubscriptionRequest>();
+
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -183,6 +185,16 @@ public class ApplicationDbContext : DbContext
             b.Property(x => x.UpdatedAt)
                 .HasDefaultValueSql("timezone('utc', now())");
         });
+
+        modelBuilder.Entity<UserTrialSubscriptionRequest>()
+                    .HasIndex(x => new { x.UserId, x.ContentProductId, x.Status });
+
+        modelBuilder.Entity<UserTrialSubscriptionRequest>()
+                    .HasOne(x => x.ReviewedByUser)
+                    .WithMany()
+                    .HasForeignKey(x => x.ReviewedByUserId)
+                    .OnDelete(DeleteBehavior.SetNull);
+
 
         modelBuilder.Entity<Town>(b =>
         {
