@@ -136,6 +136,8 @@ namespace LawAfrica.API.Controllers
                     s.UserId,
                     user = new
                     {
+                        s.User.FirstName,
+                        s.User.LastName,
                         s.User.Username,
                         s.User.Email,
                         s.User.PhoneNumber,
