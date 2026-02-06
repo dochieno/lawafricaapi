@@ -498,7 +498,10 @@ namespace LawAfrica.API.Controllers
 
                 if (intent.InvoiceId.HasValue)
                 {
-                    try { await _emailComposer.SendInvoiceEmailAsync(intent.InvoiceId.Value, ct); }
+                    try
+                    {
+                        await _emailComposer.EnqueueInvoiceEmailAsync(intent.InvoiceId.Value, ct);
+                    }
                     catch (Exception ex) { _logger.LogError(ex, "Invoice email failed for InvoiceId={InvoiceId}", intent.InvoiceId.Value); }
                 }
 

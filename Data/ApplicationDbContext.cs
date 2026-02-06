@@ -4,6 +4,7 @@ using LawAfrica.API.Models.Ai;
 using LawAfrica.API.Models.Ai.Sections;
 using LawAfrica.API.Models.Authorization;
 using LawAfrica.API.Models.Documents;
+using LawAfrica.API.Models.Emails;
 using LawAfrica.API.Models.Institutions;
 using LawAfrica.API.Models.LawReports.Enums;
 using LawAfrica.API.Models.LawReportsContent.Models;
@@ -124,8 +125,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<AiUsage> AiUsages => Set<AiUsage>();
     public DbSet<UserTrialSubscriptionRequest> UserTrialSubscriptionRequests => Set<UserTrialSubscriptionRequest>();
     public DbSet<ContentProductPrice> ContentProductPrices => Set<ContentProductPrice>();
-
-
+    public DbSet<EmailOutboxMessage> EmailOutboxMessages => Set<EmailOutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -162,6 +162,12 @@ public class ApplicationDbContext : DbContext
             entity.Property(c => c.IsoCode).HasMaxLength(3);
             entity.Property(c => c.PhoneCode).HasMaxLength(10);
         });
+
+        modelBuilder.Entity<EmailOutboxMessage>()
+                    .HasIndex(x => new { x.Status, x.NextAttemptAtUtc });
+
+        modelBuilder.Entity<EmailOutboxMessage>()
+                    .HasIndex(x => new { x.Kind, x.InvoiceId });
 
         modelBuilder.Entity<InvoiceSettings>(b =>
         {
