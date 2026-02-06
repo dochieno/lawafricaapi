@@ -14,20 +14,25 @@ namespace LawAfrica.API.Services.Emails
         private readonly IEmailTemplateRenderer _renderer;
         private readonly ApplicationDbContext _db;
         private readonly InvoicePdfService _invoicePdf;
+        private readonly ILogger<EmailComposer> _logger;
 
         public EmailComposer(
             IConfiguration config,
             EmailService emailService,
             IEmailTemplateRenderer renderer,
             ApplicationDbContext db,
-            InvoicePdfService invoicePdf)
+            InvoicePdfService invoicePdf,
+            ILogger<EmailComposer> logger // ✅ add
+        )
         {
             _config = config;
             _emailService = emailService;
             _renderer = renderer;
             _db = db;
             _invoicePdf = invoicePdf;
+            _logger = logger; // ✅ add
         }
+
 
         private string ProductName => _config["Brand:ProductName"] ?? "LawAfrica";
         private string SupportEmail => _config["Brand:SupportEmail"] ?? _config["SupportEmail"] ?? "support@lawafrica.example";
@@ -149,20 +154,24 @@ namespace LawAfrica.API.Services.Emails
         // ===========================
         // ✅ Invoice PDF email (SEND-ONCE + TEMPLATE-FIX)
         // ===========================
-        public async Task SendInvoiceEmailAsync(int invoiceId, CancellationToken ct = default)
+        public async Task<bool> SendInvoiceEmailAsync(int invoiceId, CancellationToken ct = default)
         {
-            // ✅ Tracked invoice (we must update PdfEmailedAt/PdfEmailedTo)
             var invoice = await _db.Invoices
                 .FirstOrDefaultAsync(i => i.Id == invoiceId, ct);
 
             if (invoice == null)
-                return;
+            {
+                _logger.LogWarning("[INVOICE EMAIL] Invoice not found InvoiceId={InvoiceId}", invoiceId);
+                return false;
+            }
 
-            // ✅ Send-once guarantee
             if (invoice.PdfEmailedAt.HasValue)
-                return;
+            {
+                _logger.LogInformation("[INVOICE EMAIL] Skipped (already emailed) InvoiceId={InvoiceId} To={To} At={At}",
+                    invoice.Id, invoice.PdfEmailedTo, invoice.PdfEmailedAt);
+                return true;
+            }
 
-            // ✅ Resolve recipient email robustly
             string? toEmail = null;
 
             // 1) User email
@@ -177,7 +186,7 @@ namespace LawAfrica.API.Services.Emails
                 toEmail = toEmail?.Trim();
             }
 
-            // 2) Institution official email (adjust if you later add BillingEmail)
+            // 2) Institution official email
             if (string.IsNullOrWhiteSpace(toEmail) && invoice.InstitutionId.HasValue && invoice.InstitutionId.Value > 0)
             {
                 toEmail = await _db.Institutions
@@ -189,7 +198,7 @@ namespace LawAfrica.API.Services.Emails
                 toEmail = toEmail?.Trim();
             }
 
-            // 3) PublicSignupFee path: PaymentIntent -> RegistrationIntent
+            // 3) PublicSignupFee: PaymentIntent -> RegistrationIntent
             if (string.IsNullOrWhiteSpace(toEmail))
             {
                 var regId = await _db.PaymentIntents
@@ -212,18 +221,32 @@ namespace LawAfrica.API.Services.Emails
             }
 
             if (string.IsNullOrWhiteSpace(toEmail))
-                throw new InvalidOperationException(
-                    $"Invoice email skipped: no recipient email found. InvoiceId={invoice.Id}, UserId={invoice.UserId}, InstitutionId={invoice.InstitutionId}");
+            {
+                _logger.LogWarning(
+                    "[INVOICE EMAIL] Skipped: no recipient. InvoiceId={InvoiceId} UserId={UserId} InstitutionId={InstitutionId} Purpose={Purpose}",
+                    invoice.Id, invoice.UserId, invoice.InstitutionId, invoice.Purpose);
+                return false;
+            }
 
             var displayName = !string.IsNullOrWhiteSpace(invoice.CustomerName)
                 ? invoice.CustomerName!.Trim()
                 : "there";
 
-            var (pdfBytes, fileName) = await _invoicePdf.GenerateInvoicePdfWithFileNameAsync(invoice.Id, ct);
+            byte[] pdfBytes;
+            string fileName;
+
+            try
+            {
+                (pdfBytes, fileName) = await _invoicePdf.GenerateInvoicePdfWithFileNameAsync(invoice.Id, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[INVOICE EMAIL] PDF generation failed InvoiceId={InvoiceId}", invoice.Id);
+                return false;
+            }
 
             var invNo = string.IsNullOrWhiteSpace(invoice.InvoiceNumber) ? $"INV-{invoice.Id}" : invoice.InvoiceNumber.Trim();
             var subject = $"{ProductName} Invoice {invNo}";
-
             var isPaid = invoice.PaidAt.HasValue && invoice.AmountPaid > 0m;
             var currency = (invoice.Currency ?? "KES").Trim();
 
@@ -232,7 +255,6 @@ namespace LawAfrica.API.Services.Emails
 
             try
             {
-                // ✅ Matches your invoice-email template placeholders
                 var model = new
                 {
                     ProductName = ProductName,
@@ -258,15 +280,16 @@ namespace LawAfrica.API.Services.Emails
                 outSubject = rendered.Subject;
                 html = rendered.Html;
             }
-            catch
-            {
-                outSubject = subject;
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[INVOICE EMAIL] Template render failed (fallback HTML used) InvoiceId={InvoiceId}", invoice.Id);
+                    outSubject = subject;
 
-                var paidLine = isPaid
-                    ? $"{currency} {invoice.AmountPaid:0,0.00} on {invoice.PaidAt!.Value:dd-MMM-yyyy HH:mm}"
-                    : "—";
+                    var paidLine = isPaid
+                        ? $"{currency} {invoice.AmountPaid:0,0.00} on {invoice.PaidAt!.Value:dd-MMM-yyyy HH:mm}"
+                        : "—";
 
-                html = $@"
+                    html = $@"
                     <div style='font-family:Arial,sans-serif;font-size:14px;line-height:1.5'>
                       <p>Hi {System.Net.WebUtility.HtmlEncode(displayName)},</p>
                       <p>Please find your invoice attached.</p>
@@ -278,29 +301,41 @@ namespace LawAfrica.API.Services.Emails
                       </p>
                       <p>Support: {System.Net.WebUtility.HtmlEncode(SupportEmail)}</p>
                     </div>";
-            }
+                }
 
-            // ✅ Send email (throws if Graph fails)
-            await _emailService.SendEmailWithAttachmentsAsync(
-                toEmail,
-                outSubject,
-                html,
-                attachments: new[]
-                {
-                    new EmailAttachment
+            try
+            {
+                _logger.LogInformation("[INVOICE EMAIL] Sending... InvoiceId={InvoiceId} To={To} Subject={Subject} PdfBytes={Bytes}",
+                    invoice.Id, toEmail, outSubject, pdfBytes.Length);
+
+                await _emailService.SendEmailWithAttachmentsAsync(
+                    toEmail,
+                    outSubject,
+                    html,
+                    attachments: new[]
                     {
-                        FileName = fileName,
-                        Bytes = pdfBytes,
-                        ContentType = "application/pdf"
-                    }
-                },
-                ct: ct);
+                new EmailAttachment
+                {
+                    FileName = fileName,
+                    Bytes = pdfBytes,
+                    ContentType = "application/pdf"
+                }
+                    },
+                    ct: ct);
 
-            // ✅ Mark as emailed (send-once durable)
-            invoice.PdfEmailedAt = DateTime.UtcNow;
-            invoice.PdfEmailedTo = toEmail;
+                invoice.PdfEmailedAt = DateTime.UtcNow;
+                invoice.PdfEmailedTo = toEmail;
+                await _db.SaveChangesAsync(ct);
 
-            await _db.SaveChangesAsync(ct);
+                _logger.LogInformation("[INVOICE EMAIL] Sent OK InvoiceId={InvoiceId} To={To}", invoice.Id, toEmail);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[INVOICE EMAIL] Send FAILED InvoiceId={InvoiceId} To={To}", invoice.Id, toEmail);
+                return false;
+            }
         }
+
     }
 }
