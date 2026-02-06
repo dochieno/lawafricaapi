@@ -70,6 +70,8 @@ namespace LawAfrica.API.DTOs.Reports
         public bool FromCache { get; set; }             // optional: keep for later analytics
         public string? GrantSource { get; set; }        // e.g. "PersonalSubscription"
         public string? DebugNote { get; set; }          // safe for dev; hide in prod UI
+        public bool IsPremium { get; set; }
+
 
 
 

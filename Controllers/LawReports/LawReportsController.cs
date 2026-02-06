@@ -748,6 +748,7 @@ namespace LawAfrica.API.Controllers
             {
                 Id = r.Id,
                 LegalDocumentId = r.LegalDocumentId,
+                IsPremium = r.LegalDocument != null && r.LegalDocument.IsPremium,
 
                 CountryId = r.CountryId,
                 Service = r.Service,
