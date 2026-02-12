@@ -344,6 +344,49 @@ namespace LawAfrica.API.Controllers
             return Ok(new { message = "Password reset successful." });
         }
 
+        //Mobile only password reste:
+
+        // =========================================================
+        // PASSWORD RESET (mobile: via TOTP, no email link)
+        // POST: /api/auth/reset-password-totp
+        // =========================================================
+        public class ResetPasswordTotpRequest
+        {
+            public string Username { get; set; } = string.Empty; // username OR email
+            public string Code { get; set; } = string.Empty;     // 6-digit TOTP
+            public string NewPassword { get; set; } = string.Empty;
+        }
+
+        [AllowAnonymous]
+        [HttpPost("reset-password-totp")]
+        public async Task<IActionResult> ResetPasswordWithTotp([FromBody] ResetPasswordTotpRequest req)
+        {
+            var ident = (req?.Username ?? "").Trim();
+            var code = (req?.Code ?? "").Trim();
+            var newPassword = req?.NewPassword ?? "";
+
+            if (string.IsNullOrWhiteSpace(ident) || string.IsNullOrWhiteSpace(code))
+                return BadRequest("Username/email and code are required.");
+
+            if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 8)
+                return BadRequest("Password must be at least 8 characters.");
+
+            var ip = HttpContext?.Connection?.RemoteIpAddress?.ToString() ?? "Unknown";
+            var ua = Request?.Headers["User-Agent"].ToString() ?? "Unknown";
+
+            var (ok, error) = await _authService.ResetPasswordWithTotpAsync(ident, code, newPassword, ip, ua);
+
+            if (!ok)
+            {
+                // ✅ Generic message (avoid user enumeration)
+                return BadRequest(error ?? "Unable to reset password.");
+            }
+
+            // ✅ No reset link email. Only alert email is sent by the service.
+            return Ok(new { message = "Password reset successful." });
+        }
+
+
         // =========================================================
         // PASSWORD RESET (clicked from email link)
         // GET: /api/auth/reset-password?token=xxxx

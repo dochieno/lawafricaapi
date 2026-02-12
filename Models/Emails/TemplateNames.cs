@@ -16,5 +16,7 @@ namespace LawAfrica.API.Models.Emails
 
         // ✅ Invoice email template (PDF attachment)
         public const string InvoiceEmail = "invoice-email";
+        public const string PasswordChangedAlert = "password-changed-alert";
+
     }
 }

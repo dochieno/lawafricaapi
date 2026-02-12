@@ -1169,5 +1169,123 @@ namespace LawAfrica.API.Services
             // ✅ letters + dots only
             return UsernameRegex.IsMatch(username);
         }
+
+        // =========================================================
+        // Password reset via TOTP (no email reset link; alert email only)
+        // =========================================================
+        public async Task<(bool ok, string? error)> ResetPasswordWithTotpAsync(
+            string usernameOrEmail,
+            string code,
+            string newPassword,
+            string ipAddress,
+            string userAgent)
+        {
+            var ident = (usernameOrEmail ?? "").Trim();
+            var cleanCode = NormalizeTotpCode(code);
+
+            if (string.IsNullOrWhiteSpace(ident) || string.IsNullOrWhiteSpace(cleanCode))
+                return (false, "Unable to reset password.");
+
+            // You already have a strong password rule used in Register
+            if (!IsStrongPassword(newPassword))
+                return (false, "Password does not meet requirements.");
+
+            var identLower = ident.ToLowerInvariant();
+            var identUpper = ident.ToUpperInvariant();
+
+            var user = await _db.Users.FirstOrDefaultAsync(u =>
+                (!string.IsNullOrWhiteSpace(u.NormalizedUsername) && u.NormalizedUsername == identUpper) ||
+                (u.Username.ToLower() == identLower) ||
+                (!string.IsNullOrWhiteSpace(u.Email) && u.Email.Trim().ToLower() == identLower)
+            );
+
+            // ✅ generic failure (no enumeration)
+            if (user == null)
+                return (false, "Unable to reset password.");
+
+            if (!user.IsActive)
+                return (false, "Unable to reset password.");
+
+            // Optional: enforce approved users only (consistent with your login)
+            if (!user.IsApproved)
+                return (false, "Unable to reset password.");
+
+            // Respect lockout
+            if (user.LockoutEndAt.HasValue && user.LockoutEndAt.Value > DateTime.UtcNow)
+                return (false, "Account temporarily locked. Try again later.");
+
+            // Must have 2FA enabled + secret set
+            if (!user.TwoFactorEnabled || string.IsNullOrWhiteSpace(user.TwoFactorSecret))
+                return (false, "Unable to reset password.");
+
+            // Validate TOTP (reuse your existing helper)
+            var okTotp = ValidateTotp(user.TwoFactorSecret, cleanCode, driftSteps: 5);
+            if (!okTotp)
+            {
+                // ✅ treat as a failed login-like security event
+                await RegisterFailedLogin(user, "Invalid TOTP for password reset");
+                return (false, "Unable to reset password.");
+            }
+
+            // Success: reset password + clear any email-token reset fields
+            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword);
+            user.PasswordResetToken = null;
+            user.PasswordResetTokenExpiry = null;
+
+            user.FailedLoginAttempts = 0;
+            user.LockoutEndAt = null;
+
+            user.UpdatedAt = DateTime.UtcNow;
+
+            // Also consider forcing re-login on all devices if you have refresh tokens etc.
+            await _db.SaveChangesAsync();
+
+            // ✅ ALERT EMAIL ONLY (no reset link)
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(user.Email))
+                {
+                    var productName = (_configuration["Brand:ProductName"] ?? _configuration["ProductName"] ?? "LawAfrica").Trim();
+                    var supportEmail = (_configuration["Brand:SupportEmail"] ?? _configuration["SupportEmail"] ?? "support@lawafrica.com").Trim();
+
+                    var subject = $"{productName} — Password changed";
+                    var changedAtUtc = $"{DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC";
+
+                    var rendered = await _emailRenderer.RenderAsync(
+                        templateName: LawAfrica.API.Models.Emails.TemplateNames.PasswordChangedAlert, // or "password-changed-alert"
+                        subject: subject,
+                        model: new
+                        {
+                            Subject = subject,
+                            Preheader = "Security alert: Your password was changed.",
+                            ProductName = productName,
+                            Year = DateTime.UtcNow.Year.ToString(),
+                            SupportEmail = supportEmail,
+
+                            DisplayName = (user.FirstName ?? user.Username),
+                            ChangedAtUtc = changedAtUtc,
+                            IpAddress = ipAddress ?? "Unknown",
+                            UserAgent = userAgent ?? "Unknown"
+                        },
+                        inlineImages: null,
+                        ct: CancellationToken.None
+                    );
+
+                    await _emailService.SendEmailAsync(
+                        user.Email.Trim(),
+                        rendered.Subject ?? subject,
+                        rendered.Html
+                    );
+                }
+            }
+
+            catch
+            {
+                // Don't fail the reset if alert email fails (but logs will show it)
+            }
+
+            return (true, null);
+        }
+
     }
 }
