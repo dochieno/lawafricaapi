@@ -74,7 +74,7 @@ namespace LawAfrica.API.DTOs.Reports
         public int? CourtId { get; set; }
         public string? CourtName { get; set; }
         public string? CourtCode { get; set; }
-
+        public string? CourtCategory { get; set; }
 
 
 

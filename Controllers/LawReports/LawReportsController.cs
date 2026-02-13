@@ -259,8 +259,8 @@ namespace LawAfrica.API.Controllers
                 CaseType = dto.CaseType,
 
                 CourtType = courtType,
-                Court = TrimOrNull(dto.Court),
-
+                CourtCategory = TrimOrNull(dto.CourtCategory),
+                Court = BuildCourtDisplay(TrimOrNull(dto.Court), dto.CourtCategory, resolvedTown.townName),
                 Parties = TrimOrNull(dto.Parties),
                 Judges = TrimOrNull(dto.Judges),
                 DecisionDate = dto.DecisionDate,
@@ -336,7 +336,10 @@ namespace LawAfrica.API.Controllers
             r.CaseType = dto.CaseType;
 
             r.CourtType = (CourtType)dto.CourtType;
-            r.Court = TrimOrNull(dto.Court);
+            r.CourtCategory = TrimOrNull(dto.CourtCategory);
+            // keep Court string in sync (legacy/display)
+            r.Court = BuildCourtDisplay(TrimOrNull(dto.Court), dto.CourtCategory, resolvedTown.townName);
+
 
             // ✅ town
             r.TownId = resolvedTown.townId;
@@ -453,7 +456,7 @@ namespace LawAfrica.API.Controllers
                 CaseType = r.CaseType,
 
                 Court = r.Court,
-
+                CourtCategory = r.CourtCategory,
                 Town = r.Town,
                 TownId = r.TownId,
                 TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
@@ -801,5 +804,23 @@ namespace LawAfrica.API.Controllers
             dto.GrantSource = decision.GrantSource.ToString();
             dto.DebugNote = decision.DebugNote;
         }
+
+            private static string BuildCourtDisplay(string? baseCourt, string? courtCategory, string? town)
+            {
+                var c = TrimOrNull(baseCourt);
+                var cat = TrimOrNull(courtCategory);
+                var t = TrimOrNull(town);
+
+                var head = c;
+
+                if (!string.IsNullOrWhiteSpace(cat))
+                    head = !string.IsNullOrWhiteSpace(head) ? $"{head} — {cat}" : cat;
+
+                if (!string.IsNullOrWhiteSpace(head) && !string.IsNullOrWhiteSpace(t))
+                    return $"{head} at {t}";
+
+                return head ?? t ?? "";
+            }
+
     }
 }

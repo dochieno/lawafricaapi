@@ -63,6 +63,10 @@ namespace LawAfrica.API.DTOs.Reports
         [MaxLength(20)]
         public string? TownPostCode { get; set; }
 
+        // ✅ NEW: Optional category/division label (nullable)
+        [MaxLength(120)]
+        public string? CourtCategory { get; set; }
+
         // ✅ Alias for frontend field "postCode" (your Admin UI currently sends this)
         // ResolveTownAsync in controller will check TownPostCode first, then this alias.
         [MaxLength(20)]

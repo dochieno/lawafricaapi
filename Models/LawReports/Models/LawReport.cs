@@ -95,6 +95,10 @@ namespace LawAfrica.API.Models.Reports
 
         // ✅ NEW (optional FK) — preferred way going forward
         public int? CourtId { get; set; }
+
+        // Examples: "Environmental Court", "Employment & Labour Court", "Industrial"
+        [MaxLength(120)]
+        public string? CourtCategory { get; set; }
         public LawAfrica.API.Models.LawReports.Models.Court? CourtRef { get; set; }
 
     }
