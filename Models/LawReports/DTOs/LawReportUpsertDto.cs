@@ -1,6 +1,7 @@
 ﻿using LawAfrica.API.Models;
 using LawAfrica.API.Models.Reports;
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 
 namespace LawAfrica.API.DTOs.Reports
 {
@@ -32,6 +33,11 @@ namespace LawAfrica.API.DTOs.Reports
         [Required]
         public ReportCaseType CaseType { get; set; }
 
+        // ✅ NEW (optional FK) — preferred way going forward
+        [Range(1, int.MaxValue)]
+        [JsonPropertyName("courtId")]
+        public int? CourtId { get; set; }
+
         // Optional legacy/display
         [MaxLength(200)]
         public string? Court { get; set; }
@@ -56,6 +62,12 @@ namespace LawAfrica.API.DTOs.Reports
 
         [MaxLength(20)]
         public string? TownPostCode { get; set; }
+
+        // ✅ Alias for frontend field "postCode" (your Admin UI currently sends this)
+        // ResolveTownAsync in controller will check TownPostCode first, then this alias.
+        [MaxLength(20)]
+        [JsonPropertyName("postCode")]
+        public string? PostCode { get; set; }
 
         // ✅ Read-only; NEVER assign to it in controller
         public LegalDocumentCategory Category => LegalDocumentCategory.LLRServices;
@@ -83,7 +95,15 @@ namespace LawAfrica.API.DTOs.Reports
             var pc = (TownPostCode ?? "").Trim();
             if (!string.IsNullOrWhiteSpace(pc) && pc.Length > 20)
                 yield return new ValidationResult("TownPostCode is too long.", new[] { nameof(TownPostCode) });
-        }
 
+            // ✅ Alias length check
+            var pc2 = (PostCode ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(pc2) && pc2.Length > 20)
+                yield return new ValidationResult("PostCode is too long.", new[] { nameof(PostCode) });
+
+            // ✅ Optional: CourtId must be positive if provided
+            if (CourtId.HasValue && CourtId.Value <= 0)
+                yield return new ValidationResult("CourtId must be a positive number.", new[] { nameof(CourtId) });
+        }
     }
 }

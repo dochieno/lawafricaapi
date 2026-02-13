@@ -71,6 +71,10 @@ namespace LawAfrica.API.DTOs.Reports
         public string? GrantSource { get; set; }        // e.g. "PersonalSubscription"
         public string? DebugNote { get; set; }          // safe for dev; hide in prod UI
         public bool IsPremium { get; set; }
+        public int? CourtId { get; set; }
+        public string? CourtName { get; set; }
+        public string? CourtCode { get; set; }
+
 
 
 
