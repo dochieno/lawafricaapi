@@ -17,7 +17,7 @@ namespace LawAfrica.API.DTOs.Reports
         public ReportCaseType CaseType { get; set; }
 
         public string? Court { get; set; }     // optional legacy/display
-        public int CourtType { get; set; }     // enum as int
+        public int? CourtType { get; set; }
 
         public string? Town { get; set; }
 

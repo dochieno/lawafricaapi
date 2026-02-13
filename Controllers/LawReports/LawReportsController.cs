@@ -1123,7 +1123,7 @@ namespace LawAfrica.API.Controllers
             _ => "—"
         };
 
-        private static string CourtTypeLabel(CourtType ct) => ct switch
+        private static string CourtTypeLabel(CourtType? ct) => ct switch
         {
             CourtType.SupremeCourt => "Supreme Court",
             CourtType.CourtOfAppeal => "Court of Appeal",

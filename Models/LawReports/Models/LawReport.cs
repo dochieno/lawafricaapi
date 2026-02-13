@@ -60,8 +60,7 @@ namespace LawAfrica.API.Models.Reports
         public ReportDecisionType DecisionType { get; set; }
         public ReportCaseType CaseType { get; set; }
 
-        public CourtType CourtType { get; set; } = CourtType.HighCourt;
-
+        public CourtType? CourtType { get; set; }
         // -------------------
         // METADATA
         // -------------------
