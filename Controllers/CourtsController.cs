@@ -2,6 +2,11 @@
 using LawAfrica.API.Services.LawReports;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using CsvHelper;
+using CsvHelper.Configuration;
+using System.Globalization;
+
 
 namespace LawAfrica.API.Controllers
 {
@@ -149,5 +154,58 @@ namespace LawAfrica.API.Controllers
                 });
             }
         }
+
+        // -------------------------
+        // IMPORT CSV (multipart)
+        // POST /api/courts/import
+        // FormData:
+        //  - file (csv)
+        //  - countryId (int)
+        //  - mode ("upsert" | "createOnly")
+        // -------------------------
+        [HttpPost("import")]
+        [RequestSizeLimit(50_000_000)]
+        public async Task<IActionResult> ImportCsv(
+            [FromForm] IFormFile file,
+            [FromForm] int countryId,
+            [FromForm] string? mode = "upsert",
+            CancellationToken ct = default)
+        {
+            if (countryId <= 0)
+                return BadRequest(new { message = "countryId is required." });
+
+            if (file == null || file.Length == 0)
+                return BadRequest(new { message = "CSV file is required." });
+
+            var mRaw = (mode ?? "upsert").Trim();
+            var m = mRaw.Equals("createOnly", StringComparison.OrdinalIgnoreCase) ? "createonly"
+                  : mRaw.Equals("createonly", StringComparison.OrdinalIgnoreCase) ? "createonly"
+                  : mRaw.Equals("upsert", StringComparison.OrdinalIgnoreCase) ? "upsert"
+                  : "";
+
+            if (m == "")
+                return BadRequest(new { message = "mode must be 'upsert' or 'createonly'." });
+
+
+            try
+            {
+                var result = await _service.ImportCsvAsync(file, countryId, m, ct);
+                return Ok(result);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "Failed to import courts.",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
+
     }
 }

@@ -3,6 +3,11 @@ using LawAfrica.API.Helpers;
 using LawAfrica.API.Models.LawReports.DTOs;
 using LawAfrica.API.Models.LawReports.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+using CsvHelper;
+using CsvHelper.Configuration;
+using System.Globalization;
+
 
 namespace LawAfrica.API.Services.LawReports
 {
@@ -217,5 +222,190 @@ namespace LawAfrica.API.Services.LawReports
             CreatedAt = x.CreatedAt,
             UpdatedAt = x.UpdatedAt
         };
+
+        public async Task<CourtsImportResultDto> ImportCsvAsync(
+            IFormFile file,
+            int countryId,
+            string mode, // "upsert" | "createonly"
+            CancellationToken ct)
+        {
+            if (file == null || file.Length == 0)
+                throw new InvalidOperationException("CSV file is required.");
+
+            // normalize mode
+            mode = (mode ?? "").Trim().ToLowerInvariant();
+            var createOnly = mode == "createonly";
+            if (mode != "createonly" && mode != "upsert") mode = "upsert";
+
+            // Validate country exists
+            var countryExists = await _db.Countries.AnyAsync(c => c.Id == countryId, ct);
+            if (!countryExists) throw new InvalidOperationException("Country not found.");
+
+            var result = new CourtsImportResultDto
+            {
+                CountryId = countryId,
+                Mode = mode
+            };
+
+            using var stream = file.OpenReadStream();
+            using var reader = new StreamReader(stream);
+
+            var csvConfig = new CsvConfiguration(CultureInfo.InvariantCulture)
+            {
+                HasHeaderRecord = true,
+                TrimOptions = TrimOptions.Trim,
+                IgnoreBlankLines = true,
+                BadDataFound = null,
+                MissingFieldFound = null,
+                HeaderValidated = null,
+                DetectColumnCountChanges = false,
+                PrepareHeaderForMatch = args => (args.Header ?? "").Trim()
+            };
+
+            using var csv = new CsvReader(reader, csvConfig);
+
+            if (!await csv.ReadAsync()) return result;
+            csv.ReadHeader();
+
+            bool Has(string name) =>
+                csv.HeaderRecord?.Any(h => string.Equals(h, name, StringComparison.OrdinalIgnoreCase)) == true;
+
+            string? Get(string name)
+            {
+                if (!Has(name)) return null;
+                var v = csv.GetField(name);
+                return string.IsNullOrWhiteSpace(v) ? null : v.Trim();
+            }
+
+            int rowNumber = 0;
+
+            while (await csv.ReadAsync())
+            {
+                ct.ThrowIfCancellationRequested();
+                rowNumber++;
+                result.TotalRows++;
+
+                try
+                {
+                    var name = Get("Name");
+                    var code = Get("Code"); // optional
+                    var abbreviation = Get("Abbreviation") ?? Get("Abbrev") ?? Get("Abbr");
+                    var notes = Get("Notes");
+
+                    // ✅ Category: optional column, default Civil
+                    var categoryRaw = Get("Category");
+                    var category = string.IsNullOrWhiteSpace(categoryRaw) ? "Civil" : categoryRaw.Trim();
+
+                    // numeric fields
+                    int? level = null;
+                    var levelRaw = Get("Level");
+                    if (!string.IsNullOrWhiteSpace(levelRaw) && int.TryParse(levelRaw, out var lvl)) level = lvl;
+
+                    int displayOrder = 0;
+                    var orderRaw = Get("DisplayOrder") ?? Get("Order");
+                    if (!string.IsNullOrWhiteSpace(orderRaw) && int.TryParse(orderRaw, out var ord)) displayOrder = ord;
+
+                    bool isActive = true;
+                    var activeRaw = Get("IsActive") ?? Get("Active");
+                    if (!string.IsNullOrWhiteSpace(activeRaw))
+                    {
+                        if (bool.TryParse(activeRaw, out var b)) isActive = b;
+                        else if (int.TryParse(activeRaw, out var n)) isActive = n != 0;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(name))
+                        throw new InvalidOperationException("Name is required.");
+
+                    // Find existing by (Country+Code) else (Country+Name)
+                    var query = _db.Courts.AsQueryable().Where(c => c.CountryId == countryId);
+
+                    Court? existing = null;
+
+                    if (!string.IsNullOrWhiteSpace(code))
+                    {
+                        var codeNorm = code.Trim().ToUpperInvariant(); // ✅ normalize for matching
+                        existing = await query.FirstOrDefaultAsync(c => c.Code == codeNorm, ct);
+                    }
+
+                    if (existing == null)
+                    {
+                        var nameNorm = name.Trim();
+                        existing = await query.FirstOrDefaultAsync(
+                            c => c.Name.ToLower() == nameNorm.ToLower(),
+                            ct
+                        );
+                    }
+
+                    if (existing == null)
+                    {
+                        // Create (CreateAsync does auto-code when Code is null/blank)
+                        var dto = new CourtUpsertDto
+                        {
+                            CountryId = countryId,
+                            Code = string.IsNullOrWhiteSpace(code) ? null : code.Trim(),
+                            Name = name.Trim(),
+                            Category = category, // ✅ must be valid; defaults Civil
+                            Abbreviation = abbreviation,
+                            Level = level,
+                            DisplayOrder = displayOrder,
+                            IsActive = isActive,
+                            Notes = notes
+                        };
+
+                        await CreateAsync(dto, ct);
+                        result.Created++;
+                    }
+                    else
+                    {
+                        if (createOnly)
+                        {
+                            result.Skipped++;
+                            continue;
+                        }
+
+                        var dto = new CourtUpsertDto
+                        {
+                            CountryId = countryId,
+                            Code = existing.Code, // keep stable
+                            Name = name.Trim(),
+                            Category = category,  // ✅ keep valid
+                            Abbreviation = abbreviation,
+                            Level = level,
+                            DisplayOrder = displayOrder,
+                            IsActive = isActive,
+                            Notes = notes
+                        };
+
+                        await UpdateAsync(existing.Id, dto, ct);
+                        result.Updated++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    result.Failed++;
+                    result.Errors.Add(new CourtsImportErrorDto
+                    {
+                        Row = rowNumber,
+                        Message = ex.Message,
+                        Name = SafePeek(csv, "Name"),
+                        Code = SafePeek(csv, "Code"),
+                    });
+                }
+            }
+
+            return result;
+
+            static string? SafePeek(CsvReader csv, string col)
+            {
+                try
+                {
+                    var v = csv.GetField(col);
+                    return string.IsNullOrWhiteSpace(v) ? null : v.Trim();
+                }
+                catch { return null; }
+            }
+        }
+
+
     }
 }
