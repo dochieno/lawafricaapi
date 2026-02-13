@@ -1,4 +1,5 @@
-﻿using LawAfrica.API;
+﻿using AngleSharp.Dom;
+using LawAfrica.API;
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.Ai;
 using LawAfrica.API.Models.Ai.Sections;
@@ -7,6 +8,7 @@ using LawAfrica.API.Models.Documents;
 using LawAfrica.API.Models.Emails;
 using LawAfrica.API.Models.Institutions;
 using LawAfrica.API.Models.LawReports.Enums;
+using LawAfrica.API.Models.LawReports.Models;
 using LawAfrica.API.Models.LawReportsContent.Models;
 using LawAfrica.API.Models.Locations;
 using LawAfrica.API.Models.Payments;
@@ -91,12 +93,10 @@ public class ApplicationDbContext : DbContext
     public DbSet<ContentProductLegalDocument> ContentProductLegalDocuments { get; set; } = null!;
     public DbSet<LegalDocumentTocEntry> LegalDocumentTocEntries => Set<LegalDocumentTocEntry>();
     public DbSet<LegalDocumentPageText> LegalDocumentPageTexts { get; set; } = null!;
-
     public DbSet<UserLegalDocumentPurchase> UserLegalDocumentPurchases { get; set; } = null!;
     public DbSet<AdminPermission> AdminPermissions => Set<AdminPermission>();
     public DbSet<UserAdminPermission> UserAdminPermissions => Set<UserAdminPermission>();
     public DbSet<InstitutionSubscriptionActionRequest> InstitutionSubscriptionActionRequests { get; set; } = null!;
-
     public DbSet<Invoice> Invoices => Set<Invoice>();
     public DbSet<InvoiceLine> InvoiceLines => Set<InvoiceLine>();
     public DbSet<InvoiceSequence> InvoiceSequences => Set<InvoiceSequence>();
@@ -113,12 +113,14 @@ public class ApplicationDbContext : DbContext
     public DbSet<AiLegalDocumentSectionSummary> AiLegalDocumentSectionSummaries => Set<AiLegalDocumentSectionSummary>();
     public DbSet<AiDailyAiUsage> AiDailyAiUsages => Set<AiDailyAiUsage>();
 
-
     //LawReports
     public DbSet<LawReport> LawReports => Set<LawReport>();
     public DbSet<Town> Towns => Set<Town>();
     public DbSet<LawReportContentBlock> LawReportContentBlocks => Set<LawReportContentBlock>();
     public DbSet<LawReportContentJsonCache> LawReportContentJsonCaches => Set<LawReportContentJsonCache>();
+    public DbSet<Court> Courts => Set<Court>();
+    public DbSet<CourtSequence> CourtSequences => Set<CourtSequence>();
+
 
     //AI
     public DbSet<AiLawReportSummary> AiLawReportSummaries => Set<AiLawReportSummary>();
@@ -226,12 +228,50 @@ public class ApplicationDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(x => x.TownId)
                 .OnDelete(DeleteBehavior.SetNull);
+                b.HasIndex(x => x.TownId);
+                b.HasOne(x => x.CourtRef)
+                .WithMany()
+                .HasForeignKey(x => x.CourtId)
+                .OnDelete(DeleteBehavior.SetNull);
+                b.HasIndex(x => x.CourtId);
 
-            b.HasIndex(x => x.TownId);
         });
+
+        modelBuilder.Entity<Court>(b =>
+        {
+            b.ToTable("Courts");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Code).HasMaxLength(20).IsRequired();
+            b.Property(x => x.Name).HasMaxLength(160).IsRequired();
+            b.Property(x => x.Category).HasMaxLength(40).IsRequired();
+            b.Property(x => x.Abbreviation).HasMaxLength(40);
+            b.Property(x => x.Notes).HasMaxLength(500);
+
+            // Unique per country
+            b.HasIndex(x => new { x.CountryId, x.Code }).IsUnique();
+            b.HasIndex(x => new { x.CountryId, x.Name });
+
+            b.HasOne(x => x.Country)
+                .WithMany()
+                .HasForeignKey(x => x.CountryId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<CourtSequence>(b =>
+        {
+            b.ToTable("CourtSequences");
+            b.HasKey(x => x.Id);
+
+            b.HasIndex(x => x.CountryId).IsUnique();
+
+            b.Property(x => x.NextValue).IsRequired();
+        });
+
+
         // ...
 
-            modelBuilder.Entity<LawReportContentBlock>(e =>
+        modelBuilder.Entity<LawReportContentBlock>(e =>
             {
                 e.ToTable("LawReportContentBlocks");
 

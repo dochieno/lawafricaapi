@@ -93,5 +93,10 @@ namespace LawAfrica.API.Models.Reports
         // ✅ NEW (optional FK) — preferred way
         public int? TownId { get; set; }
         public Town? TownRef { get; set; }
+
+        // ✅ NEW (optional FK) — preferred way going forward
+        public int? CourtId { get; set; }
+        public LawAfrica.API.Models.LawReports.Models.Court? CourtRef { get; set; }
+
     }
 }

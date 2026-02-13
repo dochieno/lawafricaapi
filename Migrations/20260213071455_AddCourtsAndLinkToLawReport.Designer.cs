@@ -3,6 +3,7 @@ using System;
 using LawAfrica.API.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace LawAfrica.API.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260213071455_AddCourtsAndLinkToLawReport")]
+    partial class AddCourtsAndLinkToLawReport
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1008,31 +1011,6 @@ namespace LawAfrica.API.Migrations
                     b.HasIndex("CountryId", "Name");
 
                     b.ToTable("Courts", (string)null);
-                });
-
-            modelBuilder.Entity("LawAfrica.API.Models.LawReports.Models.CourtSequence", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<int>("CountryId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("NextValue")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CountryId")
-                        .IsUnique();
-
-                    b.ToTable("CourtSequences", (string)null);
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.LawReportsContent.Models.LawReportContentBlock", b =>

@@ -11,6 +11,7 @@ using LawAfrica.API.Services.Documents;
 using LawAfrica.API.Services.Documents.Indexing;
 using LawAfrica.API.Services.Emails;
 using LawAfrica.API.Services.Institutions;
+using LawAfrica.API.Services.LawReports;
 using LawAfrica.API.Services.LawReportsContent;
 using LawAfrica.API.Services.Payments;
 using LawAfrica.API.Services.Subscriptions;
@@ -213,6 +214,7 @@ builder.Services.AddSingleton<ChatClient>(sp =>
 builder.Services.AddSingleton<ILegalDocumentIndexingQueue, LegalDocumentIndexingQueue>();
 builder.Services.AddScoped<ILegalDocumentTextIndexer, PdfPigLegalDocumentTextIndexer>();
 builder.Services.AddHostedService<LegalDocumentIndexingWorker>();
+builder.Services.AddScoped<CourtsService>();
 builder.Services.AddScoped<ILawReportSummarizer, OpenAiLawReportSummarizer>();
 builder.Services.AddScoped<ISectionTextExtractor, SectionTextExtractor>();
 builder.Services.AddScoped<ILegalDocumentSectionSummarizer, LegalDocumentSectionSummarizer>();
