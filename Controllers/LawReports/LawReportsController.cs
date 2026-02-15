@@ -1,7 +1,6 @@
 ﻿// =======================================================
 // FILE: LawAfrica.API/Controllers/LawReports/LawReportsController.cs
 // =======================================================
-using System.Linq.Expressions;
 using LawAfrica.API.Data;
 using LawAfrica.API.DTOs.Reports;
 using LawAfrica.API.Helpers;
@@ -10,12 +9,14 @@ using LawAfrica.API.Models.Documents;
 using LawAfrica.API.Models.LawReports.Enums;
 using LawAfrica.API.Models.Locations;
 using LawAfrica.API.Models.Reports;
+using LawAfrica.API.Services;
 using LawAfrica.API.Services.Documents;
 using LawAfrica.API.Services.LawReports;
 using LawAfrica.API.Services.LawReportsContent;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Linq.Expressions;
 
 namespace LawAfrica.API.Controllers
 {
@@ -681,6 +682,10 @@ namespace LawAfrica.API.Controllers
                     town = r.Town ?? "",
                     townPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
                     judges = r.Judges ?? "",
+                    hasAttachment = r.AttachmentPath != null && r.AttachmentPath != "",
+                    attachmentFileType = r.AttachmentFileType,
+                    attachmentFileSizeBytes = r.AttachmentFileSizeBytes,
+                    attachmentOriginalName = r.AttachmentOriginalName,
 
                     // simple preview (you can improve later)
                     previewText = (r.ContentText ?? "").Length > 650 ? (r.ContentText ?? "").Substring(0, 650) : (r.ContentText ?? "")
@@ -690,6 +695,170 @@ namespace LawAfrica.API.Controllers
             return Ok(new { items = list, total });
         }
 
+        [Authorize(Roles = "Admin")]
+        [HttpPost("{id:int}/attachment")]
+        [Consumes("multipart/form-data")]
+        [RequestSizeLimit(200_000_000)]
+        [RequestFormLimits(MultipartBodyLengthLimit = 200_000_000)]
+        public async Task<IActionResult> UploadAttachment(
+            int id,
+            [FromForm] IFormFile? file,
+            [FromForm(Name = "File")] IFormFile? File,
+            [FromServices] FileStorageService storage,
+            CancellationToken ct)
+        {
+            try
+            {
+                var r = await _db.LawReports
+                    .Include(x => x.LegalDocument)
+                    .FirstOrDefaultAsync(x => x.Id == id, ct);
+
+                if (r == null) return NotFound("Law report not found.");
+
+                var f = file ?? File;
+                if (f == null || f.Length == 0)
+                    return BadRequest(new
+                    {
+                        message = "No attachment file received. Use multipart/form-data with key 'File' (recommended) or 'file'."
+                    });
+
+                var ext = Path.GetExtension(f.FileName).ToLowerInvariant();
+
+                // conservative; expand later
+                if (ext != ".pdf" && ext != ".doc" && ext != ".docx")
+                    return BadRequest("Only PDF/DOC/DOCX attachments are allowed.");
+
+                var fileType = ext.TrimStart('.');
+
+                // ✅ uses your FileStorageService method
+                var (path, size) = await storage.SaveLawReportAttachmentAsync(f, fileType);
+
+                // ✅ assumes you added these nullable fields on LawReport (AttachmentPath etc.)
+                r.AttachmentPath = path;
+                r.AttachmentFileType = fileType;
+                r.AttachmentFileSizeBytes = size;
+                r.AttachmentOriginalName = f.FileName;
+                r.UpdatedAt = DateTime.UtcNow;
+
+                if (r.LegalDocument != null)
+                    r.LegalDocument.UpdatedAt = DateTime.UtcNow;
+
+                await _db.SaveChangesAsync(ct);
+
+                return Ok(new
+                {
+                    message = "Attachment uploaded successfully.",
+                    lawReportId = r.Id,
+                    hasAttachment = true,
+                    attachmentFileType = r.AttachmentFileType,
+                    attachmentFileSizeBytes = r.AttachmentFileSizeBytes,
+                    attachmentOriginalName = r.AttachmentOriginalName,
+                    attachmentPath = r.AttachmentPath
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Attachment upload failed on server.", detail = ex.Message });
+            }
+        }
+
+        [Authorize]
+        [HttpGet("{id:int}/attachment/download")]
+        public async Task<IActionResult> DownloadAttachment(
+            int id,
+            [FromServices] FileStorageService storage,
+            CancellationToken ct)
+        {
+            var r = await _db.LawReports
+                .Include(x => x.LegalDocument)
+                .FirstOrDefaultAsync(x => x.Id == id, ct);
+
+            if (r == null) return NotFound("Law report not found.");
+            if (r.LegalDocument == null) return StatusCode(500, new { message = "Law report is missing LegalDocument." });
+
+            if (string.IsNullOrWhiteSpace(r.AttachmentPath))
+                return NotFound("No attachment found for this report.");
+
+            // ✅ Only allow downloads for published report docs (same rule as Get)
+            if (r.LegalDocument.Status != LegalDocumentStatus.Published ||
+                r.LegalDocument.Kind != LegalDocumentKind.Report ||
+                r.LegalDocument.FileType != "report")
+            {
+                return NotFound(new { message = "Law report not available." });
+            }
+
+            var userId = User.GetUserId();
+            var decision = await _entitlement.GetEntitlementDecisionAsync(userId, r.LegalDocument);
+
+            // ✅ hard blocks: seat/inactive
+            var isHardBlocked =
+                !decision.IsAllowed &&
+                (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
+                 decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded);
+
+            if (isHardBlocked)
+            {
+                Response.Headers["X-Entitlement-Deny-Reason"] = decision.DenyReason.ToString();
+                if (!string.IsNullOrWhiteSpace(decision.Message))
+                    Response.Headers["X-Entitlement-Message"] = decision.Message;
+
+                Response.Headers["Access-Control-Expose-Headers"] =
+                    "Content-Length, Content-Type, Content-Disposition, X-Entitlement-Deny-Reason, X-Entitlement-Message";
+
+                return StatusCode(StatusCodes.Status403Forbidden, new
+                {
+                    message = decision.Message ?? "Access blocked. Please contact your administrator.",
+                    denyReason = decision.DenyReason.ToString()
+                });
+            }
+
+            // ✅ POLICY:
+            // - PDF: allow download for any entitled user (including PreviewOnly) as long as not hard-blocked
+            // - DOC/DOCX: require FullAccess (recommended)
+            var fileType = (r.AttachmentFileType ?? "").Trim().ToLowerInvariant();
+            var isPdf = fileType == "pdf";
+
+            if (!isPdf && decision.AccessLevel != DocumentAccessLevel.FullAccess)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, new
+                {
+                    message = "Download requires full access for this attachment type.",
+                    accessLevel = decision.AccessLevel.ToString()
+                });
+            }
+
+            var physicalPath = storage.ResolvePhysicalPathFromDbPath(r.AttachmentPath);
+            if (!System.IO.File.Exists(physicalPath))
+                return NotFound("Attachment missing on server.");
+
+            var contentType = fileType switch
+            {
+                "pdf" => "application/pdf",
+                "doc" => "application/msword",
+                "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                _ => "application/octet-stream"
+            };
+
+            var downloadName = string.IsNullOrWhiteSpace(r.AttachmentOriginalName)
+                ? Path.GetFileName(physicalPath)
+                : r.AttachmentOriginalName;
+
+            // ✅ Helpful header for UI/debug
+            Response.Headers["X-Document-Access"] =
+                decision.AccessLevel == DocumentAccessLevel.FullAccess ? "Full" : "Preview";
+
+            // ✅ download prompt
+            Response.Headers["Content-Disposition"] = $"attachment; filename=\"{downloadName}\"";
+            Response.Headers["X-Content-Type-Options"] = "nosniff";
+            Response.Headers["Cache-Control"] = "private, max-age=0, must-revalidate, no-transform";
+            Response.Headers["Accept-Ranges"] = "bytes";
+
+            // ✅ allow browser JS to read key headers under CORS
+            Response.Headers["Access-Control-Expose-Headers"] =
+                "Accept-Ranges, Content-Range, Content-Length, Content-Type, Content-Disposition, X-Document-Access, X-Entitlement-Deny-Reason, X-Entitlement-Message";
+
+            return PhysicalFile(physicalPath, contentType, enableRangeProcessing: true);
+        }
 
 
         public class LawReportContentUpdateDto
@@ -771,7 +940,12 @@ namespace LawAfrica.API.Controllers
 
                 FromCache = false,
                 GrantSource = null,
-                DebugNote = null
+                DebugNote = null,
+                HasAttachment = !string.IsNullOrWhiteSpace(r.AttachmentPath),
+                AttachmentFileType = r.AttachmentFileType,
+                AttachmentFileSizeBytes = r.AttachmentFileSizeBytes,
+                AttachmentOriginalName = r.AttachmentOriginalName
+
             };
         }
 

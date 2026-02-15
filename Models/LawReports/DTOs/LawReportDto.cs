@@ -76,6 +76,12 @@ namespace LawAfrica.API.DTOs.Reports
         public string? CourtCode { get; set; }
         public string? CourtCategory { get; set; }
 
+        public bool HasAttachment { get; set; }
+        public string? AttachmentFileType { get; set; }
+        public long? AttachmentFileSizeBytes { get; set; }
+        public string? AttachmentOriginalName { get; set; }
+
+
 
 
 

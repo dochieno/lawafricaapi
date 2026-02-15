@@ -96,6 +96,21 @@ namespace LawAfrica.API.Models.Reports
         // ✅ NEW (optional FK) — preferred way going forward
         public int? CourtId { get; set; }
 
+
+        // -------------------
+        // ✅ NEW: Attachment (optional)
+        // -------------------
+        [MaxLength(260)]
+        public string? AttachmentPath { get; set; }  // relative DB path (like LegalDocument.FilePath)
+
+        [MaxLength(40)]
+        public string? AttachmentFileType { get; set; } // "pdf", "docx", etc.
+
+        public long? AttachmentFileSizeBytes { get; set; }
+
+        [MaxLength(260)]
+        public string? AttachmentOriginalName { get; set; }
+
         // Examples: "Environmental Court", "Employment & Labour Court", "Industrial"
         [MaxLength(120)]
         public string? CourtCategory { get; set; }
