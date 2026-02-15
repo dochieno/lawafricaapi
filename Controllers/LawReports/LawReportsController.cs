@@ -905,32 +905,19 @@ namespace LawAfrica.API.Controllers
             string? resolvedTownName,
             string? ensuredCitation)
         {
-            var parts = new List<string>();
-
-            // ✅ CaseNumber first (primary identity)
-            if (!string.IsNullOrWhiteSpace(dto.CaseNumber))
-                parts.Add(dto.CaseNumber.Trim());
-
-            // ✅ Parties
-            if (!string.IsNullOrWhiteSpace(dto.Parties))
-                parts.Add(dto.Parties.Trim());
-
-            // ✅ Citation (optional)
+            var parties = TrimOrNull(dto.Parties);
             var citation = TrimOrNull(ensuredCitation ?? dto.Citation);
-            if (!string.IsNullOrWhiteSpace(citation))
-                parts.Add(citation);
 
-            // ✅ Court (already contains town now)
-            var courtDisplay = BuildCourtDisplay(
-                TrimOrNull(dto.Court),
-                dto.CourtCategory,
-                resolvedTownName
-            );
+            // ✅ Required now (frontend enforces too, but keep server safe)
+            if (string.IsNullOrWhiteSpace(parties))
+                throw new InvalidOperationException("Parties is required to build the report title.");
 
-            if (!string.IsNullOrWhiteSpace(courtDisplay))
-                parts.Add(courtDisplay);
+            if (string.IsNullOrWhiteSpace(citation))
+                throw new InvalidOperationException("Citation is required to build the report title.");
 
-            return string.Join(" - ", parts);
+            // ✅ EXACT format: "Parties [space] Citation"
+            // Example: "Chemical Partners ... [2026] KECA 201 (KLR)"
+            return $"{parties} {citation}".Trim();
         }
 
 
