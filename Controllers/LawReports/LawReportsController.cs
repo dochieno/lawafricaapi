@@ -377,6 +377,9 @@ namespace LawAfrica.API.Controllers
         // -------------------------
         // UPDATE
         // -------------------------
+        // -------------------------
+        // UPDATE
+        // -------------------------
         [Authorize(Roles = "Admin")]
         [HttpPut("{id:int}")]
         public async Task<IActionResult> Update(
@@ -387,16 +390,17 @@ namespace LawAfrica.API.Controllers
             if (!ModelState.IsValid)
                 return ValidationProblem(ModelState);
 
+            // ✅ IMPORTANT:
+            // Only include what we actually update (LegalDocument).
+            // DO NOT Include TownRef / CourtRef in tracked graph, and DO NOT assign nav entities.
             var r = await _db.LawReports
                 .Include(x => x.LegalDocument)
-                .Include(x => x.TownRef)
-                .Include(x => x.CourtRef)
                 .FirstOrDefaultAsync(x => x.Id == id, ct);
 
             if (r == null)
                 return NotFound();
 
-            // ✅ Resolve Town
+            // ✅ Resolve Town (FK + safe string)
             (int? townId, string? townName, string? postCode) resolvedTown;
             try
             {
@@ -407,85 +411,97 @@ namespace LawAfrica.API.Controllers
                 return BadRequest(new { message = ex.Message });
             }
 
-            // ✅ Resolve Court
+            // ✅ Resolve CourtId (validate exists + matches country)
             int? resolvedCourtId = null;
             if (dto.CourtId.HasValue)
             {
-                var court = await _db.Courts
+                var courtMeta = await _db.Courts
                     .AsNoTracking()
-                    .FirstOrDefaultAsync(c => c.Id == dto.CourtId.Value, ct);
+                    .Where(c => c.Id == dto.CourtId.Value)
+                    .Select(c => new { c.Id, c.CountryId })
+                    .FirstOrDefaultAsync(ct);
 
-                if (court == null)
+                if (courtMeta == null)
                     return BadRequest(new { message = "Selected CourtId does not exist." });
 
-                if (court.CountryId != dto.CountryId)
+                if (courtMeta.CountryId != dto.CountryId)
                     return BadRequest(new { message = "Selected court does not match the selected country." });
 
-                resolvedCourtId = court.Id;
+                resolvedCourtId = courtMeta.Id;
             }
 
-            var ensuredCitation =
-                await EnsureCitationAsync(dto, resolvedTown, r.ReportNumber, ct);
+            // ✅ Citation (auto if missing)
+            var ensuredCitation = await EnsureCitationAsync(dto, resolvedTown, r.ReportNumber, ct);
 
-            var existing =
-                await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName, ensuredCitation, ct);
-
+            // ✅ Dedupe check (Parties + CaseNumber + CourtId + Country)
+            var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName, ensuredCitation, ct);
             if (existing != null && existing.Id != id)
+            {
                 return Conflict(new
                 {
                     message = "Duplicate report exists.",
                     existingLawReportId = existing.Id
                 });
+            }
 
-            // ✅ Update fields
+            // ✅ Update scalar fields (no nav assignment)
             r.CountryId = dto.CountryId;
             r.Service = dto.Service;
+
             r.Citation = ensuredCitation;
             r.Year = dto.Year;
             r.CaseNumber = TrimOrNull(dto.CaseNumber);
+
             r.DecisionType = dto.DecisionType;
             r.CaseType = dto.CaseType;
+
             r.CourtType = (CourtType)dto.CourtType;
             r.CourtCategory = TrimOrNull(dto.CourtCategory);
 
             r.TownId = resolvedTown.townId;
             r.Town = resolvedTown.townName;
+
             r.CourtId = resolvedCourtId;
 
             r.Parties = TrimOrNull(dto.Parties);
             r.Judges = TrimOrNull(dto.Judges);
             r.DecisionDate = dto.DecisionDate;
+
             r.ContentText = dto.ContentText;
             r.UpdatedAt = DateTime.UtcNow;
 
-            // 🔹 Refresh refs
-            if (r.TownId.HasValue)
-                r.TownRef = await _db.Towns
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(t => t.Id == r.TownId.Value, ct);
-
+            // ✅ Rebuild Court display string using lookups (NO tracking conflicts)
+            string? courtName = null;
             if (r.CourtId.HasValue)
-                r.CourtRef = await _db.Courts
+            {
+                courtName = await _db.Courts
                     .AsNoTracking()
-                    .FirstOrDefaultAsync(c => c.Id == r.CourtId.Value, ct);
+                    .Where(c => c.Id == r.CourtId.Value)
+                    .Select(c => c.Name)
+                    .FirstOrDefaultAsync(ct);
+            }
 
-            // ✅ Build simple display string
-            var courtName = TrimOrNull(r.CourtRef?.Name);
-            var townName = TrimOrNull(r.TownRef?.Name) ?? TrimOrNull(r.Town);
+            string? townName = null;
+            if (r.TownId.HasValue)
+            {
+                townName = await _db.Towns
+                    .AsNoTracking()
+                    .Where(t => t.Id == r.TownId.Value)
+                    .Select(t => t.Name)
+                    .FirstOrDefaultAsync(ct);
+            }
+            townName ??= TrimOrNull(r.Town);
 
             r.Court =
                 !string.IsNullOrWhiteSpace(courtName) && !string.IsNullOrWhiteSpace(townName)
                     ? $"{courtName} at {townName}"
                     : courtName ?? townName ?? "";
 
+            // ✅ Update LegalDocument fields (tracked via Include)
             if (r.LegalDocument != null)
             {
-                r.LegalDocument.Title =
-                    BuildReportTitle(dto, resolvedTown.townName, ensuredCitation);
-
-                r.LegalDocument.Description =
-                    $"Law Report {r.ReportNumber} ({dto.Year})";
-
+                r.LegalDocument.Title = BuildReportTitle(dto, resolvedTown.townName, ensuredCitation);
+                r.LegalDocument.Description = $"Law Report {r.ReportNumber} ({dto.Year})";
                 r.LegalDocument.CountryId = dto.CountryId;
                 r.LegalDocument.UpdatedAt = DateTime.UtcNow;
             }
@@ -493,6 +509,7 @@ namespace LawAfrica.API.Controllers
             await _db.SaveChangesAsync(ct);
             return NoContent();
         }
+
 
 
 
