@@ -550,10 +550,10 @@ namespace LawAfrica.API.Controllers
                 .Include(r => r.TownRef)
                 .Include(r => r.CourtRef)
                 .Where(r =>
-                    r.LegalDocument != null &&
                     r.LegalDocument.Status == LegalDocumentStatus.Published &&
                     r.LegalDocument.Kind == LegalDocumentKind.Report &&
                     r.LegalDocument.FileType == "report");
+
 
             if (countryId.HasValue && countryId.Value > 0)
                 query = query.Where(r => r.CountryId == countryId.Value);
