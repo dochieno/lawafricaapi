@@ -858,31 +858,39 @@ namespace LawAfrica.API.Controllers
             return candidate;
         }
 
-        private static string BuildReportTitle(LawReportUpsertDto dto, string? resolvedTownName, string? ensuredCitation)
+        private static string BuildReportTitle(
+            LawReportUpsertDto dto,
+            string? resolvedTownName,
+            string? ensuredCitation)
         {
-            var parts = new List<string> { $"{dto.ReportNumber.Trim()} ({dto.Year})" };
+            var parts = new List<string>();
 
+            // ✅ CaseNumber first (primary identity)
+            if (!string.IsNullOrWhiteSpace(dto.CaseNumber))
+                parts.Add(dto.CaseNumber.Trim());
+
+            // ✅ Parties
             if (!string.IsNullOrWhiteSpace(dto.Parties))
                 parts.Add(dto.Parties.Trim());
 
+            // ✅ Citation (optional)
             var citation = TrimOrNull(ensuredCitation ?? dto.Citation);
             if (!string.IsNullOrWhiteSpace(citation))
                 parts.Add(citation);
 
-            var courtLabel = CourtTypeLabel((CourtType)dto.CourtType);
-            var town = TrimOrNull(resolvedTownName);
+            // ✅ Court (already contains town now)
+            var courtDisplay = BuildCourtDisplay(
+                TrimOrNull(dto.Court),
+                dto.CourtCategory,
+                resolvedTownName
+            );
 
-            if (!string.IsNullOrWhiteSpace(courtLabel))
-            {
-                var courtWithTown = !string.IsNullOrWhiteSpace(town)
-                    ? $"{courtLabel} — {town}"
-                    : courtLabel;
-
-                parts.Add(courtWithTown);
-            }
+            if (!string.IsNullOrWhiteSpace(courtDisplay))
+                parts.Add(courtDisplay);
 
             return string.Join(" - ", parts);
         }
+
 
         // ============================================================
         // Labels + short codes
