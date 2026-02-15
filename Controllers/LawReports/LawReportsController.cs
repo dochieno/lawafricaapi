@@ -822,43 +822,34 @@ namespace LawAfrica.API.Controllers
 
         private async Task<LawReport?> FindExistingByDedupe(
             LawReportUpsertDto dto,
-            int? resolvedTownId,
-            string? resolvedTownName,
-            string? ensuredCitation,
+            int? resolvedTownId,                 // kept for signature compatibility (unused)
+            string? resolvedTownName,            // kept for signature compatibility (unused)
+            string? ensuredCitation,             // kept for signature compatibility (unused)
             CancellationToken ct = default)
         {
-            var citation = TrimOrNull(ensuredCitation ?? dto.Citation);
-            var reportNumber = dto.ReportNumber.Trim();
+            var parties = TrimOrNull(dto.Parties);
             var caseNo = TrimOrNull(dto.CaseNumber);
-            var courtType = (CourtType)dto.CourtType;
 
-            if (!string.IsNullOrWhiteSpace(citation))
-            {
-                var byCitation = await _db.LawReports.AsNoTracking().FirstOrDefaultAsync(x => x.Citation == citation, ct);
-                if (byCitation != null) return byCitation;
-            }
+            // ✅ Court model is now the standard identity (FK)
+            var courtId = dto.CourtId;
 
-            if (resolvedTownId.HasValue)
-            {
-                return await _db.LawReports.AsNoTracking().FirstOrDefaultAsync(x =>
-                    x.ReportNumber == reportNumber &&
-                    x.Year == dto.Year &&
-                    x.CaseNumber == caseNo &&
-                    x.CourtType == courtType &&
-                    x.TownId == resolvedTownId.Value
+            // If any part of the identity is missing, we cannot reliably dedupe.
+            // (You can enforce these as required at DTO level, but server-side we guard too.)
+            if (string.IsNullOrWhiteSpace(parties) || string.IsNullOrWhiteSpace(caseNo) || !courtId.HasValue || courtId.Value <= 0)
+                return null;
+
+            // ✅ The only duplicate rule:
+            // Same Parties + same CaseNumber + same CourtId (optionally within same Country)
+            return await _db.LawReports
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x =>
+                    x.CountryId == dto.CountryId &&
+                    x.CourtId == courtId.Value &&
+                    x.Parties == parties &&
+                    x.CaseNumber == caseNo
                 , ct);
-            }
-
-            var town = resolvedTownName;
-            return await _db.LawReports.AsNoTracking().FirstOrDefaultAsync(x =>
-                x.ReportNumber == reportNumber &&
-                x.Year == dto.Year &&
-                x.CaseNumber == caseNo &&
-                x.CourtType == courtType &&
-                x.TownId == null &&
-                x.Town == town
-            , ct);
         }
+
 
         private async Task<string?> EnsureCitationAsync(
             LawReportUpsertDto dto,
@@ -906,20 +897,18 @@ namespace LawAfrica.API.Controllers
             string? ensuredCitation)
         {
             var parties = TrimOrNull(dto.Parties);
-            var citation = TrimOrNull(ensuredCitation ?? dto.Citation);
-
-            // ✅ Required now (frontend enforces too, but keep server safe)
             if (string.IsNullOrWhiteSpace(parties))
                 throw new InvalidOperationException("Parties is required to build the report title.");
 
-            if (string.IsNullOrWhiteSpace(citation))
-                throw new InvalidOperationException("Citation is required to build the report title.");
+            // ✅ Citation is auto-generated; DO NOT block if dto.Citation is empty.
+            // Prefer ensuredCitation (generated) then fallback to dto.Citation (if user provided).
+            var citation = TrimOrNull(ensuredCitation) ?? TrimOrNull(dto.Citation);
 
-            // ✅ EXACT format: "Parties [space] Citation"
-            // Example: "Chemical Partners ... [2026] KECA 201 (KLR)"
-            return $"{parties} {citation}".Trim();
+            // Title spec: Parties + Citation (when present)
+            return string.IsNullOrWhiteSpace(citation)
+                ? parties
+                : $"{parties} {citation}".Trim();
         }
-
 
         // ============================================================
         // Labels + short codes
