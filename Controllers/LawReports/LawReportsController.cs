@@ -261,7 +261,6 @@ namespace LawAfrica.API.Controllers
 
                 // 3) Dedupe check (keep your logic; now uses generatedReportNumber for ReportNumber comparisons)
                 // IMPORTANT: temporarily set dto.ReportNumber so your existing dedupe logic doesn't break
-                dto.ReportNumber = generatedReportNumber;
 
                 var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName, ensuredCitation, ct);
                 if (existing != null)
@@ -393,7 +392,6 @@ namespace LawAfrica.API.Controllers
             var ensuredCitation = await EnsureCitationAsync(dto, resolvedTown, r.ReportNumber, ct);
 
             // For dedupe check, reuse existing report number
-            dto.ReportNumber = r.ReportNumber;
 
             var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName, ensuredCitation, ct);
             if (existing != null && existing.Id != id)
@@ -857,17 +855,38 @@ namespace LawAfrica.API.Controllers
             string generatedReportNumber,
             CancellationToken ct)
         {
+            // Citation is auto-generated (ignore dto.Citation if you want to)
+            // If you still want to allow manual override, keep the next 3 lines.
             var existing = TrimOrNull(dto.Citation);
             if (!string.IsNullOrWhiteSpace(existing))
                 return existing;
 
             if (dto.DecisionDate == null)
-                throw new InvalidOperationException("DecisionDate is required to auto-generate Citation year. Provide Citation or DecisionDate.");
+                throw new InvalidOperationException(
+                    "DecisionDate is required to auto-generate Citation year. Provide Citation or DecisionDate.");
 
             var citationYear = dto.DecisionDate.Value.Year;
 
             var series = ServiceShortCode(dto.Service);
-            var court = CourtShortCode((CourtType)dto.CourtType);
+
+            // ✅ Court model abbreviation (HC, CA, ELRC, etc.)
+            if (!dto.CourtId.HasValue || dto.CourtId.Value <= 0)
+                throw new InvalidOperationException("CourtId is required to auto-generate Citation.");
+
+            var courtAbbrev = await _db.Courts
+                .AsNoTracking()
+                .Where(c => c.Id == dto.CourtId.Value)
+                .Select(c => c.Abbreviation)
+                .FirstOrDefaultAsync(ct);
+
+            courtAbbrev = (courtAbbrev ?? "").Trim().ToUpperInvariant();
+            if (string.IsNullOrWhiteSpace(courtAbbrev))
+                throw new InvalidOperationException("Selected Court is missing an Abbreviation (e.g. HC, CA).");
+
+            // ✅ Country ISO2 (KE, UG, TZ...) from Countries.IsoCode (must be 2 letters)
+            var iso2 = await GetCountryIso2Async(dto.CountryId, ct);
+
+            // ✅ Town initial (N for Nairobi, etc.)
             var townCode = TownShortCode(resolvedTown.townName);
 
             // ✅ tail: prefer CaseNumber, else use generated internal ref
@@ -875,7 +894,10 @@ namespace LawAfrica.API.Controllers
                 ? dto.CaseNumber!.Trim()
                 : generatedReportNumber;
 
-            var baseCitation = $"[{citationYear}] {series} ({court}{(string.IsNullOrWhiteSpace(townCode) ? "" : "-" + townCode)}) {tail}".Trim();
+            // ✅ (HCKE-N) format
+            var bracket = $"{courtAbbrev}{iso2}{(string.IsNullOrWhiteSpace(townCode) ? "" : "-" + townCode)}";
+
+            var baseCitation = $"[{citationYear}] {series} ({bracket}) {tail}".Trim();
 
             var candidate = baseCitation;
             int n = 2;
@@ -884,11 +906,13 @@ namespace LawAfrica.API.Controllers
             {
                 candidate = $"{baseCitation}-{n}";
                 n++;
-                if (n > 999) throw new InvalidOperationException("Unable to generate unique Citation (too many collisions).");
+                if (n > 999)
+                    throw new InvalidOperationException("Unable to generate unique Citation (too many collisions).");
             }
 
             return candidate;
         }
+
 
 
         private static string BuildReportTitle(
@@ -1115,18 +1139,33 @@ namespace LawAfrica.API.Controllers
 
         private async Task<string?> GetCourtAbbrevAsync(int? courtId, CancellationToken ct)
         {
-            if (!courtId.HasValue || courtId.Value <= 0) return null;
+            if (!courtId.HasValue)
+                return null;
 
-            // Prefer Court.Code as abbreviation (e.g. HC, CA, ELRC)
-            var code = await _db.Courts
+            var court = await _db.Courts
                 .AsNoTracking()
-                .Where(c => c.Id == courtId.Value)
-                .Select(c => c.Code)
+                .Where(x => x.Id == courtId.Value)
+                .Select(x => new
+                {
+                    x.Abbreviation,
+                    x.Code
+                })
                 .FirstOrDefaultAsync(ct);
 
-            code = (code ?? "").Trim().ToUpperInvariant();
-            return string.IsNullOrWhiteSpace(code) ? null : code;
+            if (court == null)
+                return null;
+
+            // Prefer Abbreviation (HC, CA, ELRC)
+            if (!string.IsNullOrWhiteSpace(court.Abbreviation))
+                return court.Abbreviation.Trim().ToUpperInvariant();
+
+            // Fallback to Code if Abbreviation missing
+            if (!string.IsNullOrWhiteSpace(court.Code))
+                return court.Code.Trim().ToUpperInvariant();
+
+            return null;
         }
+
 
         private static string CourtTypeAbbrev(CourtType ct) => ct switch
         {
