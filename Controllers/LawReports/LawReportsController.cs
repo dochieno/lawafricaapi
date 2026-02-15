@@ -457,6 +457,203 @@ namespace LawAfrica.API.Controllers
             await _db.SaveChangesAsync(ct);
             return NoContent();
         }
+        // GET /api/law-reports/case-types
+        [HttpGet("case-types")]
+        [AllowAnonymous]
+        public async Task<IActionResult> GetCaseTypes(CancellationToken ct)
+        {
+            // grouped counts of CaseType used in current reports
+            var groups = await _db.LawReports
+                .AsNoTracking()
+                .Where(r => r.CaseType != null)
+                .GroupBy(r => r.CaseType)
+                .Select(g => new { value = (int)g.Key, count = g.Count() })
+                .ToListAsync(ct);
+
+            var items = groups
+                .OrderBy(x => CaseTypeLabel((ReportCaseType)x.value))
+                .Select(x => new
+                {
+                    value = x.value,
+                    label = CaseTypeLabel((ReportCaseType)x.value),
+                    count = x.count
+                })
+                .ToList();
+
+            return Ok(items);
+        }
+        // GET /api/law-reports/decision-types
+        [HttpGet("decision-types")]
+        [AllowAnonymous]
+        public async Task<IActionResult> GetDecisionTypes(CancellationToken ct)
+        {
+            var groups = await _db.LawReports
+                .AsNoTracking()
+                .Where(r => r.DecisionType != null)
+                .GroupBy(r => r.DecisionType)
+                .Select(g => new { value = (int)g.Key, count = g.Count() })
+                .ToListAsync(ct);
+
+            var items = groups
+                .OrderBy(x => DecisionTypeLabel((ReportDecisionType)x.value))
+                .Select(x => new
+                {
+                    value = x.value,
+                    label = DecisionTypeLabel((ReportDecisionType)x.value),
+                    count = x.count
+                })
+                .ToList();
+
+            return Ok(items);
+        }
+
+        public class LawReportSearchResponse
+        {
+            public int Total { get; set; }
+            public List<object> Items { get; set; } = new();
+        }
+
+        // GET /api/law-reports/search?... (matches your frontend)
+        [HttpGet("search")]
+        [AllowAnonymous]
+        public async Task<IActionResult> Search(
+            [FromQuery] string? q = null,
+            [FromQuery] string? reportNumber = null,
+            [FromQuery] string? parties = null,
+            [FromQuery] string? citation = null,
+            [FromQuery] int? year = null,
+            [FromQuery] int? courtType = null,
+            [FromQuery] int? courtId = null,
+            [FromQuery] string? townOrPostCode = null,
+            [FromQuery] int? caseType = null,
+            [FromQuery] int? decisionType = null,
+            [FromQuery] string? sort = "year_desc",
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 9,
+            [FromQuery] int? countryId = null,
+            CancellationToken ct = default)
+        {
+            q = (q ?? "").Trim();
+            reportNumber = (reportNumber ?? "").Trim();
+            parties = (parties ?? "").Trim();
+            citation = (citation ?? "").Trim();
+            townOrPostCode = (townOrPostCode ?? "").Trim();
+
+            if (page <= 0) page = 1;
+            if (pageSize <= 0) pageSize = 9;
+            if (pageSize > 60) pageSize = 60;
+
+            var query = _db.LawReports
+                .AsNoTracking()
+                .Include(r => r.LegalDocument)
+                .Include(r => r.TownRef)
+                .Include(r => r.CourtRef)
+                .Where(r =>
+                    r.LegalDocument != null &&
+                    r.LegalDocument.Status == LegalDocumentStatus.Published &&
+                    r.LegalDocument.Kind == LegalDocumentKind.Report &&
+                    r.LegalDocument.FileType == "report");
+
+            if (countryId.HasValue && countryId.Value > 0)
+                query = query.Where(r => r.CountryId == countryId.Value);
+
+            if (year.HasValue) query = query.Where(r => r.Year == year.Value);
+
+            if (courtType.HasValue && courtType.Value > 0)
+                query = query.Where(r => r.CourtType.HasValue && (int)r.CourtType.Value == courtType.Value);
+
+            if (courtId.HasValue && courtId.Value > 0)
+                query = query.Where(r => r.CourtId == courtId.Value);
+
+            if (caseType.HasValue && caseType.Value > 0)
+                query = query.Where(r => (int)r.CaseType == caseType.Value);
+
+            if (decisionType.HasValue && decisionType.Value > 0)
+                query = query.Where(r => (int)r.DecisionType == decisionType.Value);
+
+            if (!string.IsNullOrWhiteSpace(reportNumber))
+                query = query.Where(r => r.ReportNumber != null && r.ReportNumber.Contains(reportNumber));
+
+            if (!string.IsNullOrWhiteSpace(parties))
+                query = query.Where(r => r.Parties != null && r.Parties.Contains(parties));
+
+            if (!string.IsNullOrWhiteSpace(citation))
+                query = query.Where(r => r.Citation != null && r.Citation.Contains(citation));
+
+            if (!string.IsNullOrWhiteSpace(townOrPostCode))
+            {
+                query = query.Where(r =>
+                    (r.Town != null && r.Town.Contains(townOrPostCode)) ||
+                    (r.TownRef != null && r.TownRef.PostCode != null && r.TownRef.PostCode.Contains(townOrPostCode)));
+            }
+
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                query = query.Where(r =>
+                    (r.LegalDocument != null && r.LegalDocument.Title != null && r.LegalDocument.Title.Contains(q)) ||
+                    (r.Parties != null && r.Parties.Contains(q)) ||
+                    (r.ReportNumber != null && r.ReportNumber.Contains(q)) ||
+                    (r.Citation != null && r.Citation.Contains(q)) ||
+                    (r.CaseNumber != null && r.CaseNumber.Contains(q)) ||
+                    (r.CourtRef != null && r.CourtRef.Name != null && r.CourtRef.Name.Contains(q)) ||
+                    (r.Court != null && r.Court.Contains(q)) ||
+                    (r.Town != null && r.Town.Contains(q)) ||
+                    (r.Judges != null && r.Judges.Contains(q))
+                );
+            }
+
+            var total = await query.CountAsync(ct);
+
+            // Sorting
+            query = sort switch
+            {
+                "year_asc" => query.OrderBy(r => r.Year).ThenBy(r => r.Id),
+                "reportno_asc" => query.OrderBy(r => r.ReportNumber).ThenBy(r => r.Id),
+                "parties_asc" => query.OrderBy(r => r.Parties).ThenBy(r => r.Id),
+                "date_desc" => query.OrderByDescending(r => r.DecisionDate).ThenByDescending(r => r.Id),
+                _ => query.OrderByDescending(r => r.Year).ThenByDescending(r => r.Id), // year_desc
+            };
+
+            var skip = (page - 1) * pageSize;
+
+            var list = await query
+                .Skip(skip)
+                .Take(pageSize)
+                .Select(r => new
+                {
+                    id = r.Id,
+                    legalDocumentId = r.LegalDocumentId,
+                    isPremium = r.LegalDocument != null && r.LegalDocument.IsPremium,
+
+                    // ✅ IMPORTANT: Title comes from LegalDocument.Title (your Create/Update already sets it)
+                    title = r.LegalDocument != null ? (r.LegalDocument.Title ?? "") : "",
+
+                    parties = r.Parties ?? "",
+                    reportNumber = r.ReportNumber ?? "",
+                    citation = r.Citation ?? "",
+                    year = r.Year,
+
+                    decisionDate = r.DecisionDate,
+
+                    caseTypeLabel = CaseTypeLabel(r.CaseType),
+                    decisionTypeLabel = DecisionTypeLabel(r.DecisionType),
+
+                    courtTypeLabel = r.CourtType.HasValue ? CourtTypeLabel(r.CourtType.Value) : "",
+
+                    courtName = r.CourtRef != null ? r.CourtRef.Name : null,
+                    town = r.Town ?? "",
+                    townPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
+                    judges = r.Judges ?? "",
+
+                    // simple preview (you can improve later)
+                    previewText = (r.ContentText ?? "").Length > 650 ? (r.ContentText ?? "").Substring(0, 650) : (r.ContentText ?? "")
+                })
+                .ToListAsync(ct);
+
+            return Ok(new { items = list, total });
+        }
+
+
 
         public class LawReportContentUpdateDto
         {
