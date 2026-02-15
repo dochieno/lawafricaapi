@@ -222,22 +222,32 @@ namespace LawAfrica.API.Controllers
         // -------------------------
         [Authorize(Roles = "Admin")]
         [HttpPost]
-        public async Task<ActionResult<LawReportDto>> Create([FromBody] LawReportUpsertDto dto, CancellationToken ct)
+        public async Task<ActionResult<LawReportDto>> Create(
+            [FromBody] LawReportUpsertDto dto,
+            CancellationToken ct)
         {
-            if (!ModelState.IsValid) return ValidationProblem(ModelState);
+            if (!ModelState.IsValid)
+                return ValidationProblem(ModelState);
 
             var courtType = (CourtType)dto.CourtType;
 
-            // ✅ resolve town
+            // ✅ Resolve Town
             (int? townId, string? townName, string? postCode) resolvedTown;
-            try { resolvedTown = await ResolveTownAsync(dto); }
-            catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
+            try
+            {
+                resolvedTown = await ResolveTownAsync(dto);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
 
-            // ✅ resolve courtId (validate)
+            // ✅ Resolve CourtId (must exist and match country)
             int? resolvedCourtId = null;
             if (dto.CourtId.HasValue)
             {
-                var court = await _db.Courts.AsNoTracking()
+                var court = await _db.Courts
+                    .AsNoTracking()
                     .FirstOrDefaultAsync(c => c.Id == dto.CourtId.Value, ct);
 
                 if (court == null)
@@ -249,23 +259,25 @@ namespace LawAfrica.API.Controllers
                 resolvedCourtId = court.Id;
             }
 
-            // ✅ We will retry generation if unique collision occurs
             const int MAX_RETRIES = 3;
 
             for (int attempt = 1; attempt <= MAX_RETRIES; attempt++)
             {
-                // 1) Generate internal ReportNumber (e.g. HCKE00001)
-                var generatedReportNumber = await GenerateReportNumberAsync(dto.CountryId, resolvedCourtId, courtType, ct);
+                var generatedReportNumber =
+                    await GenerateReportNumberAsync(dto.CountryId, resolvedCourtId, courtType, ct);
 
-                // 2) Generate citation (uses generatedReportNumber when CaseNumber missing)
-                var ensuredCitation = await EnsureCitationAsync(dto, resolvedTown, generatedReportNumber, ct);
+                var ensuredCitation =
+                    await EnsureCitationAsync(dto, resolvedTown, generatedReportNumber, ct);
 
-                // 3) Dedupe check (keep your logic; now uses generatedReportNumber for ReportNumber comparisons)
-                // IMPORTANT: temporarily set dto.ReportNumber so your existing dedupe logic doesn't break
+                var existing =
+                    await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName, ensuredCitation, ct);
 
-                var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName, ensuredCitation, ct);
                 if (existing != null)
-                    return Conflict(new { message = "Duplicate report exists.", existingLawReportId = existing.Id });
+                    return Conflict(new
+                    {
+                        message = "Duplicate report exists.",
+                        existingLawReportId = existing.Id
+                    });
 
                 var title = BuildReportTitle(dto, resolvedTown.townName, ensuredCitation);
 
@@ -302,7 +314,7 @@ namespace LawAfrica.API.Controllers
                     CourtId = resolvedCourtId,
 
                     Citation = ensuredCitation,
-                    ReportNumber = generatedReportNumber, // ✅ internal
+                    ReportNumber = generatedReportNumber,
                     Year = dto.Year,
                     CaseNumber = TrimOrNull(dto.CaseNumber),
 
@@ -311,41 +323,55 @@ namespace LawAfrica.API.Controllers
 
                     CourtType = courtType,
                     CourtCategory = TrimOrNull(dto.CourtCategory),
-                    Court = BuildCourtDisplay(TrimOrNull(dto.Court), dto.CourtCategory, resolvedTown.townName),
 
                     Parties = TrimOrNull(dto.Parties),
                     Judges = TrimOrNull(dto.Judges),
                     DecisionDate = dto.DecisionDate,
 
                     ContentText = dto.ContentText,
-
                     CreatedAt = DateTime.UtcNow
                 };
+
+                // 🔹 Attach refs so we can build display string
+                if (report.TownId.HasValue)
+                    report.TownRef = await _db.Towns
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(t => t.Id == report.TownId.Value, ct);
+
+                if (report.CourtId.HasValue)
+                    report.CourtRef = await _db.Courts
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(c => c.Id == report.CourtId.Value, ct);
+
+                // ✅ Build simple display string
+                var courtName = TrimOrNull(report.CourtRef?.Name);
+                var townName = TrimOrNull(report.TownRef?.Name) ?? TrimOrNull(report.Town);
+
+                report.Court =
+                    !string.IsNullOrWhiteSpace(courtName) && !string.IsNullOrWhiteSpace(townName)
+                        ? $"{courtName} at {townName}"
+                        : courtName ?? townName ?? "";
 
                 _db.LawReports.Add(report);
 
                 try
                 {
                     await _db.SaveChangesAsync(ct);
-
-                    if (report.TownId.HasValue)
-                        report.TownRef = await _db.Towns.AsNoTracking().FirstOrDefaultAsync(t => t.Id == report.TownId.Value, ct);
-
-                    if (report.CourtId.HasValue)
-                        report.CourtRef = await _db.Courts.AsNoTracking().FirstOrDefaultAsync(c => c.Id == report.CourtId.Value, ct);
-
-                    return CreatedAtAction(nameof(Get), new { id = report.Id }, ToDto(report, includeContent: true));
+                    return CreatedAtAction(nameof(Get),
+                        new { id = report.Id },
+                        ToDto(report, includeContent: true));
                 }
                 catch (DbUpdateException ex) when (IsUniqueViolation(ex) && attempt < MAX_RETRIES)
                 {
-                    // collision on ReportNumber unique index -> retry with next number
                     _db.ChangeTracker.Clear();
                     continue;
                 }
             }
 
-            return StatusCode(500, new { message = "Failed to generate a unique ReportNumber. Please retry." });
+            return StatusCode(500,
+                new { message = "Failed to generate a unique ReportNumber. Please retry." });
         }
+
 
 
         // -------------------------
@@ -353,9 +379,13 @@ namespace LawAfrica.API.Controllers
         // -------------------------
         [Authorize(Roles = "Admin")]
         [HttpPut("{id:int}")]
-        public async Task<IActionResult> Update(int id, [FromBody] LawReportUpsertDto dto, CancellationToken ct)
+        public async Task<IActionResult> Update(
+            int id,
+            [FromBody] LawReportUpsertDto dto,
+            CancellationToken ct)
         {
-            if (!ModelState.IsValid) return ValidationProblem(ModelState);
+            if (!ModelState.IsValid)
+                return ValidationProblem(ModelState);
 
             var r = await _db.LawReports
                 .Include(x => x.LegalDocument)
@@ -363,17 +393,26 @@ namespace LawAfrica.API.Controllers
                 .Include(x => x.CourtRef)
                 .FirstOrDefaultAsync(x => x.Id == id, ct);
 
-            if (r == null) return NotFound();
+            if (r == null)
+                return NotFound();
 
+            // ✅ Resolve Town
             (int? townId, string? townName, string? postCode) resolvedTown;
-            try { resolvedTown = await ResolveTownAsync(dto); }
-            catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
+            try
+            {
+                resolvedTown = await ResolveTownAsync(dto);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
 
-            // ✅ resolve courtId (validate)
+            // ✅ Resolve Court
             int? resolvedCourtId = null;
             if (dto.CourtId.HasValue)
             {
-                var court = await _db.Courts.AsNoTracking()
+                var court = await _db.Courts
+                    .AsNoTracking()
                     .FirstOrDefaultAsync(c => c.Id == dto.CourtId.Value, ct);
 
                 if (court == null)
@@ -385,69 +424,76 @@ namespace LawAfrica.API.Controllers
                 resolvedCourtId = court.Id;
             }
 
-            // ✅ ReportNumber is INTERNAL — do not accept changes
-            // If you want to HARD-BLOCK when client sends it:
-            // if (!string.IsNullOrWhiteSpace(dto.ReportNumber) && dto.ReportNumber.Trim() != r.ReportNumber)
-            //     return BadRequest(new { message = "ReportNumber is system-generated and cannot be changed." });
+            var ensuredCitation =
+                await EnsureCitationAsync(dto, resolvedTown, r.ReportNumber, ct);
 
-            var ensuredCitation = await EnsureCitationAsync(dto, resolvedTown, r.ReportNumber, ct);
+            var existing =
+                await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName, ensuredCitation, ct);
 
-            // For dedupe check, reuse existing report number
-
-            var existing = await FindExistingByDedupe(dto, resolvedTown.townId, resolvedTown.townName, ensuredCitation, ct);
             if (existing != null && existing.Id != id)
-                return Conflict(new { message = "Duplicate report exists.", existingLawReportId = existing.Id });
+                return Conflict(new
+                {
+                    message = "Duplicate report exists.",
+                    existingLawReportId = existing.Id
+                });
 
+            // ✅ Update fields
             r.CountryId = dto.CountryId;
             r.Service = dto.Service;
-
             r.Citation = ensuredCitation;
-
-            // ✅ keep existing internal report number
-            // r.ReportNumber unchanged
-
             r.Year = dto.Year;
             r.CaseNumber = TrimOrNull(dto.CaseNumber);
-
             r.DecisionType = dto.DecisionType;
             r.CaseType = dto.CaseType;
-
             r.CourtType = (CourtType)dto.CourtType;
             r.CourtCategory = TrimOrNull(dto.CourtCategory);
 
             r.TownId = resolvedTown.townId;
             r.Town = resolvedTown.townName;
-
             r.CourtId = resolvedCourtId;
-
-            r.Court = BuildCourtDisplay(TrimOrNull(dto.Court), dto.CourtCategory, resolvedTown.townName);
 
             r.Parties = TrimOrNull(dto.Parties);
             r.Judges = TrimOrNull(dto.Judges);
             r.DecisionDate = dto.DecisionDate;
             r.ContentText = dto.ContentText;
-
             r.UpdatedAt = DateTime.UtcNow;
+
+            // 🔹 Refresh refs
+            if (r.TownId.HasValue)
+                r.TownRef = await _db.Towns
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(t => t.Id == r.TownId.Value, ct);
+
+            if (r.CourtId.HasValue)
+                r.CourtRef = await _db.Courts
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(c => c.Id == r.CourtId.Value, ct);
+
+            // ✅ Build simple display string
+            var courtName = TrimOrNull(r.CourtRef?.Name);
+            var townName = TrimOrNull(r.TownRef?.Name) ?? TrimOrNull(r.Town);
+
+            r.Court =
+                !string.IsNullOrWhiteSpace(courtName) && !string.IsNullOrWhiteSpace(townName)
+                    ? $"{courtName} at {townName}"
+                    : courtName ?? townName ?? "";
 
             if (r.LegalDocument != null)
             {
-                r.LegalDocument.Title = BuildReportTitle(dto, resolvedTown.townName, ensuredCitation);
+                r.LegalDocument.Title =
+                    BuildReportTitle(dto, resolvedTown.townName, ensuredCitation);
 
-                // ✅ description now uses INTERNAL report number
-                r.LegalDocument.Description = $"Law Report {r.ReportNumber} ({dto.Year})";
-                r.LegalDocument.Category = LLR_CATEGORY;
+                r.LegalDocument.Description =
+                    $"Law Report {r.ReportNumber} ({dto.Year})";
+
                 r.LegalDocument.CountryId = dto.CountryId;
-
-                r.LegalDocument.Kind = LegalDocumentKind.Report;
-                r.LegalDocument.FileType = "report";
-                r.LegalDocument.FilePath = r.LegalDocument.FilePath ?? "";
-                r.LegalDocument.Version = string.IsNullOrWhiteSpace(r.LegalDocument.Version) ? "1" : r.LegalDocument.Version;
                 r.LegalDocument.UpdatedAt = DateTime.UtcNow;
             }
 
             await _db.SaveChangesAsync(ct);
             return NoContent();
         }
+
 
 
         // -------------------------
@@ -1271,22 +1317,24 @@ namespace LawAfrica.API.Controllers
             dto.DebugNote = decision.DebugNote;
         }
 
-            private static string BuildCourtDisplay(string? baseCourt, string? courtCategory, string? town)
+            private static string BuildCourtDisplay(LawReport r)
             {
-                var c = TrimOrNull(baseCourt);
-                var cat = TrimOrNull(courtCategory);
-                var t = TrimOrNull(town);
+                // court name from model
+                var courtName =
+                    TrimOrNull(r.CourtRef?.Name)
+                    ?? TrimOrNull(r.Court); // fallback if older rows have the string column
 
-                var head = c;
+                // town name from TownRef, fallback to stored Town string
+                var townName =
+                    TrimOrNull(r.TownRef?.Name)
+                    ?? TrimOrNull(r.Town);
 
-                if (!string.IsNullOrWhiteSpace(cat))
-                    head = !string.IsNullOrWhiteSpace(head) ? $"{head} — {cat}" : cat;
+                if (!string.IsNullOrWhiteSpace(courtName) && !string.IsNullOrWhiteSpace(townName))
+                    return $"{courtName} at {townName}";
 
-                if (!string.IsNullOrWhiteSpace(head) && !string.IsNullOrWhiteSpace(t))
-                    return $"{head} at {t}";
-
-                return head ?? t ?? "";
+                return courtName ?? townName ?? "";
             }
+
 
         private static bool IsUniqueViolation(DbUpdateException ex)
         {
@@ -1310,6 +1358,7 @@ namespace LawAfrica.API.Controllers
 
             return iso2;
         }
+
 
         private async Task<string?> GetCourtAbbrevAsync(int? courtId, CancellationToken ct)
         {
