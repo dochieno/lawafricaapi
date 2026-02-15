@@ -15,8 +15,11 @@ namespace LawAfrica.API.DTOs.Reports
         [Required]
         public ReportService Service { get; set; } = ReportService.LawAfricaLawReports_LLR;
 
-        [Required, MaxLength(30)]
-        public string ReportNumber { get; set; } = string.Empty;
+        // ✅ INTERNAL reference (server generated on Create)
+        // Format: {CourtAbbrev}{CountryIso2}{00001} e.g. HCKE00001
+        // Keep it optional in payload; controller will generate.
+        [MaxLength(20)]
+        public string? ReportNumber { get; set; }
 
         [Range(1900, 2100)]
         public int Year { get; set; }
@@ -63,12 +66,11 @@ namespace LawAfrica.API.DTOs.Reports
         [MaxLength(20)]
         public string? TownPostCode { get; set; }
 
-        // ✅ NEW: Optional category/division label (nullable)
+        // ✅ Optional category/division label (nullable)
         [MaxLength(120)]
         public string? CourtCategory { get; set; }
 
-        // ✅ Alias for frontend field "postCode" (your Admin UI currently sends this)
-        // ResolveTownAsync in controller will check TownPostCode first, then this alias.
+        // ✅ Alias for frontend field "postCode"
         [MaxLength(20)]
         [JsonPropertyName("postCode")]
         public string? PostCode { get; set; }
@@ -81,18 +83,12 @@ namespace LawAfrica.API.DTOs.Reports
             if (CountryId <= 0)
                 yield return new ValidationResult("CountryId is required.", new[] { nameof(CountryId) });
 
-            if (!ReportValidation.IsValidReportNumber(ReportNumber))
-                yield return new ValidationResult(
-                    "ReportNumber must start with 3 letters followed by digits, e.g. CAR353.",
-                    new[] { nameof(ReportNumber) });
-
             if (string.IsNullOrWhiteSpace(ContentText))
                 yield return new ValidationResult("ContentText is required.", new[] { nameof(ContentText) });
 
             if (CourtType <= 0)
                 yield return new ValidationResult("CourtType is required.", new[] { nameof(CourtType) });
 
-            // ✅ Optional: allow TownId OR TownPostCode OR Town text
             if (TownId.HasValue && TownId.Value <= 0)
                 yield return new ValidationResult("TownId must be a positive number.", new[] { nameof(TownId) });
 
@@ -100,14 +96,17 @@ namespace LawAfrica.API.DTOs.Reports
             if (!string.IsNullOrWhiteSpace(pc) && pc.Length > 20)
                 yield return new ValidationResult("TownPostCode is too long.", new[] { nameof(TownPostCode) });
 
-            // ✅ Alias length check
             var pc2 = (PostCode ?? "").Trim();
             if (!string.IsNullOrWhiteSpace(pc2) && pc2.Length > 20)
                 yield return new ValidationResult("PostCode is too long.", new[] { nameof(PostCode) });
 
-            // ✅ Optional: CourtId must be positive if provided
             if (CourtId.HasValue && CourtId.Value <= 0)
                 yield return new ValidationResult("CourtId must be a positive number.", new[] { nameof(CourtId) });
+
+            // ✅ If client sends ReportNumber, keep it within limit (but it is server-owned)
+            var rn = (ReportNumber ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(rn) && rn.Length > 12)
+                yield return new ValidationResult("ReportNumber is too long.", new[] { nameof(ReportNumber) });
         }
     }
 }
