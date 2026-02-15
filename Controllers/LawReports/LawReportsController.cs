@@ -531,6 +531,7 @@ namespace LawAfrica.API.Controllers
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 9,
             [FromQuery] int? countryId = null,
+            [FromQuery] int? townId = null,
             CancellationToken ct = default)
         {
             q = (q ?? "").Trim();
@@ -564,6 +565,8 @@ namespace LawAfrica.API.Controllers
 
             if (courtId.HasValue && courtId.Value > 0)
                 query = query.Where(r => r.CourtId == courtId.Value);
+            if (townId.HasValue && townId.Value > 0)
+                query = query.Where(r => r.TownId == townId.Value);
 
             if (caseType.HasValue && caseType.Value > 0)
                 query = query.Where(r => (int)r.CaseType == caseType.Value);
