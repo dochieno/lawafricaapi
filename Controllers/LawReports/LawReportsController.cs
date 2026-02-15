@@ -126,6 +126,46 @@ namespace LawAfrica.API.Controllers
         }
 
         // -------------------------
+        // PUBLIC COURTS LOOKUP (for filters)
+        // GET /api/law-reports/courts?countryId=1&q=high
+        // -------------------------
+        [HttpGet("courts")]
+        [AllowAnonymous]
+        public async Task<ActionResult<List<object>>> PublicCourtsLookup(
+            [FromQuery] int countryId,
+            [FromQuery] string? q = null,
+            CancellationToken ct = default)
+        {
+            if (countryId <= 0)
+                return BadRequest(new { message = "countryId is required." });
+
+            q = (q ?? "").Trim();
+
+            var query = _db.Courts
+                .AsNoTracking()
+                .Where(c => c.CountryId == countryId && c.IsActive);
+
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                query = query.Where(c =>
+                    (c.Name != null && c.Name.Contains(q)) ||
+                    (c.Code != null && c.Code.Contains(q)));
+            }
+
+            var items = await query
+                .OrderBy(c => c.Name)
+                .Select(c => new
+                {
+                    id = c.Id,
+                    name = c.Name,
+                    code = c.Code
+                })
+                .ToListAsync(ct);
+
+            return Ok(items);
+        }
+
+        // -------------------------
         // ADMIN LIST
         // -------------------------
         [Authorize(Roles = "Admin")]
@@ -424,6 +464,8 @@ namespace LawAfrica.API.Controllers
             public ReportDecisionType? DecisionType { get; set; }
             public ReportCaseType? CaseType { get; set; }
         }
+
+
 
         // ============================================================
         // DTO mapping
