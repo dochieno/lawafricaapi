@@ -16,6 +16,7 @@ using LawAfrica.API.Services.LawReportsContent;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using LawAfrica.API.Models.LawReports.DTOs;
 using System.Linq.Expressions;
 
 namespace LawAfrica.API.Controllers
@@ -936,6 +937,131 @@ namespace LawAfrica.API.Controllers
             return PhysicalFile(physicalPath, contentType, enableRangeProcessing: true);
         }
 
+        // -------------------------
+        // RELATED CASES (DB-only, heuristic)
+        // -------------------------
+        [Authorize]
+        [HttpGet("{id:int}/related")]
+        public async Task<ActionResult<List<LawReportListItemDto>>> Related(
+            int id,
+            [FromQuery] int take = 8,
+            CancellationToken ct = default)
+        {
+            take = Math.Clamp(take, 1, 20);
+
+            var seed = await _db.LawReports
+                .AsNoTracking()
+                .Include(x => x.LegalDocument)
+                .FirstOrDefaultAsync(x => x.Id == id, ct);
+
+            if (seed == null)
+                return NotFound(new { message = "Law report not found." });
+
+            var parties = (seed.Parties ?? "").Trim();
+
+            var partyTokens = parties
+                .Split(new[] { " v ", " vs ", " v. ", " vs. ", "&", "and", ",", ";", " " },
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => x.Length >= 4)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(6)
+                .ToList();
+
+            var q = _db.LawReports
+                .AsNoTracking()
+                .Include(x => x.LegalDocument)
+                .Include(x => x.TownRef)
+                .Where(r =>
+                    r.Id != seed.Id &&
+                    r.LegalDocument != null &&
+                    r.LegalDocument.Category == LLR_CATEGORY &&
+                    r.LegalDocument.Kind == LegalDocumentKind.Report &&
+                    r.LegalDocument.FileType == "report" &&
+                    r.LegalDocument.Status == LegalDocumentStatus.Published
+                )
+                .AsQueryable();
+
+            // Prefer same court type
+            q = q.Where(r => r.CourtType == seed.CourtType);
+
+            // Prefer same case or decision type
+            q = q.Where(r =>
+                r.CaseType == seed.CaseType ||
+                r.DecisionType == seed.DecisionType
+            );
+
+            if (partyTokens.Count > 0)
+            {
+                var likes = partyTokens
+                    .Select(t => $"%{EscapeLike(t)}%")
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                Expression<Func<LawReport, bool>> predicate = r => false;
+
+                foreach (var like in likes)
+                {
+                    Expression<Func<LawReport, bool>> one = r =>
+                        (r.Parties != null && EF.Functions.ILike(r.Parties, like)) ||
+                        (r.Citation != null && EF.Functions.ILike(r.Citation, like)) ||
+                        (r.LegalDocument != null &&
+                         r.LegalDocument.Title != null &&
+                         EF.Functions.ILike(r.LegalDocument.Title, like));
+
+                    predicate = OrElse(predicate, one);
+                }
+
+                q = q.Where(predicate);
+            }
+            else
+            {
+                // fallback if no party tokens
+                q = q.Where(r => r.Year == seed.Year);
+            }
+
+            var list = await q
+                .OrderByDescending(r => r.UpdatedAt ?? r.CreatedAt)
+                .ThenByDescending(r => r.Year)
+                .ThenByDescending(r => r.Id)
+                .Take(take)
+                .Select(r => new LawReportListItemDto
+                {
+                    Id = r.Id,
+                    LegalDocumentId = r.LegalDocumentId,
+                    Title = r.LegalDocument != null ? (r.LegalDocument.Title ?? "") : "",
+                    IsPremium = r.LegalDocument != null && r.LegalDocument.IsPremium,
+
+                    ReportNumber = r.ReportNumber,
+                    Year = r.Year,
+                    CaseNumber = r.CaseNumber,
+                    Citation = r.Citation,
+
+                    CourtType = (int)r.CourtType,
+                    CourtTypeLabel = CourtTypeLabel(r.CourtType),
+
+                    DecisionType = r.DecisionType,
+                    DecisionTypeLabel = DecisionTypeLabel(r.DecisionType),
+
+                    CaseType = r.CaseType,
+                    CaseTypeLabel = CaseTypeLabel(r.CaseType),
+
+                    Court = r.Court,
+                    Town = r.Town,
+                    TownId = r.TownId,
+                    TownPostCode = r.TownRef != null ? r.TownRef.PostCode : null,
+
+                    Parties = r.Parties,
+                    Judges = r.Judges,
+                    DecisionDate = r.DecisionDate,
+
+                    PreviewText = ""
+                })
+                .ToListAsync(ct);
+
+            return Ok(list);
+        }
+
 
         public class LawReportContentUpdateDto
         {
@@ -943,6 +1069,9 @@ namespace LawAfrica.API.Controllers
             public ReportDecisionType? DecisionType { get; set; }
             public ReportCaseType? CaseType { get; set; }
         }
+
+        //Report DTO exception
+
 
 
 
@@ -1481,6 +1610,15 @@ namespace LawAfrica.API.Controllers
             return $"{prefix}{next.ToString().PadLeft(digits, '0')}";
         }
 
+        private static string EscapeLike(string input)
+        {
+            if (string.IsNullOrEmpty(input)) return input;
+
+            return input
+                .Replace(@"\", @"\\")
+                .Replace("%", @"\%")
+                .Replace("_", @"\_");
+        }
 
     }
 }
