@@ -231,7 +231,7 @@ namespace LawAfrica.API.Controllers
 
             var courtType = (CourtType)dto.CourtType;
 
-            // ✅ Resolve Town
+            // ✅ Resolve Town (FK + name + postcode)
             (int? townId, string? townName, string? postCode) resolvedTown;
             try
             {
@@ -242,21 +242,23 @@ namespace LawAfrica.API.Controllers
                 return BadRequest(new { message = ex.Message });
             }
 
-            // ✅ Resolve CourtId (must exist and match country)
+            // ✅ Resolve CourtId (validate exists + matches country)
             int? resolvedCourtId = null;
             if (dto.CourtId.HasValue)
             {
-                var court = await _db.Courts
+                var courtMeta = await _db.Courts
                     .AsNoTracking()
-                    .FirstOrDefaultAsync(c => c.Id == dto.CourtId.Value, ct);
+                    .Where(c => c.Id == dto.CourtId.Value)
+                    .Select(c => new { c.Id, c.CountryId })
+                    .FirstOrDefaultAsync(ct);
 
-                if (court == null)
+                if (courtMeta == null)
                     return BadRequest(new { message = "Selected CourtId does not exist." });
 
-                if (court.CountryId != dto.CountryId)
+                if (courtMeta.CountryId != dto.CountryId)
                     return BadRequest(new { message = "Selected court does not match the selected country." });
 
-                resolvedCourtId = court.Id;
+                resolvedCourtId = courtMeta.Id;
             }
 
             const int MAX_RETRIES = 3;
@@ -332,20 +334,28 @@ namespace LawAfrica.API.Controllers
                     CreatedAt = DateTime.UtcNow
                 };
 
-                // 🔹 Attach refs so we can build display string
-                if (report.TownId.HasValue)
-                    report.TownRef = await _db.Towns
-                        .AsNoTracking()
-                        .FirstOrDefaultAsync(t => t.Id == report.TownId.Value, ct);
-
+                // ✅ DO NOT assign TownRef/CourtRef navigation objects on Create
+                // Instead: query names for display string only (no tracking, no relationship graph)
+                string? courtName = null;
                 if (report.CourtId.HasValue)
-                    report.CourtRef = await _db.Courts
+                {
+                    courtName = await _db.Courts
                         .AsNoTracking()
-                        .FirstOrDefaultAsync(c => c.Id == report.CourtId.Value, ct);
+                        .Where(c => c.Id == report.CourtId.Value)
+                        .Select(c => c.Name)
+                        .FirstOrDefaultAsync(ct);
+                }
 
-                // ✅ Build simple display string
-                var courtName = TrimOrNull(report.CourtRef?.Name);
-                var townName = TrimOrNull(report.TownRef?.Name) ?? TrimOrNull(report.Town);
+                // Prefer resolvedTown name, else load from TownId if available
+                string? townName = TrimOrNull(resolvedTown.townName);
+                if (string.IsNullOrWhiteSpace(townName) && report.TownId.HasValue)
+                {
+                    townName = await _db.Towns
+                        .AsNoTracking()
+                        .Where(t => t.Id == report.TownId.Value)
+                        .Select(t => t.Name)
+                        .FirstOrDefaultAsync(ct);
+                }
 
                 report.Court =
                     !string.IsNullOrWhiteSpace(courtName) && !string.IsNullOrWhiteSpace(townName)
@@ -357,9 +367,20 @@ namespace LawAfrica.API.Controllers
                 try
                 {
                     await _db.SaveChangesAsync(ct);
+
+                    // IMPORTANT: return DTO without relying on nav refs that we never assigned
+                    // (Your ToDto reads CourtRef/TownRef; those are null here.)
+                    // Quick fix: reload with includes for response only:
+                    var saved = await _db.LawReports
+                        .AsNoTracking()
+                        .Include(x => x.LegalDocument)
+                        .Include(x => x.TownRef)
+                        .Include(x => x.CourtRef)
+                        .FirstOrDefaultAsync(x => x.Id == report.Id, ct);
+
                     return CreatedAtAction(nameof(Get),
                         new { id = report.Id },
-                        ToDto(report, includeContent: true));
+                        ToDto(saved ?? report, includeContent: true));
                 }
                 catch (DbUpdateException ex) when (IsUniqueViolation(ex) && attempt < MAX_RETRIES)
                 {
@@ -372,11 +393,6 @@ namespace LawAfrica.API.Controllers
                 new { message = "Failed to generate a unique ReportNumber. Please retry." });
         }
 
-
-
-        // -------------------------
-        // UPDATE
-        // -------------------------
         // -------------------------
         // UPDATE
         // -------------------------
@@ -509,9 +525,6 @@ namespace LawAfrica.API.Controllers
             await _db.SaveChangesAsync(ct);
             return NoContent();
         }
-
-
-
 
         // -------------------------
         // DELETE
