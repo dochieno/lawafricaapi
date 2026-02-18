@@ -3,6 +3,7 @@ using System;
 using LawAfrica.API.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace LawAfrica.API.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260218053939_AddSectionSummaryCacheIntegrityFields")]
+    partial class AddSectionSummaryCacheIntegrityFields
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -102,238 +105,6 @@ namespace LawAfrica.API.Migrations
                     b.ToTable("AiUsages");
                 });
 
-            modelBuilder.Entity("LawAfrica.API.Models.Ai.Commentary.AiCommentaryMessage", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<string>("Content")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("ContentMarkdown")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasDefaultValueSql("timezone('utc', now())");
-
-                    b.Property<DateTime?>("DeletedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("DisclaimerVersion")
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)");
-
-                    b.Property<int?>("InputChars")
-                        .HasColumnType("integer");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("Mode")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<string>("Model")
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<int?>("OutputChars")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("PromptHash")
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<string>("Role")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<long>("ThreadId")
-                        .HasColumnType("bigint");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ThreadId", "CreatedAtUtc");
-
-                    b.HasIndex("ThreadId", "IsDeleted", "CreatedAtUtc");
-
-                    b.ToTable("AiCommentaryMessages", (string)null);
-                });
-
-            modelBuilder.Entity("LawAfrica.API.Models.Ai.Commentary.AiCommentaryMessageSource", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<string>("Citation")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)");
-
-                    b.Property<int?>("LawReportId")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("LegalDocumentId")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("LinkUrl")
-                        .HasMaxLength(400)
-                        .HasColumnType("character varying(400)");
-
-                    b.Property<long>("MessageId")
-                        .HasColumnType("bigint");
-
-                    b.Property<int?>("PageNumber")
-                        .HasColumnType("integer");
-
-                    b.Property<double>("Score")
-                        .HasColumnType("double precision");
-
-                    b.Property<string>("Snippet")
-                        .IsRequired()
-                        .HasMaxLength(1200)
-                        .HasColumnType("character varying(1200)");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasMaxLength(300)
-                        .HasColumnType("character varying(300)");
-
-                    b.Property<string>("Type")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("MessageId");
-
-                    b.HasIndex("Type", "LawReportId");
-
-                    b.HasIndex("Type", "LegalDocumentId", "PageNumber");
-
-                    b.ToTable("AiCommentaryMessageSources", (string)null);
-                });
-
-            modelBuilder.Entity("LawAfrica.API.Models.Ai.Commentary.AiCommentarySettings", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<bool>("EnableUserHistory")
-                        .HasColumnType("boolean");
-
-                    b.Property<int>("RetentionMonths")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("UpdatedAtUtc")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasDefaultValueSql("timezone('utc', now())");
-
-                    b.Property<int?>("UpdatedByUserId")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("UpdatedByUserId");
-
-                    b.ToTable("AiCommentarySettings", (string)null);
-
-                    b.HasData(
-                        new
-                        {
-                            Id = 1,
-                            EnableUserHistory = true,
-                            RetentionMonths = 6,
-                            UpdatedAtUtc = new DateTime(2026, 2, 18, 0, 0, 0, 0, DateTimeKind.Utc)
-                        });
-                });
-
-            modelBuilder.Entity("LawAfrica.API.Models.Ai.Commentary.AiCommentaryThread", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<int?>("CountryId")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("CountryIso")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<string>("CountryName")
-                        .HasMaxLength(120)
-                        .HasColumnType("character varying(120)");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasDefaultValueSql("timezone('utc', now())");
-
-                    b.Property<DateTime?>("DeletedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int?>("InstitutionId")
-                        .HasColumnType("integer");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("boolean");
-
-                    b.Property<DateTime>("LastActivityAtUtc")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasDefaultValueSql("timezone('utc', now())");
-
-                    b.Property<string>("LastModel")
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
-
-                    b.Property<string>("Mode")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<string>("RegionLabel")
-                        .HasMaxLength(60)
-                        .HasColumnType("character varying(60)");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)");
-
-                    b.Property<int>("UserId")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("LastActivityAtUtc");
-
-                    b.HasIndex("IsDeleted", "DeletedAtUtc");
-
-                    b.HasIndex("UserId", "IsDeleted", "LastActivityAtUtc");
-
-                    b.ToTable("AiCommentaryThreads", (string)null);
-                });
-
             modelBuilder.Entity("LawAfrica.API.Models.Ai.Sections.AiDailyAiUsage", b =>
                 {
                     b.Property<int>("Id")
@@ -388,9 +159,6 @@ namespace LawAfrica.API.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<int>("CreatedByUserId")
-                        .HasColumnType("integer");
-
                     b.Property<int>("EndPage")
                         .HasColumnType("integer");
 
@@ -442,9 +210,12 @@ namespace LawAfrica.API.Migrations
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer");
+
                     b.HasKey("Id");
 
-                    b.HasIndex("OwnerKey", "LegalDocumentId", "TocEntryId", "StartPage", "EndPage", "Type", "PromptVersion", "ContentHash")
+                    b.HasIndex("UserId", "LegalDocumentId", "TocEntryId", "StartPage", "EndPage", "Type", "PromptVersion")
                         .IsUnique();
 
                     b.ToTable("AiLegalDocumentSectionSummaries");
@@ -2981,7 +2752,9 @@ namespace LawAfrica.API.Migrations
                         .HasColumnType("boolean");
 
                     b.Property<int>("Kind")
-                        .HasColumnType("integer");
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1);
 
                     b.Property<DateTime?>("LastIndexedAt")
                         .HasColumnType("timestamp with time zone");
@@ -3171,49 +2944,6 @@ namespace LawAfrica.API.Migrations
                         .IsUnique();
 
                     b.ToTable("Users", (string)null);
-                });
-
-            modelBuilder.Entity("LawAfrica.API.Models.Ai.Commentary.AiCommentaryMessage", b =>
-                {
-                    b.HasOne("LawAfrica.API.Models.Ai.Commentary.AiCommentaryThread", "Thread")
-                        .WithMany()
-                        .HasForeignKey("ThreadId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Thread");
-                });
-
-            modelBuilder.Entity("LawAfrica.API.Models.Ai.Commentary.AiCommentaryMessageSource", b =>
-                {
-                    b.HasOne("LawAfrica.API.Models.Ai.Commentary.AiCommentaryMessage", "Message")
-                        .WithMany()
-                        .HasForeignKey("MessageId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Message");
-                });
-
-            modelBuilder.Entity("LawAfrica.API.Models.Ai.Commentary.AiCommentarySettings", b =>
-                {
-                    b.HasOne("User", "UpdatedByUser")
-                        .WithMany()
-                        .HasForeignKey("UpdatedByUserId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.Navigation("UpdatedByUser");
-                });
-
-            modelBuilder.Entity("LawAfrica.API.Models.Ai.Commentary.AiCommentaryThread", b =>
-                {
-                    b.HasOne("User", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("LawAfrica.API.Models.Authorization.UserAdminPermission", b =>

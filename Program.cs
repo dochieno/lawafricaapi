@@ -6,6 +6,7 @@ using LawAfrica.API.Data;
 using LawAfrica.API.Models;
 using LawAfrica.API.Services;
 using LawAfrica.API.Services.Ai;
+using LawAfrica.API.Services.Ai.Commentary;
 using LawAfrica.API.Services.Ai.Sections;
 using LawAfrica.API.Services.Documents;
 using LawAfrica.API.Services.Documents.Indexing;
@@ -223,6 +224,17 @@ builder.Services.AddScoped<ILawReportContentBuilder, LawReportContentBuilder>();
 builder.Services.AddHttpClient<ILawReportFormatter, OpenAiLawReportFormatter>();
 builder.Services.AddScoped<IAiTextClient, AiTextClientAdapter>();
 builder.Services.AddScoped<ILawReportChatService, LawReportChatService>();
+
+//AICommentatry
+builder.Services.AddScoped<ILegalCommentaryAiService, LegalCommentaryAiService>();
+builder.Services.AddScoped<ILegalCommentaryRetriever, LegalCommentaryRetrieverPg>();
+builder.Services.AddScoped<ILegalScopeGuard, LegalScopeGuard>();
+builder.Services.AddHostedService<AiCommentaryRetentionHostedService>();
+
+
+// if you implemented user-country resolver:
+builder.Services.AddScoped<IUserJurisdictionResolver, UserJurisdictionResolver>();
+
 
 // --------------------------------------------------
 // JWT Authentication

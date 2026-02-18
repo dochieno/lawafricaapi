@@ -2,6 +2,7 @@
 using LawAfrica.API;
 using LawAfrica.API.Models;
 using LawAfrica.API.Models.Ai;
+using LawAfrica.API.Models.Ai.Commentary;
 using LawAfrica.API.Models.Ai.Sections;
 using LawAfrica.API.Models.Authorization;
 using LawAfrica.API.Models.Documents;
@@ -128,6 +129,13 @@ public class ApplicationDbContext : DbContext
     public DbSet<UserTrialSubscriptionRequest> UserTrialSubscriptionRequests => Set<UserTrialSubscriptionRequest>();
     public DbSet<ContentProductPrice> ContentProductPrices => Set<ContentProductPrice>();
     public DbSet<EmailOutboxMessage> EmailOutboxMessages => Set<EmailOutboxMessage>();
+
+    // AI Commentary (threads)
+    public DbSet<AiCommentarySettings> AiCommentarySettings => Set<AiCommentarySettings>();
+    public DbSet<AiCommentaryThread> AiCommentaryThreads => Set<AiCommentaryThread>();
+    public DbSet<AiCommentaryMessage> AiCommentaryMessages => Set<AiCommentaryMessage>();
+    public DbSet<AiCommentaryMessageSource> AiCommentaryMessageSources => Set<AiCommentaryMessageSource>();
+
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -424,6 +432,115 @@ public class ApplicationDbContext : DbContext
                   .WithMany()
                   .HasForeignKey(x => x.UserId);
         });
+
+        //AI commentary:
+
+        // =========================================================
+        // AI Commentary (Threads)
+        // =========================================================
+
+        modelBuilder.Entity<AiCommentarySettings>(b =>
+        {
+            b.ToTable("AiCommentarySettings");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.RetentionMonths).IsRequired();
+            b.Property(x => x.EnableUserHistory).IsRequired();
+
+            b.Property(x => x.UpdatedAtUtc)
+                .HasDefaultValueSql("timezone('utc', now())");
+
+            b.HasOne(x => x.UpdatedByUser)
+                .WithMany()
+                .HasForeignKey(x => x.UpdatedByUserId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // ✅ Seed singleton settings row (admin can update later)
+            b.HasData(new AiCommentarySettings
+            {
+                Id = 1,
+                RetentionMonths = 6,
+                EnableUserHistory = true,
+                UpdatedAtUtc = new DateTime(2026, 2, 18, 0, 0, 0, DateTimeKind.Utc)
+            });
+        });
+
+        modelBuilder.Entity<AiCommentaryThread>(b =>
+        {
+            b.ToTable("AiCommentaryThreads");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Title).HasMaxLength(200).IsRequired();
+            b.Property(x => x.CountryName).HasMaxLength(120);
+            b.Property(x => x.CountryIso).HasMaxLength(20);
+            b.Property(x => x.RegionLabel).HasMaxLength(60);
+            b.Property(x => x.Mode).HasMaxLength(20).IsRequired();
+            b.Property(x => x.LastModel).HasMaxLength(80);
+
+            b.Property(x => x.CreatedAtUtc)
+                .HasDefaultValueSql("timezone('utc', now())");
+            b.Property(x => x.LastActivityAtUtc)
+                .HasDefaultValueSql("timezone('utc', now())");
+
+            b.HasOne(x => x.User)
+                .WithMany()
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Useful query indexes (history lists + retention purge + user filtering)
+            b.HasIndex(x => new { x.UserId, x.IsDeleted, x.LastActivityAtUtc });
+            b.HasIndex(x => x.LastActivityAtUtc);
+            b.HasIndex(x => new { x.IsDeleted, x.DeletedAtUtc });
+        });
+
+        modelBuilder.Entity<AiCommentaryMessage>(b =>
+        {
+            b.ToTable("AiCommentaryMessages");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Role).HasMaxLength(20).IsRequired();
+            b.Property(x => x.Mode).HasMaxLength(20);
+            b.Property(x => x.Model).HasMaxLength(80);
+            b.Property(x => x.DisclaimerVersion).HasMaxLength(40);
+            b.Property(x => x.PromptHash).HasMaxLength(80);
+
+            b.Property(x => x.CreatedAtUtc)
+                .HasDefaultValueSql("timezone('utc', now())");
+
+            b.HasOne(x => x.Thread)
+                .WithMany()
+                .HasForeignKey(x => x.ThreadId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Fast load messages for a thread
+            b.HasIndex(x => new { x.ThreadId, x.CreatedAtUtc });
+            b.HasIndex(x => new { x.ThreadId, x.IsDeleted, x.CreatedAtUtc });
+        });
+
+        modelBuilder.Entity<AiCommentaryMessageSource>(b =>
+        {
+            b.ToTable("AiCommentaryMessageSources");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Type).HasMaxLength(30).IsRequired();
+            b.Property(x => x.Title).HasMaxLength(300);
+            b.Property(x => x.Citation).HasMaxLength(200);
+            b.Property(x => x.Snippet).HasMaxLength(1200);
+            b.Property(x => x.LinkUrl).HasMaxLength(400);
+
+            b.HasOne(x => x.Message)
+                .WithMany()
+                .HasForeignKey(x => x.MessageId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Fast load sources for an assistant message
+            b.HasIndex(x => x.MessageId);
+
+            // Optional: helpful filters later
+            b.HasIndex(x => new { x.Type, x.LawReportId });
+            b.HasIndex(x => new { x.Type, x.LegalDocumentId, x.PageNumber });
+        });
+
 
         // =========================================================
         // InstitutionProductSubscription indexes
@@ -732,8 +849,7 @@ public class ApplicationDbContext : DbContext
 
         modelBuilder.Entity<LegalDocument>()
                     .Property(x => x.Kind)
-                    .HasConversion<int>()
-                    .HasDefaultValue(LegalDocumentKind.Standard);
+                    .HasConversion<int>();
 
             modelBuilder.Entity<LawReport>(entity =>
             {
@@ -834,15 +950,17 @@ public class ApplicationDbContext : DbContext
         {
             e.HasIndex(x => new
             {
-                x.UserId,
+                x.OwnerKey,
                 x.LegalDocumentId,
                 x.TocEntryId,
                 x.StartPage,
                 x.EndPage,
                 x.Type,
-                x.PromptVersion
+                x.PromptVersion,
+                x.ContentHash
             })
             .IsUnique();
+
         });
 
 

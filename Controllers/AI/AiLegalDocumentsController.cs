@@ -35,6 +35,10 @@ namespace LawAfrica.API.Controllers.Ai
             if (request.LegalDocumentId <= 0)
                 return BadRequest(new { message = "LegalDocumentId must be a positive integer." });
 
+            // Optional safety: keep within DB constraint
+            if (!string.IsNullOrWhiteSpace(request.SectionTitle) && request.SectionTitle.Length > 500)
+                return BadRequest(new { message = "SectionTitle must be 500 characters or less." });
+
             // TocEntryId optional but if provided must be > 0
             if (request.TocEntryId.HasValue && request.TocEntryId.Value <= 0)
                 return BadRequest(new { message = "TocEntryId must be a positive integer when provided." });
@@ -61,7 +65,7 @@ namespace LawAfrica.API.Controllers.Ai
             }
             else
             {
-                // If client did send pages anyway, validate them consistently (optional but nice)
+                // If client did send pages anyway, validate them consistently (optional)
                 if (request.StartPage.HasValue && request.StartPage.Value <= 0)
                     return BadRequest(new { message = "StartPage must be >= 1 when provided." });
 
@@ -84,7 +88,12 @@ namespace LawAfrica.API.Controllers.Ai
             }
             catch (InvalidOperationException ex)
             {
-                return StatusCode(429, new { message = ex.Message });
+                // ✅ Only treat known quota cases as 429
+                if (ex.Message != null && ex.Message.Contains("Daily AI limit", StringComparison.OrdinalIgnoreCase))
+                    return StatusCode(429, new { message = ex.Message });
+
+                // Other InvalidOperationException cases are not quota-related
+                return StatusCode(500, new { message = ex.Message });
             }
             catch (Exception ex)
             {

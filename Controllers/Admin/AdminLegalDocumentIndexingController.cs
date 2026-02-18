@@ -159,6 +159,7 @@ namespace LawAfrica.API.Controllers.Admin
                 pageCount = doc.PageCount,
                 lastIndexedAt = doc.LastIndexedAt,
                 indexedPages = rows
+            
             });
         }
     }

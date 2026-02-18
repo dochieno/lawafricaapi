@@ -1,4 +1,16 @@
-﻿using LawAfrica.API.Data;
+﻿// =======================================================
+// FILE: Services/Ai/Sections/LegalDocumentSectionSummarizer.cs
+// Purpose: Summarize a legal document section (range or ToC-based) with
+//          global+content-hash caching and per-user quota enforcement.
+// Notes:
+// - Cache is NOT per-user. CreatedByUserId is audit only.
+// - Text source is DB: LegalDocumentPageTexts (via ISectionTextExtractor).
+// - Cache key uses OwnerKey + type + promptVersion + contentHash.
+// =======================================================
+
+using System.Security.Cryptography;
+using System.Text;
+using LawAfrica.API.Data;
 using LawAfrica.API.Models.Ai.Sections;
 using LawAfrica.API.Models.DTOs.Ai.Sections;
 using Microsoft.EntityFrameworkCore;
@@ -13,13 +25,13 @@ namespace LawAfrica.API.Services.Ai.Sections
         private readonly ChatClient _chatClient;
         private readonly IConfiguration _config;
 
-        // Bump when prompt changes
+        // Bump when prompt changes (default fallback if request.PromptVersion is null)
         private const string PROMPT_VERSION = "v1";
 
         // Basic quota (assumption for now)
         private const int DAILY_REQUEST_LIMIT = 30;
 
-        // ✅ Hard safety clamps (tune later)
+        // Hard safety clamps (tune later)
         private const int DEFAULT_MAX_PDF_PAGES_FALLBACK = 5000;
         private const int BASIC_MAX_SPAN_PAGES = 6;      // inclusive span
         private const int EXTENDED_MAX_SPAN_PAGES = 12;  // inclusive span
@@ -36,6 +48,10 @@ namespace LawAfrica.API.Services.Ai.Sections
             _config = config;
         }
 
+        /// <summary>
+        /// Main entry: resolves effective page range, extracts text, checks global cache by content hash,
+        /// enforces per-user quota on cache miss, calls OpenAI, and upserts cache.
+        /// </summary>
         public async Task<SectionSummaryResponseDto> SummarizeAsync(
             SectionSummaryRequestDto request,
             int userId,
@@ -46,18 +62,21 @@ namespace LawAfrica.API.Services.Ai.Sections
                 ? "basic"
                 : request.Type.Trim().ToLowerInvariant();
 
-            // ✅ Raw request pages (nullable now)
-            var rawRequestedStart = request.StartPage; // int?
-            var rawRequestedEnd = request.EndPage;     // int?
+            // Prompt version: allow caller to pass one to intentionally bust/partition cache
+            var promptVersion = string.IsNullOrWhiteSpace(request.PromptVersion)
+                ? PROMPT_VERSION
+                : request.PromptVersion.Trim();
 
-            // ✅ What we will actually normalize/clamp (may come from ToC)
+            var rawRequestedStart = request.StartPage; // nullable
+            var rawRequestedEnd = request.EndPage;     // nullable
+
             int? requestedStart = rawRequestedStart;
             int? requestedEnd = rawRequestedEnd;
 
-            var tocId = request.TocEntryId; // int? (optional)
+            var tocId = request.TocEntryId;
             var warnings = new List<string>();
 
-            // ✅ If ToC entry is provided, resolve pages from DB (preferred path)
+            // Resolve via ToC if possible
             if (tocId.HasValue && tocId.Value > 0)
             {
                 var (tocStart, tocEnd, tocWarn) = await TryResolveRangeFromTocAsync(
@@ -80,33 +99,132 @@ namespace LawAfrica.API.Services.Ai.Sections
                 }
             }
 
-            // ✅ Normalize + clamp (backend is final authority)
+            // Normalize and clamp final page range (backend is authority)
             var (startPage, endPage, clampWarnings) = NormalizeAndClampRange(
                 requestedStart,
                 requestedEnd,
                 type,
-                GetMaxPdfPagesFallback()
-            );
+                GetMaxPdfPagesFallback());
 
             warnings.AddRange(clampWarnings);
 
-            // ✅ For response: keep "raw request" as what client sent (or 0 when missing)
-            var responseRequestedStart = rawRequestedStart ?? 0;
-            var responseRequestedEnd = rawRequestedEnd ?? 0;
+            // For response: echo what client asked (nullable)
+            var responseRequestedStart = rawRequestedStart;
+            var responseRequestedEnd = rawRequestedEnd;
 
-            // 1) Cache lookup (unless force)
+            // OwnerKey is the section identity used by cache + UI verification
+            var ownerKey = BuildOwnerKey(request.LegalDocumentId, tocId, startPage, endPage);
+
+            // 1) Extract stored text (DB) FIRST so we can hash it
+            var extraction = await _textExtractor.ExtractAsync(
+                request.LegalDocumentId,
+                startPage,
+                endPage,
+                ct);
+
+            if (extraction.MissingPages.Count > 0)
+            {
+                var cap = 30;
+                var shown = extraction.MissingPages.Take(cap).ToList();
+                var suffix = extraction.MissingPages.Count > cap
+                    ? $" … (+{extraction.MissingPages.Count - cap} more)"
+                    : "";
+                warnings.Add($"Missing stored text for pages: {string.Join(", ", shown)}{suffix}.");
+            }
+
+            // 2) Build effective text (truncate) — this is what we hash & send to OpenAI
+            var effectiveText = (extraction.Text ?? string.Empty).Trim();
+
+            var maxInputChars = GetInt(
+                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
+                    ? "AI_SECTION_MAX_INPUT_CHARS_EXTENDED"
+                    : "AI_SECTION_MAX_INPUT_CHARS_BASIC",
+                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase) ? 24000 : 12000
+            );
+
+            if (effectiveText.Length > maxInputChars)
+            {
+                effectiveText = effectiveText.Substring(0, maxInputChars);
+                warnings.Add($"Input text was truncated to {maxInputChars} characters.");
+            }
+
+            var effectiveCharCount = effectiveText.Length;
+
+            // Hash must reflect the exact content sent to OpenAI (or empty)
+            var contentHash = ComputeSha256Hex(effectiveText);
+
+            // CacheKey must fit [MaxLength(240)]
+            var cacheKey = BuildCacheKey(ownerKey, type, promptVersion, contentHash);
+
+            // Empty case: return safe message (and optionally cache it)
+            if (string.IsNullOrWhiteSpace(effectiveText))
+            {
+                warnings.Add("No extracted text was found for this section. Index the document text to enable summaries.");
+
+                var emptyOutput = "No content was found for this section.";
+
+                await UpsertCacheByHashAsync(
+                    createdByUserId: userId,
+                    legalDocumentId: request.LegalDocumentId,
+                    tocId: tocId,
+                    startPage: startPage,
+                    endPage: endPage,
+                    type: type,
+                    promptVersion: promptVersion,
+                    ownerKey: ownerKey,
+                    contentHash: contentHash,
+                    cacheKey: cacheKey,
+                    sectionTitle: request.SectionTitle,
+                    summary: emptyOutput,
+                    inputCharCount: 0,
+                    tokensIn: null,
+                    tokensOut: null,
+                    modelUsed: null,
+                    ct: ct);
+
+                return new SectionSummaryResponseDto
+                {
+                    LegalDocumentId = request.LegalDocumentId,
+                    TocEntryId = tocId,
+                    Type = type,
+
+                    RequestedStartPage = responseRequestedStart,
+                    RequestedEndPage = responseRequestedEnd,
+
+                    StartPage = startPage,
+                    EndPage = endPage,
+
+                    SectionTitle = request.SectionTitle,
+
+                    OwnerKey = ownerKey,
+                    ContentHash = contentHash,
+                    CacheKey = cacheKey,
+
+                    Summary = emptyOutput,
+                    FromCache = false,
+                    InputCharCount = 0,
+                    Warnings = warnings,
+
+                    ModelUsed = null,
+                    PromptVersion = promptVersion,
+                    GeneratedAt = DateTime.UtcNow
+                };
+            }
+
+            // 3) Cache lookup by (OwnerKey + type + promptVersion + contentHash) (NOT per-user)
             if (!request.ForceRegenerate)
             {
                 var cached = await _db.AiLegalDocumentSectionSummaries
                     .AsNoTracking()
                     .Where(x =>
-                        x.UserId == userId &&
+                        x.OwnerKey == ownerKey &&
                         x.LegalDocumentId == request.LegalDocumentId &&
                         x.TocEntryId == tocId &&
                         x.StartPage == startPage &&
                         x.EndPage == endPage &&
                         x.Type == type &&
-                        x.PromptVersion == PROMPT_VERSION)
+                        x.PromptVersion == promptVersion &&
+                        x.ContentHash == contentHash)
                     .OrderByDescending(x => x.CreatedAt)
                     .FirstOrDefaultAsync(ct);
 
@@ -124,103 +242,28 @@ namespace LawAfrica.API.Services.Ai.Sections
                         StartPage = startPage,
                         EndPage = endPage,
 
+                        SectionTitle = cached.SectionTitle ?? request.SectionTitle,
+
+                        OwnerKey = cached.OwnerKey,
+                        ContentHash = cached.ContentHash,
+                        CacheKey = cached.CacheKey,
+
                         Summary = cached.Summary,
                         FromCache = true,
-
-                        // ✅ Option B: return stored InputCharCount from cache table
-                        InputCharCount = cached.InputCharCount ?? 0,
-
+                        InputCharCount = cached.InputCharCount ?? effectiveCharCount,
                         Warnings = warnings,
+
+                        ModelUsed = cached.ModelUsed,
+                        PromptVersion = cached.PromptVersion,
                         GeneratedAt = cached.CreatedAt
                     };
                 }
             }
 
-            // 2) Quota guardrail (only if not cached)
+            // 4) Quota only on cache miss
             await EnforceAndIncrementQuotaAsync(userId, ct);
 
-            // 3) Extract stored text for pages (DB)
-            var extraction = await _textExtractor.ExtractAsync(
-                request.LegalDocumentId,
-                startPage,
-                endPage,
-                ct);
-
-            // Add warnings for missing pages (cap list so it doesn’t explode)
-            if (extraction.MissingPages.Count > 0)
-            {
-                var cap = 30;
-                var shown = extraction.MissingPages.Take(cap).ToList();
-                var suffix = extraction.MissingPages.Count > cap
-                    ? $" … (+{extraction.MissingPages.Count - cap} more)"
-                    : "";
-                warnings.Add($"Missing stored text for pages: {string.Join(", ", shown)}{suffix}.");
-            }
-
-            // If empty text, return safe message and cache it
-            if (string.IsNullOrWhiteSpace(extraction.Text))
-            {
-                warnings.Add("No extracted text was found for this section. Index the document text to enable summaries.");
-
-                var emptyOutput = "No content was found for this section.";
-
-                await UpsertCacheAsync(
-                    userId,
-                    request.LegalDocumentId,
-                    tocId,
-                    startPage,
-                    endPage,
-                    type,
-                    emptyOutput,
-                    inputCharCount: 0,
-                    tokensIn: null,
-                    tokensOut: null,
-                    ct);
-
-                return new SectionSummaryResponseDto
-                {
-                    LegalDocumentId = request.LegalDocumentId,
-                    TocEntryId = tocId,
-                    Type = type,
-
-                    RequestedStartPage = responseRequestedStart,
-                    RequestedEndPage = responseRequestedEnd,
-
-                    StartPage = startPage,
-                    EndPage = endPage,
-
-                    Summary = emptyOutput,
-                    FromCache = false,
-                    InputCharCount = 0,
-                    Warnings = warnings,
-                    GeneratedAt = DateTime.UtcNow
-                };
-            }
-
-            // =========================================================
-            // ✅ Prepare "effective" text for the LLM (truncate by char budget)
-            // effectiveCharCount MUST reflect the final text passed to OpenAI.
-            // =========================================================
-            var effectiveText = (extraction.Text ?? "").Trim();
-
-            var maxInputChars = GetInt(
-                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
-                    ? "AI_SECTION_MAX_INPUT_CHARS_EXTENDED"
-                    : "AI_SECTION_MAX_INPUT_CHARS_BASIC",
-                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase) ? 24000 : 12000
-            );
-
-            if (effectiveText.Length > maxInputChars)
-            {
-                effectiveText = effectiveText.Substring(0, maxInputChars);
-                warnings.Add($"Input text was truncated to {maxInputChars} characters.");
-            }
-
-            var effectiveCharCount = effectiveText.Length;
-
-            // =========================================================
-            // ✅ OpenAI call (real summary)
-            // =========================================================
+            // 5) OpenAI call
             var maxOutputTokens = GetInt(
                 string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
                     ? "AI_SECTION_MAX_OUTPUT_TOKENS_EXTENDED"
@@ -230,7 +273,7 @@ namespace LawAfrica.API.Services.Ai.Sections
 
             var system = BuildSystemPrompt(type);
 
-            // Provide light metadata context to help the model stay grounded
+            // Light metadata header (helps keep the model grounded)
             var header =
                 $"Document #{request.LegalDocumentId}\n" +
                 $"ToC: {(tocId.HasValue ? tocId.Value.ToString() : "—")}\n" +
@@ -255,7 +298,6 @@ namespace LawAfrica.API.Services.Ai.Sections
             if (string.IsNullOrWhiteSpace(output))
                 throw new InvalidOperationException("AI returned an empty summary.");
 
-            // Token usage (defensive: SDK versions differ)
             int? tokensIn = null;
             int? tokensOut = null;
             try
@@ -265,21 +307,38 @@ namespace LawAfrica.API.Services.Ai.Sections
             }
             catch
             {
-                // ignore
+                // ignore SDK differences
             }
 
-            await UpsertCacheAsync(
-                userId,
-                request.LegalDocumentId,
-                tocId,
-                startPage,
-                endPage,
-                type,
-                output,
+            // Best-effort model name (SDK-dependent; keep null-safe)
+            string? modelUsed = null;
+            try
+            {
+                // Some SDKs expose completion.Model, others don't.
+                var modelProp = completion?.GetType().GetProperty("Model");
+                modelUsed = modelProp?.GetValue(completion)?.ToString();
+            }
+            catch { }
+
+            // 6) Cache upsert (global by content hash + section identity)
+            await UpsertCacheByHashAsync(
+                createdByUserId: userId,
+                legalDocumentId: request.LegalDocumentId,
+                tocId: tocId,
+                startPage: startPage,
+                endPage: endPage,
+                type: type,
+                promptVersion: promptVersion,
+                ownerKey: ownerKey,
+                contentHash: contentHash,
+                cacheKey: cacheKey,
+                sectionTitle: request.SectionTitle,
+                summary: output,
                 inputCharCount: effectiveCharCount,
                 tokensIn: tokensIn,
                 tokensOut: tokensOut,
-                ct);
+                modelUsed: modelUsed,
+                ct: ct);
 
             return new SectionSummaryResponseDto
             {
@@ -293,17 +352,25 @@ namespace LawAfrica.API.Services.Ai.Sections
                 StartPage = startPage,
                 EndPage = endPage,
 
+                SectionTitle = request.SectionTitle,
+
+                OwnerKey = ownerKey,
+                ContentHash = contentHash,
+                CacheKey = cacheKey,
+
                 Summary = output,
                 FromCache = false,
                 InputCharCount = effectiveCharCount,
                 Warnings = warnings,
+
+                ModelUsed = modelUsed,
+                PromptVersion = promptVersion,
                 GeneratedAt = DateTime.UtcNow
             };
         }
 
         /// <summary>
-        /// ✅ Resolve pages from ToC entry.
-        /// Uses your model: LegalDocumentTocEntry (StartPage/EndPage).
+        /// Resolves start/end pages from a LegalDocumentTocEntry (if mapped to pages).
         /// </summary>
         private async Task<(int? start, int? end, string? warning)> TryResolveRangeFromTocAsync(
             int legalDocumentId,
@@ -320,8 +387,6 @@ namespace LawAfrica.API.Services.Ai.Sections
             if (toc == null)
                 return (null, null, "ToC entry was not found for this document.");
 
-            // Only support PageRange here (Anchor is not page-based)
-            // If you want: if toc.TargetType == TocTargetType.Anchor => return warning.
             var start = toc.StartPage;
             var end = toc.EndPage;
 
@@ -337,65 +402,8 @@ namespace LawAfrica.API.Services.Ai.Sections
             return (start, end, null);
         }
 
-        private async Task UpsertCacheAsync(
-            int userId,
-            int legalDocumentId,
-            int? tocId,
-            int startPage,
-            int endPage,
-            string type,
-            string summary,
-            int? inputCharCount,
-            int? tokensIn,
-            int? tokensOut,
-            CancellationToken ct)
-        {
-            var existing = await _db.AiLegalDocumentSectionSummaries
-                .Where(x =>
-                    x.UserId == userId &&
-                    x.LegalDocumentId == legalDocumentId &&
-                    x.TocEntryId == tocId &&
-                    x.StartPage == startPage &&
-                    x.EndPage == endPage &&
-                    x.Type == type &&
-                    x.PromptVersion == PROMPT_VERSION)
-                .FirstOrDefaultAsync(ct);
-
-            if (existing == null)
-            {
-                existing = new AiLegalDocumentSectionSummary
-                {
-                    UserId = userId,
-                    LegalDocumentId = legalDocumentId,
-                    TocEntryId = tocId,
-                    StartPage = startPage,
-                    EndPage = endPage,
-                    Type = type,
-                    PromptVersion = PROMPT_VERSION,
-                    Summary = summary,
-                    InputCharCount = inputCharCount,
-                    TokensIn = tokensIn,
-                    TokensOut = tokensOut,
-                    CreatedAt = DateTime.UtcNow
-                };
-
-                _db.AiLegalDocumentSectionSummaries.Add(existing);
-            }
-            else
-            {
-                existing.Summary = summary;
-                existing.InputCharCount = inputCharCount;
-                existing.TokensIn = tokensIn;
-                existing.TokensOut = tokensOut;
-                existing.UpdatedAt = DateTime.UtcNow;
-            }
-
-            await _db.SaveChangesAsync(ct);
-        }
-
         /// <summary>
-        /// ✅ Strong normalization that never throws and always returns a safe effective range.
-        /// Supports nullable requestedStart/requestedEnd.
+        /// Normalizes/clamps page range safely (never throws), with max-span guardrails.
         /// </summary>
         private static (int start, int end, List<string> warnings) NormalizeAndClampRange(
             int? requestedStart,
@@ -405,7 +413,6 @@ namespace LawAfrica.API.Services.Ai.Sections
         {
             var warnings = new List<string>();
 
-            // Defensive defaults
             var start = requestedStart ?? 0;
             var end = requestedEnd ?? 0;
 
@@ -428,7 +435,6 @@ namespace LawAfrica.API.Services.Ai.Sections
                 warnings.Add("EndPage was < StartPage; values were swapped.");
             }
 
-            // Clamp to [1..maxPdfPages]
             if (maxPdfPages <= 0) maxPdfPages = DEFAULT_MAX_PDF_PAGES_FALLBACK;
 
             if (start > maxPdfPages)
@@ -449,7 +455,6 @@ namespace LawAfrica.API.Services.Ai.Sections
                 warnings.Add("After clamping, EndPage fell below StartPage; EndPage set to StartPage.");
             }
 
-            // Max span guardrail (inclusive)
             var maxSpan = string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
                 ? EXTENDED_MAX_SPAN_PAGES
                 : BASIC_MAX_SPAN_PAGES;
@@ -467,12 +472,18 @@ namespace LawAfrica.API.Services.Ai.Sections
             return (start, end, warnings);
         }
 
+        /// <summary>
+        /// Reads max page fallback from env var AI_PDF_MAX_PAGES (safe default if missing).
+        /// </summary>
         private static int GetMaxPdfPagesFallback()
         {
             var raw = Environment.GetEnvironmentVariable("AI_PDF_MAX_PAGES");
             return int.TryParse(raw, out var n) && n > 0 ? n : DEFAULT_MAX_PDF_PAGES_FALLBACK;
         }
 
+        /// <summary>
+        /// Enforces daily per-user request limit (only called on cache miss).
+        /// </summary>
         private async Task EnforceAndIncrementQuotaAsync(int userId, CancellationToken ct)
         {
             var day = DateTime.UtcNow.Date;
@@ -504,39 +515,168 @@ namespace LawAfrica.API.Services.Ai.Sections
             await _db.SaveChangesAsync(ct);
         }
 
+        /// <summary>
+        /// Reads integer config values from IConfiguration with a fallback.
+        /// </summary>
         private int GetInt(string key, int fallback)
         {
             var raw = _config[key];
             return int.TryParse(raw, out var n) ? n : fallback;
         }
 
+        /// <summary>
+        /// Builds the system prompt for "basic" vs "extended" output format.
+        /// </summary>
         private static string BuildSystemPrompt(string type)
         {
             if (string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase))
             {
                 return
-                @"You are a legal summarization assistant.
-                You MUST summarize ONLY the text provided by the user. Do not add outside facts or citations.
-                If something is not clearly stated, write: ""Not stated in the section.""
+@"You are a legal summarization assistant.
+You MUST summarize ONLY the text provided by the user. Do not add outside facts or citations.
+If something is not clearly stated, write: ""Not stated in the section.""
 
-                Return the summary in this structure:
+Return the summary in this structure:
 
-                OVERVIEW: 2–4 sentences
-                KEY POINTS: 5–10 bullet points
-                IMPORTANT TERMS: bullets (if any)
-                PRACTICAL TAKEAWAYS: 3–6 bullet points
+OVERVIEW: 2–4 sentences
+KEY POINTS: 5–10 bullet points
+IMPORTANT TERMS: bullets (if any)
+PRACTICAL TAKEAWAYS: 3–6 bullet points
 
-                Be concise and clear.";
-                            }
+Be concise and clear.";
+            }
 
-                            return
-                @"You are a legal summarization assistant.
-                Summarize ONLY the text provided by the user. Do not add outside facts or citations.
-                If something is unclear, say: ""Not stated in the section.""
+            return
+@"You are a legal summarization assistant.
+Summarize ONLY the text provided by the user. Do not add outside facts or citations.
+If something is unclear, say: ""Not stated in the section.""
 
-                Output:
-                - A 1–2 paragraph summary
-                - Then 3–6 key bullet points.";
+Output:
+- A 1–2 paragraph summary
+- Then 3–6 key bullet points.";
+        }
+
+        /// <summary>
+        /// Computes SHA256 hex (lowercase) for cache integrity.
+        /// </summary>
+        private static string ComputeSha256Hex(string input)
+        {
+            using var sha = SHA256.Create();
+            var bytes = Encoding.UTF8.GetBytes(input ?? string.Empty);
+            var hash = sha.ComputeHash(bytes);
+            return Convert.ToHexString(hash).ToLowerInvariant();
+        }
+
+        /// <summary>
+        /// Builds OwnerKey for UI + cache identity (ToC-based preferred, else range-based).
+        /// </summary>
+        private static string BuildOwnerKey(int legalDocumentId, int? tocId, int startPage, int endPage)
+        {
+            return tocId.HasValue && tocId.Value > 0
+                ? $"doc:{legalDocumentId}|toc:{tocId.Value}"
+                : $"doc:{legalDocumentId}|range:{startPage}-{endPage}";
+        }
+
+        /// <summary>
+        /// Builds CacheKey (max 240 chars). If it ever grows, we keep it deterministic.
+        /// </summary>
+        private static string BuildCacheKey(string ownerKey, string type, string promptVersion, string contentHash)
+        {
+            // Example:
+            // doc:12|toc:99|type:basic|pv:v1|hash:<64>
+            var key = $"{ownerKey}|type:{type}|pv:{promptVersion}|hash:{contentHash}";
+
+            // Ensure it fits the model constraint.
+            if (key.Length <= 240) return key;
+
+            // Deterministic fallback: hash the oversized key and store compact form.
+            var compact = ComputeSha256Hex(key);
+            return $"{ownerKey}|k:{compact}";
+        }
+
+        /// <summary>
+        /// Upserts a cached summary by global content-hash identity (NOT per-user).
+        /// CreatedByUserId is audit only.
+        /// </summary>
+        private async Task UpsertCacheByHashAsync(
+            int createdByUserId,
+            int legalDocumentId,
+            int? tocId,
+            int startPage,
+            int endPage,
+            string type,
+            string promptVersion,
+            string ownerKey,
+            string contentHash,
+            string cacheKey,
+            string? sectionTitle,
+            string summary,
+            int? inputCharCount,
+            int? tokensIn,
+            int? tokensOut,
+            string? modelUsed,
+            CancellationToken ct)
+        {
+            var existing = await _db.AiLegalDocumentSectionSummaries
+                .Where(x =>
+                    x.OwnerKey == ownerKey &&
+                    x.LegalDocumentId == legalDocumentId &&
+                    x.TocEntryId == tocId &&
+                    x.StartPage == startPage &&
+                    x.EndPage == endPage &&
+                    x.Type == type &&
+                    x.PromptVersion == promptVersion &&
+                    x.ContentHash == contentHash)
+                .FirstOrDefaultAsync(ct);
+
+            if (existing == null)
+            {
+                existing = new AiLegalDocumentSectionSummary
+                {
+                    CreatedByUserId = createdByUserId,
+
+                    LegalDocumentId = legalDocumentId,
+                    TocEntryId = tocId,
+                    StartPage = startPage,
+                    EndPage = endPage,
+
+                    Type = type,
+                    PromptVersion = promptVersion,
+
+                    OwnerKey = ownerKey,
+                    ContentHash = contentHash,
+                    CacheKey = cacheKey,
+
+                    SectionTitle = sectionTitle,
+
+                    Summary = summary,
+                    InputCharCount = inputCharCount,
+                    TokensIn = tokensIn,
+                    TokensOut = tokensOut,
+                    ModelUsed = modelUsed,
+
+                    CreatedAt = DateTime.UtcNow
+                };
+
+                _db.AiLegalDocumentSectionSummaries.Add(existing);
+            }
+            else
+            {
+                // Keep original CreatedByUserId as "first creator" audit, or update it—your choice.
+                // Here we keep it stable and only update content fields.
+                existing.Summary = summary;
+                existing.SectionTitle = sectionTitle ?? existing.SectionTitle;
+
+                existing.CacheKey = cacheKey; // keep in sync with computation
+                existing.InputCharCount = inputCharCount;
+                existing.TokensIn = tokensIn;
+                existing.TokensOut = tokensOut;
+                existing.ModelUsed = modelUsed;
+
+                existing.UpdatedAt = DateTime.UtcNow;
+            }
+
+            await _db.SaveChangesAsync(ct);
         }
     }
 }

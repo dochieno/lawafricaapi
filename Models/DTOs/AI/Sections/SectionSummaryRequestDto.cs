@@ -4,18 +4,14 @@ namespace LawAfrica.API.Models.DTOs.Ai.Sections
 {
     public class SectionSummaryRequestDto
     {
-        // Optional: ToC entry id (preferred path)
         public int? TocEntryId { get; set; }
 
         [Required]
         public int LegalDocumentId { get; set; }
 
-        // “basic” | “extended”
         [Required, MaxLength(20)]
-        public string Type { get; set; } = "basic";
+        public string Type { get; set; } = "basic"; // "basic" | "extended"
 
-        // ✅ Optional now (only required when TocEntryId is NOT provided)
-        // Physical PDF pages (1-based)
         [Range(1, int.MaxValue)]
         public int? StartPage { get; set; }
 
@@ -26,5 +22,9 @@ namespace LawAfrica.API.Models.DTOs.Ai.Sections
 
         [MaxLength(500)]
         public string? SectionTitle { get; set; }
+
+        // ✅ allow backend to version prompts + invalidate cache safely
+        [MaxLength(30)]
+        public string? PromptVersion { get; set; } // e.g. "v1"
     }
 }
