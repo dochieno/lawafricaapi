@@ -2,22 +2,22 @@
 // FILE: LawAfrica.API/Controllers/Ai/AiCommentaryController.cs
 // Purpose:
 // - AI Commentary endpoints (threads + ask)
-// - Mirrors style of AiLawReportsController
+// - Style aligned with LawReportsController (User.GetUserId, consistent responses)
 // Routes:
 //   POST   /api/ai/commentary/ask
 //   GET    /api/ai/commentary/threads
 //   GET    /api/ai/commentary/threads/{threadId}
-//   DELETE /api/ai/commentary/threads/{threadId}   (soft delete)
+//   POST   /api/ai/commentary/threads/{threadId}/delete   (soft delete) ✅ preferred
+//   DELETE /api/ai/commentary/threads/{threadId}          (legacy, optional)
 // =======================================================
 
 using LawAfrica.API.Data;
 using LawAfrica.API.DTOs.AI.Commentary;
-using LawAfrica.API.Models.Ai.Commentary;
+using LawAfrica.API.Helpers;
 using LawAfrica.API.Services.Ai.Commentary;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Security.Claims;
 
 namespace LawAfrica.API.Controllers.Ai
 {
@@ -45,17 +45,17 @@ namespace LawAfrica.API.Controllers.Ai
         {
             req ??= new LegalCommentaryAskRequestDto();
 
-            var userId = GetUserIdInt();
-            var tier = await GetUserTierAsync(userId, ct); // "basic" | "extended"
+            // ✅ Align with LawReportsController style
+            var userId = User.GetUserId();
+            var tier = await GetUserTierAsync(ct); // "basic" | "extended"
 
             try
             {
                 var resp = await _ai.AskAsync(userId, req, tier, ct);
-                return Ok(resp); // includes ThreadId, markdown, sources, etc.
+                return Ok(resp);
             }
             catch (InvalidOperationException ex)
             {
-                // e.g., "Thread not found (or you do not have access)."
                 return BadRequest(new { message = ex.Message });
             }
             catch (Exception ex)
@@ -79,7 +79,7 @@ namespace LawAfrica.API.Controllers.Ai
             [FromQuery] int skip = 0,
             CancellationToken ct = default)
         {
-            var userId = GetUserIdInt();
+            var userId = User.GetUserId();
 
             take = Math.Clamp(take, 1, 200);
             skip = Math.Max(0, skip);
@@ -109,13 +109,7 @@ namespace LawAfrica.API.Controllers.Ai
                 .Where(x => x.UserId == userId && !x.IsDeleted)
                 .CountAsync(ct);
 
-            return Ok(new
-            {
-                total,
-                take,
-                skip,
-                items
-            });
+            return Ok(new { total, take, skip, items });
         }
 
         // ------------------------------------------------------
@@ -128,7 +122,7 @@ namespace LawAfrica.API.Controllers.Ai
             [FromQuery] int takeMessages = 80,
             CancellationToken ct = default)
         {
-            var userId = GetUserIdInt();
+            var userId = User.GetUserId();
             takeMessages = Math.Clamp(takeMessages, 1, 500);
 
             var thread = await _db.AiCommentaryThreads
@@ -156,15 +150,15 @@ namespace LawAfrica.API.Controllers.Ai
                 })
                 .ToListAsync(ct);
 
-            msgs.Reverse(); // back to chronological order for UI
+            msgs.Reverse(); // back to chronological for UI
 
-            // Sources for assistant messages only (optional but useful)
             var assistantMessageIds = msgs
                 .Where(m => string.Equals(m.role, "assistant", StringComparison.OrdinalIgnoreCase))
                 .Select(m => (long)m.messageId)
                 .ToList();
 
             var sourcesByMessage = new Dictionary<long, List<object>>();
+
             if (assistantMessageIds.Count > 0)
             {
                 var sources = await _db.AiCommentaryMessageSources
@@ -226,13 +220,13 @@ namespace LawAfrica.API.Controllers.Ai
         }
 
         // ------------------------------------------------------
-        // DELETE /api/ai/commentary/threads/{threadId}
-        // - Soft delete thread (and optionally you can also soft delete messages later)
+        // ✅ PREFERRED: POST /api/ai/commentary/threads/{threadId}/delete
+        // - Soft delete (avoids DELETE 405 in some hosts/proxies)
         // ------------------------------------------------------
-        [HttpDelete("threads/{threadId:long}")]
-        public async Task<IActionResult> DeleteThread(long threadId, CancellationToken ct = default)
+        [HttpPost("threads/{threadId:long}/delete")]
+        public async Task<IActionResult> DeleteThreadPost(long threadId, CancellationToken ct = default)
         {
-            var userId = GetUserIdInt();
+            var userId = User.GetUserId();
 
             var thread = await _db.AiCommentaryThreads
                 .FirstOrDefaultAsync(x => x.Id == threadId && x.UserId == userId && !x.IsDeleted, ct);
@@ -250,41 +244,27 @@ namespace LawAfrica.API.Controllers.Ai
         }
 
         // ------------------------------------------------------
+        // OPTIONAL legacy: DELETE /api/ai/commentary/threads/{threadId}
+        // ------------------------------------------------------
+        [HttpDelete("threads/{threadId:long}")]
+        public async Task<IActionResult> DeleteThread(long threadId, CancellationToken ct = default)
+            => await DeleteThreadPost(threadId, ct);
+
+        // ------------------------------------------------------
         // Helpers
         // ------------------------------------------------------
-        private int GetUserIdInt()
+        private async Task<string> GetUserTierAsync(CancellationToken ct)
         {
-            var raw =
-                User.FindFirstValue(ClaimTypes.NameIdentifier) ??
-                User.FindFirstValue("sub") ??
-                "";
+            var claimTier = (User.FindFirst("aiTier")?.Value ?? User.FindFirst("tier")?.Value ?? "")
+                .Trim()
+                .ToLowerInvariant();
 
-            if (string.IsNullOrWhiteSpace(raw))
-                throw new InvalidOperationException("UserId not found in token.");
-
-            if (!int.TryParse(raw, out var userId) || userId <= 0)
-                throw new InvalidOperationException("UserId in token is not a valid int.");
-
-            return userId;
-        }
-
-        /// <summary>
-        /// Decide "basic" vs "extended".
-        /// Keep it simple now; later you can plug SubscriptionAccessGuard / AI tokenism.
-        /// </summary>
-        private async Task<string> GetUserTierAsync(int userId, CancellationToken ct)
-        {
-            // 1) Optional claim override (if you set it in JWT)
-            var claimTier = (User.FindFirstValue("aiTier") ?? User.FindFirstValue("tier") ?? "").Trim().ToLowerInvariant();
             if (claimTier == "extended" || claimTier == "basic")
                 return claimTier;
 
-            // 2) Admins get extended (optional convenience)
             if (User.IsInRole("Admin"))
                 return "extended";
 
-            // 3) TODO: hook to subscriptions / tokenism
-            // For now default basic.
             await Task.CompletedTask;
             return "basic";
         }
