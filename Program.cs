@@ -277,17 +277,44 @@ builder.Services
 // --------------------------------------------------
 builder.Services.AddCors(options =>
 {
-    // 🔧 CORS FIX: use a NAMED policy so we can force it on OPTIONS + controllers
     options.AddPolicy("ViteDev", policy =>
     {
-        policy.WithOrigins(
-                "http://localhost:5173",
-                "https://lawafricadigitalhub.pages.dev"
-            )
+        policy
+            .SetIsOriginAllowed(origin =>
+            {
+                if (string.IsNullOrWhiteSpace(origin)) return false;
+
+                // Local dev
+                if (origin == "http://localhost:5173") return true;
+                if (origin == "http://127.0.0.1:5173") return true;
+
+                // Cloudflare Pages: allow your project + preview deploys
+                // Examples:
+                // https://lawafricadigitalhub.pages.dev
+                // https://<hash>.lawafricadigitalhub.pages.dev
+                if (origin.EndsWith(".lawafricadigitalhub.pages.dev", StringComparison.OrdinalIgnoreCase)) return true;
+
+                // If you have a custom domain, add it explicitly:
+                // if (origin == "https://lawafrica.com") return true;
+
+                return false;
+            })
             .AllowAnyHeader()
-            .AllowAnyMethod();
+            .AllowAnyMethod()
+
+            // Optional but helpful if you return/need special headers
+            .WithExposedHeaders(
+                "Content-Disposition",
+                "Content-Length",
+                "Content-Range",
+                "Accept-Ranges",
+                "X-Document-Access",
+                "X-Entitlement-Deny-Reason",
+                "X-Entitlement-Message"
+            );
     });
 });
+
 
 // --------------------------------------------------
 // Swagger
