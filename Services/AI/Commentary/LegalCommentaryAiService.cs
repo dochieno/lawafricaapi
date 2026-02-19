@@ -109,7 +109,23 @@ namespace LawAfrica.API.Services.Ai.Commentary
 
             // 7) Retrieve internal sources first
             var maxSources = mode == "extended" ? 10 : 5;
-            var retrieval = await _retriever.SearchAsync(question, maxSources, ct);
+            // 7) Retrieve internal sources first (OPTIONAL; never fail the request if retrieval breaks)
+            LegalCommentaryRetrievalResult retrieval;
+            try
+            {
+                retrieval = await _retriever.SearchAsync(question, maxSources, ct);
+            }
+            catch (Exception ex)
+            {
+                // IMPORTANT: retrieval must never break the endpoint
+                // If you have ILogger injected, log here. Otherwise keep it silent.
+                retrieval = new LegalCommentaryRetrievalResult
+                {
+                    Sources = new List<LegalCommentarySourceDto>(),
+                    GroundingText = ""
+                };
+            }
+
 
             // 8) Build system prompt
             var system = BuildSystemPrompt(
@@ -139,8 +155,13 @@ namespace LawAfrica.API.Services.Ai.Commentary
             }
 
             // 10) Always include sources footer
-            var sourcesFooter = BuildSourcesFooter(retrieval.Sources);
+            // 10) Include sources footer (friendly when none exist)
+            var sourcesFooter = (retrieval.Sources != null && retrieval.Sources.Count > 0)
+                ? BuildSourcesFooter(retrieval.Sources)
+                : "### Sources (links)\n- No internal LawAfrica sources matched strongly for this question.";
+
             var finalMarkdown = (answer + "\n\n" + sourcesFooter).Trim();
+
 
             // 11) Persist assistant message + snapshot sources
             var assistantMsg = new AiCommentaryMessage
@@ -307,6 +328,10 @@ namespace LawAfrica.API.Services.Ai.Commentary
                 - When you rely on a LawAfrica excerpt, cite it inline:
                   (Source: LAW_REPORT:ID) or (Source: PDF_PAGE:DOC=ID:PAGE=N)
                 - If the SOURCES PACK does not support a claim, say: ""Not confirmed in LawAfrica sources.""
+                IF NO INTERNAL SOURCES:
+                - The SOURCES PACK may be empty. In that case, you MUST still answer using general legal knowledge.
+                - Put that content under: ""General legal context (not from LawAfrica sources)"".
+                - Do NOT invent citations, quotes, or page numbers.
 
                 JURISDICTION BIAS (MANDATORY for any content NOT supported by SOURCES PACK):
                 - Primary jurisdiction: **{primary}**
