@@ -1,4 +1,15 @@
-﻿using LawAfrica.API.Data;
+﻿// =======================================================
+// FILE: LawAfrica.API/Services/Ai/Commentary/LegalCommentaryAiService.cs
+// Purpose:
+// - AI commentary Q&A with thread persistence
+// - Strong LawAfrica grounding + optional external context
+// - Correct SPA routes in links (/dashboard/...)
+// - Sources footer uses:
+//    * LegalDocuments: Title
+//    * LawReports: Parties + Citation
+// =======================================================
+
+using LawAfrica.API.Data;
 using LawAfrica.API.DTOs.AI.Commentary;
 using LawAfrica.API.Models.Ai.Commentary;
 using Microsoft.EntityFrameworkCore;
@@ -80,12 +91,14 @@ namespace LawAfrica.API.Services.Ai.Commentary
             var thread = await CreateOrLoadThreadAsync(userId, req.ThreadId, jx, req.Mode, ct);
 
             // 4) Persist the user message
+            var normalizedRequestedMode = NormalizeMode(req.Mode, userTier);
+
             var userMsg = new AiCommentaryMessage
             {
                 ThreadId = thread.Id,
                 Role = "user",
                 ContentMarkdown = question,
-                Mode = NormalizeMode(req.Mode, userTier),
+                Mode = normalizedRequestedMode,
                 Model = null,
                 DisclaimerVersion = "v1",
                 CreatedAtUtc = DateTime.UtcNow
@@ -102,23 +115,21 @@ namespace LawAfrica.API.Services.Ai.Commentary
             await _db.SaveChangesAsync(ct);
 
             // 5) Enforce tier mode (server-side)
-            var mode = NormalizeMode(req.Mode, userTier);
+            var mode = normalizedRequestedMode;
 
             // 6) Load last conversation turns from DB (stable history)
             var historyTurns = await LoadHistoryFromDbAsync(thread.Id, takeLast: 8, ct);
 
-            // 7) Retrieve internal sources first
-            var maxSources = mode == "extended" ? 10 : 5;
             // 7) Retrieve internal sources first (OPTIONAL; never fail the request if retrieval breaks)
+            var maxSources = mode == "extended" ? 10 : 5;
+
             LegalCommentaryRetrievalResult retrieval;
             try
             {
                 retrieval = await _retriever.SearchAsync(question, maxSources, ct);
             }
-            catch (Exception ex)
+            catch
             {
-                // IMPORTANT: retrieval must never break the endpoint
-                // If you have ILogger injected, log here. Otherwise keep it silent.
                 retrieval = new LegalCommentaryRetrievalResult
                 {
                     Sources = new List<LegalCommentarySourceDto>(),
@@ -126,13 +137,32 @@ namespace LawAfrica.API.Services.Ai.Commentary
                 };
             }
 
+            // ✅ Preload display names for sources so footer shows Titles and Parties/Citation
+            var safeSources = retrieval.Sources ?? new List<LegalCommentarySourceDto>();
 
-            // 8) Build system prompt
+            var docIds = safeSources
+                .Where(s => s.LegalDocumentId.HasValue)
+                .Select(s => s.LegalDocumentId!.Value)
+                .Distinct()
+                .ToList();
+
+            var lrIds = safeSources
+                .Where(s => s.LawReportId.HasValue)
+                .Select(s => s.LawReportId!.Value)
+                .Distinct()
+                .ToList();
+
+            var docTitleMap = await LoadDocumentTitlesAsync(docIds, ct);
+            var lrDisplayMap = await LoadLawReportDisplayAsync(lrIds, ct);
+
+            // 8) Build system prompt (includes correct /dashboard/... link map)
             var system = BuildSystemPrompt(
                 mode: mode,
                 allowExternal: req.AllowExternalContext,
                 userJurisdiction: jx,
-                sources: retrieval.Sources
+                sources: safeSources,
+                docTitleMap: docTitleMap,
+                lrDisplayMap: lrDisplayMap
             );
 
             var prompt = BuildPrompt(
@@ -154,14 +184,12 @@ namespace LawAfrica.API.Services.Ai.Commentary
                     "- Jurisdiction, dates, and the specific legal relationship (contract/employment/crime/etc.).\n";
             }
 
-            // 10) Always include sources footer
-            // 10) Include sources footer (friendly when none exist)
-            var sourcesFooter = (retrieval.Sources != null && retrieval.Sources.Count > 0)
-                ? BuildSourcesFooter(retrieval.Sources)
+            // 10) Include sources footer (friendly when none exist) — now uses Titles/Parties+Citation and correct routes
+            var sourcesFooter = (safeSources.Count > 0)
+                ? BuildSourcesFooter(safeSources, docTitleMap, lrDisplayMap)
                 : "### Sources (links)\n- No internal LawAfrica sources matched strongly for this question.";
 
             var finalMarkdown = (answer + "\n\n" + sourcesFooter).Trim();
-
 
             // 11) Persist assistant message + snapshot sources
             var assistantMsg = new AiCommentaryMessage
@@ -177,22 +205,42 @@ namespace LawAfrica.API.Services.Ai.Commentary
             _db.AiCommentaryMessages.Add(assistantMsg);
             await _db.SaveChangesAsync(ct); // ensure assistantMsg.Id exists
 
-            if (retrieval.Sources != null && retrieval.Sources.Count > 0)
+            if (safeSources.Count > 0)
             {
-                foreach (var s in retrieval.Sources.OrderByDescending(x => x.Score).Take(maxSources))
+                foreach (var s in safeSources.OrderByDescending(x => x.Score).Take(maxSources))
                 {
+                    // snapshot a nicer title into the message source row
+                    var snapTitle = (s.Title ?? "").Trim();
+
+                    if (s.Type == "law_report" && s.LawReportId.HasValue)
+                    {
+                        var id = s.LawReportId.Value;
+                        if (lrDisplayMap.TryGetValue(id, out var disp))
+                        {
+                            snapTitle = NiceLawReportTitle(id, disp);
+                        }
+                    }
+                    else if ((s.Type == "pdf_page" || s.Type == "document" || s.Type == "legal_document") && s.LegalDocumentId.HasValue)
+                    {
+                        var did = s.LegalDocumentId.Value;
+                        if (docTitleMap.TryGetValue(did, out var dt) && !string.IsNullOrWhiteSpace(dt))
+                        {
+                            snapTitle = dt;
+                        }
+                    }
+
                     _db.AiCommentaryMessageSources.Add(new AiCommentaryMessageSource
                     {
                         MessageId = assistantMsg.Id,
                         Type = (s.Type ?? "").Trim(),
                         Score = s.Score,
-                        Title = s.Title,
+                        Title = snapTitle,
                         Citation = s.Citation,
                         Snippet = s.Snippet,
                         LawReportId = s.LawReportId,
                         LegalDocumentId = s.LegalDocumentId,
                         PageNumber = s.PageNumber,
-                        LinkUrl = DeriveLinkUrl(s)
+                        LinkUrl = DeriveLinkUrl(s) // MUST return /dashboard/... routes
                     });
                 }
             }
@@ -208,10 +256,9 @@ namespace LawAfrica.API.Services.Ai.Commentary
                 Model = _ai.ModelName ?? "",
                 DisclaimerMarkdown = BuildDisclaimer(),
                 ReplyMarkdown = finalMarkdown,
-                Sources = retrieval.Sources ?? new List<LegalCommentarySourceDto>(),
+                Sources = safeSources,
 
-                // ✅ IMPORTANT:
-                // Your response DTO should include ThreadId so frontend can keep sending it.
+                // ✅ IMPORTANT: frontend uses this for continuity
                 ThreadId = thread.Id
             };
         }
@@ -288,7 +335,7 @@ namespace LawAfrica.API.Services.Ai.Commentary
         }
 
         // ------------------------------------------------------------
-        // Prompt + formatting helpers (mostly your existing code)
+        // Prompt + formatting helpers
         // ------------------------------------------------------------
 
         private static string NormalizeMode(string? requested, string userTier)
@@ -306,90 +353,90 @@ namespace LawAfrica.API.Services.Ai.Commentary
             string mode,
             bool allowExternal,
             UserJurisdictionContext userJurisdiction,
-            List<LegalCommentarySourceDto> sources)
+            List<LegalCommentarySourceDto> sources,
+            Dictionary<int, string> docTitleMap,
+            Dictionary<int, (string Parties, string Citation)> lrDisplayMap)
         {
             var primary = string.IsNullOrWhiteSpace(userJurisdiction.CountryName) ? "Unknown" : userJurisdiction.CountryName.Trim();
             var region = string.IsNullOrWhiteSpace(userJurisdiction.RegionLabel) ? "Region" : userJurisdiction.RegionLabel.Trim();
 
             // Provide the model a canonical link map it can reuse in markdown
-            var linkMap = BuildLinkMapForPrompt(sources);
+            var linkMap = BuildLinkMapForPrompt(sources, docTitleMap, lrDisplayMap);
 
             return $@"
-                You are Legal Commentary AI for LawAfrica.
+You are Legal Commentary AI for LawAfrica.
 
-                MISSION:
-                - Answer the user's legal question with a DB-grounded response first.
-                - You are NOT tied to one document; you may combine relevant LawAfrica sources.
+MISSION:
+- Answer the user's legal question with a DB-grounded response first.
+- You are NOT tied to one document; you may combine relevant LawAfrica sources.
 
-                HARD RULES:
-                - Answer ONLY legal questions. If non-legal, refuse.
-                - Prefer LawAfrica internal sources first (provided in the SOURCES PACK).
-                - Do NOT invent case citations, page numbers, quotations, holdings, or statutes.
-                - When you rely on a LawAfrica excerpt, cite it inline:
-                  (Source: LAW_REPORT:ID) or (Source: PDF_PAGE:DOC=ID:PAGE=N)
-                - If the SOURCES PACK does not support a claim, say: ""Not confirmed in LawAfrica sources.""
-                IF NO INTERNAL SOURCES:
-                - The SOURCES PACK may be empty. In that case, you MUST still answer using general legal knowledge.
-                - Put that content under: ""General legal context (not from LawAfrica sources)"".
-                - Do NOT invent citations, quotes, or page numbers.
+HARD RULES:
+- Answer ONLY legal questions. If non-legal, refuse.
+- Prefer LawAfrica internal sources first (provided in the SOURCES PACK).
+- Do NOT invent case citations, page numbers, quotations, holdings, or statutes.
+- When you rely on a LawAfrica excerpt, cite it inline:
+  (Source: LAW_REPORT:ID) or (Source: PDF_PAGE:DOC=ID:PAGE=N)
+- If the SOURCES PACK does not support a claim, say: ""Not confirmed in LawAfrica sources.""
 
-                JURISDICTION BIAS (MANDATORY for any content NOT supported by SOURCES PACK):
-                - Primary jurisdiction: **{primary}**
-                - Then: **{region}**
-                - Then: **Africa**
-                - Then: general/common-law/global principles as last resort
-                - If you mention rules from outside {primary}, clearly label the jurisdiction.
-                - If the answer depends on jurisdiction-specific statutes/procedure and SOURCES PACK does not confirm them,
-                  list the missing details under ""Key issues to clarify"" and keep guidance high-level.
+IF NO INTERNAL SOURCES:
+- The SOURCES PACK may be empty. In that case, you MUST still answer using general legal knowledge.
+- Put that content under: ""General legal context (not from LawAfrica sources)"".
+- Do NOT invent citations, quotes, or page numbers.
 
-                LINKING RULES (IMPORTANT):
-                - Whenever you mention a LawAfrica internal source (case/document/page), include a clickable markdown link using the LINK MAP below.
-                  Example:
-                  - ... (Source: LAW_REPORT:123) — [Open source](/law-reports/123)
-                  - ... (Source: PDF_PAGE:DOC=55:PAGE=12) — [Open page](/documents/55?page=12)
+JURISDICTION BIAS (MANDATORY for any content NOT supported by SOURCES PACK):
+- Primary jurisdiction: **{primary}**
+- Then: **{region}**
+- Then: **Africa**
+- Then: general/common-law/global principles as last resort
+- If you mention rules from outside {primary}, clearly label the jurisdiction.
+- If the answer depends on jurisdiction-specific statutes/procedure and SOURCES PACK does not confirm them,
+  list the missing details under ""Key issues to clarify"" and keep guidance high-level.
 
-                - Whenever you mention an Act by name (e.g., ""Employment Act"", ""Finance Act"", ""Companies Act""):
-                  - Provide a link where the user can find it.
-                  - Use the internal search link format:
-                    [Find: Employment Act](/search?kind=acts&q=Employment%20Act)
-                  - If jurisdiction/year is known, include it:
-                    [Find: Finance Act 2023 {primary}](/search?kind=acts&q=Finance%20Act%202023%20{Uri.EscapeDataString(primary)})
+LINKING RULES (IMPORTANT):
+- Whenever you mention a LawAfrica internal source (case/document/page), include a clickable markdown link using the LINK MAP below.
+  Examples:
+  - ... (Source: LAW_REPORT:123) — [Open source](/dashboard/law-reports/123)
+  - ... (Source: PDF_PAGE:DOC=55:PAGE=12) — [Open](/dashboard/documents/55?page=12)
 
-                EXTERNAL CONTEXT:
-                - {(allowExternal ? "You MAY add general legal context not contained in LawAfrica sources." : "You MUST NOT add external context.")}
-                - If you add external context, label the section clearly as:
-                  ""General legal context (not from LawAfrica sources)"".
+- Whenever you mention an Act by name (e.g., ""Employment Act"", ""Finance Act"", ""Companies Act""):
+  - Provide a link where the user can find it.
+  - Use the internal search link format:
+    [Find: Employment Act](/dashboard/search?kind=acts&q=Employment%20Act)
 
-                FORMATTING (beautiful markdown):
-                - Start with the standard sections below.
-                - Inside ""What LawAfrica sources say"" (and external context if allowed), group the analysis by TOPICS.
-                - Use clear topic headings in this format:
-                  ## Topic: Unfair termination
-                  ## Topic: Notice & severance
-                  ## Topic: Procedure & timelines
-                - Keep each topic concise and bullet-led.
+EXTERNAL CONTEXT:
+- {(allowExternal ? "You MAY add general legal context not contained in LawAfrica sources." : "You MUST NOT add external context.")}
+- If you add external context, label the section clearly as:
+  ""General legal context (not from LawAfrica sources)"".
 
-                ### Short answer
-                ### Key issues to clarify
-                ### What LawAfrica sources say
-                ### General legal context (not from LawAfrica sources)  (only if allowed)
-                ### Practical next steps
-                ### Risks / deadlines / cautions
-                ### Sources (links)
+FORMATTING (beautiful markdown):
+- Start with the standard sections below.
+- Inside ""What LawAfrica sources say"" (and external context if allowed), group the analysis by TOPICS.
+- Use clear topic headings in this format:
+  ## Topic: Unfair termination
+  ## Topic: Notice & severance
+  ## Topic: Procedure & timelines
+- Keep each topic concise and bullet-led.
 
-                STYLE:
-                - Use bullets (-). Avoid long paragraphs.
-                - Use **bold** for key terms.
-                - Do NOT use numbered lists unless the user asks.
-                - Be precise and cautious; avoid overconfident statements.
+### Short answer
+### Key issues to clarify
+### What LawAfrica sources say
+### General legal context (not from LawAfrica sources)  (only if allowed)
+### Practical next steps
+### Risks / deadlines / cautions
+### Sources (links)
 
-                Mode: {mode}
+STYLE:
+- Use bullets (-). Avoid long paragraphs.
+- Use **bold** for key terms.
+- Do NOT use numbered lists unless the user asks.
+- Be precise and cautious; avoid overconfident statements.
 
-                LINK MAP (use these exact links):
-                {linkMap}
-                ".Trim();
+Mode: {mode}
+
+LINK MAP (use these exact links):
+{linkMap}
+".Trim();
         }
-
 
         private static string BuildPrompt(
             string system,
@@ -421,10 +468,16 @@ namespace LawAfrica.API.Services.Ai.Commentary
             return string.Join("\n", lines);
         }
 
-        private string BuildLinkMapForPrompt(List<LegalCommentarySourceDto> sources)
+        private string BuildLinkMapForPrompt(
+            List<LegalCommentarySourceDto> sources,
+            Dictionary<int, string> docTitleMap,
+            Dictionary<int, (string Parties, string Citation)> lrDisplayMap)
         {
             if (sources == null || sources.Count == 0)
-                return "- (no internal sources matched strongly)\n- ACT_SEARCH(pattern) => " + MakeUrl("/search?kind=acts&q=<Act%20Name%20Here>");
+            {
+                return "- (no internal sources matched strongly)\n" +
+                       "- ACT_SEARCH(pattern) => " + MakeUrl("/dashboard/search?kind=acts&q=<Act%20Name%20Here>");
+            }
 
             var lines = new List<string>();
 
@@ -432,27 +485,30 @@ namespace LawAfrica.API.Services.Ai.Commentary
             {
                 if (s.Type == "law_report" && s.LawReportId.HasValue)
                 {
-                    var url = MakeUrl($"/law-reports/{s.LawReportId.Value}");
+                    var url = MakeUrl($"/dashboard/law-reports/{s.LawReportId.Value}");
                     lines.Add($"- LAW_REPORT:{s.LawReportId.Value} => {url}");
                 }
                 else if (s.Type == "pdf_page" && s.LegalDocumentId.HasValue && s.PageNumber.HasValue)
                 {
-                    var url = MakeUrl($"/documents/{s.LegalDocumentId.Value}?page={s.PageNumber.Value}");
+                    // Details page (your preference), keep page hint
+                    var url = MakeUrl($"/dashboard/documents/{s.LegalDocumentId.Value}?page={s.PageNumber.Value}");
                     lines.Add($"- PDF_PAGE:DOC={s.LegalDocumentId.Value}:PAGE={s.PageNumber.Value} => {url}");
                 }
                 else if (s.LegalDocumentId.HasValue)
                 {
-                    var url = MakeUrl($"/documents/{s.LegalDocumentId.Value}");
+                    var url = MakeUrl($"/dashboard/documents/{s.LegalDocumentId.Value}");
                     lines.Add($"- DOC:{s.LegalDocumentId.Value} => {url}");
                 }
             }
 
-            lines.Add($"- ACT_SEARCH(pattern) => {MakeUrl("/search?kind=acts&q=<Act%20Name%20Here>")}");
-
+            lines.Add($"- ACT_SEARCH(pattern) => {MakeUrl("/dashboard/search?kind=acts&q=<Act%20Name%20Here>")}");
             return string.Join("\n", lines);
         }
 
-        private string BuildSourcesFooter(List<LegalCommentarySourceDto> sources)
+        private string BuildSourcesFooter(
+            List<LegalCommentarySourceDto> sources,
+            Dictionary<int, string> docTitleMap,
+            Dictionary<int, (string Parties, string Citation)> lrDisplayMap)
         {
             if (sources == null || sources.Count == 0)
                 return "### Sources (links)\n- No internal LawAfrica sources matched strongly for this question.";
@@ -463,38 +519,55 @@ namespace LawAfrica.API.Services.Ai.Commentary
             {
                 if (s.Type == "law_report" && s.LawReportId.HasValue)
                 {
-                    var url = MakeUrl($"/law-reports/{s.LawReportId.Value}");
-                    var title = string.IsNullOrWhiteSpace(s.Title) ? $"Law Report #{s.LawReportId.Value}" : s.Title.Trim();
-                    var cite = string.IsNullOrWhiteSpace(s.Citation) ? "" : $" — *{s.Citation.Trim()}*";
-                    lines.Add($"- **{EscapeMd(title)}**{cite} — [Open]({url})");
+                    var id = s.LawReportId.Value;
+                    var url = MakeUrl($"/dashboard/law-reports/{id}");
+
+                    var display = lrDisplayMap.TryGetValue(id, out var d)
+                        ? NiceLawReportTitle(id, d)
+                        : (string.IsNullOrWhiteSpace(s.Title) ? $"Law Report #{id}" : s.Title.Trim());
+
+                    lines.Add($"- **{EscapeMd(display)}** — [Open]({url})");
                 }
                 else if (s.Type == "pdf_page" && s.LegalDocumentId.HasValue && s.PageNumber.HasValue)
                 {
-                    var url = MakeUrl($"/documents/{s.LegalDocumentId.Value}?page={s.PageNumber.Value}");
-                    lines.Add($"- **LegalDocument #{s.LegalDocumentId.Value}** — Page {s.PageNumber.Value} — [Open page]({url})");
+                    var did = s.LegalDocumentId.Value;
+                    var page = s.PageNumber.Value;
+
+                    var url = MakeUrl($"/dashboard/documents/{did}?page={page}");
+
+                    var title = docTitleMap.TryGetValue(did, out var t) && !string.IsNullOrWhiteSpace(t)
+                        ? t
+                        : (string.IsNullOrWhiteSpace(s.Title) ? $"Document #{did}" : s.Title.Trim());
+
+                    lines.Add($"- **{EscapeMd(title)}** — Page {page} — [Open]({url})");
                 }
                 else if (s.LegalDocumentId.HasValue)
                 {
-                    var url = MakeUrl($"/documents/{s.LegalDocumentId.Value}");
-                    lines.Add($"- **LegalDocument #{s.LegalDocumentId.Value}** — [Open]({url})");
+                    var did = s.LegalDocumentId.Value;
+                    var url = MakeUrl($"/dashboard/documents/{did}");
+
+                    var title = docTitleMap.TryGetValue(did, out var t) && !string.IsNullOrWhiteSpace(t)
+                        ? t
+                        : (string.IsNullOrWhiteSpace(s.Title) ? $"Document #{did}" : s.Title.Trim());
+
+                    lines.Add($"- **{EscapeMd(title)}** — [Open]({url})");
                 }
             }
 
-            lines.Add($"- **Acts search** — [Find an Act]({MakeUrl("/search?kind=acts&q=Employment%20Act")})");
-
+            lines.Add($"- **Acts search** — [Find an Act]({MakeUrl("/dashboard/search?kind=acts&q=Employment%20Act")})");
             return string.Join("\n", lines);
         }
 
         private string DeriveLinkUrl(LegalCommentarySourceDto s)
         {
             if (s.Type == "law_report" && s.LawReportId.HasValue)
-                return MakeUrl($"/law-reports/{s.LawReportId.Value}");
+                return MakeUrl($"/dashboard/law-reports/{s.LawReportId.Value}");
 
             if (s.Type == "pdf_page" && s.LegalDocumentId.HasValue && s.PageNumber.HasValue)
-                return MakeUrl($"/documents/{s.LegalDocumentId.Value}?page={s.PageNumber.Value}");
+                return MakeUrl($"/dashboard/documents/{s.LegalDocumentId.Value}?page={s.PageNumber.Value}");
 
             if (s.LegalDocumentId.HasValue)
-                return MakeUrl($"/documents/{s.LegalDocumentId.Value}");
+                return MakeUrl($"/dashboard/documents/{s.LegalDocumentId.Value}");
 
             return "";
         }
@@ -530,6 +603,55 @@ namespace LawAfrica.API.Services.Ai.Commentary
 @"> **Disclaimer (LawAfrica LegalAI):** This is AI-generated legal information for general guidance, not legal advice.  
 > It may be incomplete or incorrect and does not create an advocate–client relationship.  
 > Consult a qualified advocate for advice on your facts, deadlines, filings, or court strategy.";
+        }
+
+        // ------------------------------------------------------------
+        // Display helpers for nicer Sources footer labels
+        // ------------------------------------------------------------
+
+        private async Task<Dictionary<int, string>> LoadDocumentTitlesAsync(IEnumerable<int> docIds, CancellationToken ct)
+        {
+            var ids = docIds.Distinct().ToList();
+            if (ids.Count == 0) return new Dictionary<int, string>();
+
+            // NOTE: assumes LegalDocuments has (Id, Title)
+            return await _db.LegalDocuments
+                .AsNoTracking()
+                .Where(d => ids.Contains(d.Id))
+                .Select(d => new { d.Id, d.Title })
+                .ToDictionaryAsync(x => x.Id, x => (x.Title ?? "").Trim(), ct);
+        }
+
+        private async Task<Dictionary<int, (string Parties, string Citation)>> LoadLawReportDisplayAsync(IEnumerable<int> lrIds, CancellationToken ct)
+        {
+            var ids = lrIds.Distinct().ToList();
+            if (ids.Count == 0) return new Dictionary<int, (string, string)>();
+
+            // NOTE: assumes LawReports has (Id, Parties, Citation)
+            return await _db.LawReports
+                .AsNoTracking()
+                .Where(r => ids.Contains(r.Id))
+                .Select(r => new { r.Id, r.Parties, r.Citation })
+                .ToDictionaryAsync(
+                    x => x.Id,
+                    x => ((x.Parties ?? "").Trim(), (x.Citation ?? "").Trim()),
+                    ct
+                );
+        }
+
+        private static string NiceLawReportTitle(int id, (string Parties, string Citation) d)
+        {
+            var parties = (d.Parties ?? "").Trim();
+            var cite = (d.Citation ?? "").Trim();
+
+            if (!string.IsNullOrWhiteSpace(parties) && !string.IsNullOrWhiteSpace(cite))
+                return $"{parties} — {cite}";
+            if (!string.IsNullOrWhiteSpace(parties))
+                return parties;
+            if (!string.IsNullOrWhiteSpace(cite))
+                return cite;
+
+            return $"Law Report #{id}";
         }
     }
 }
