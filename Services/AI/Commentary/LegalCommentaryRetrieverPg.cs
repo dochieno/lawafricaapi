@@ -1,19 +1,20 @@
 ﻿using LawAfrica.API.Data;
 using LawAfrica.API.DTOs.AI.Commentary;
 using Microsoft.EntityFrameworkCore;
-using NpgsqlTypes;
 
 namespace LawAfrica.API.Services.Ai.Commentary
 {
     /// <summary>
     /// Postgres FTS retriever for LawReports + LegalDocumentPageTexts.
-    /// Uses tsvector.Matches(...) and tsvector.Rank(...) for relevance.
+    /// Uses to_tsvector + plainto_tsquery + rank for relevance.
+    ///
+    /// IMPORTANT:
+    /// - Keep the query fully server-translatable (avoid SetWeight chains that can trigger client eval).
     /// </summary>
     public class LegalCommentaryRetrieverPg : ILegalCommentaryRetriever
     {
         private readonly ApplicationDbContext _db;
 
-        // "english" is a good default for legal text
         private const string TsConfig = "english";
 
         public LegalCommentaryRetrieverPg(ApplicationDbContext db)
@@ -30,12 +31,14 @@ namespace LawAfrica.API.Services.Ai.Commentary
             if (string.IsNullOrWhiteSpace(q))
                 return new LegalCommentaryRetrievalResult();
 
-            // Safe query parsing
+            // ✅ Must stay server-side (do NOT trigger client eval in the query)
             var tsQuery = EF.Functions.PlainToTsQuery(TsConfig, q);
 
             // -----------------------------
             // 1) LAW REPORTS (ranked)
             // -----------------------------
+            // ✅ Avoid SetWeight(...) because it can cause translation fallback depending on provider/version.
+            // Instead: create two texts (meta + body) and rank them separately.
             var lawReportCandidates = await _db.LawReports
                 .AsNoTracking()
                 .Select(r => new
@@ -43,31 +46,29 @@ namespace LawAfrica.API.Services.Ai.Commentary
                     r.Id,
                     Title = r.Parties ?? $"Law Report #{r.Id}",
                     Citation = r.Citation ?? "",
-                    Text = r.ContentText,
-
-                    // Build vectors with weights then rank
-                    MetaVector =
-                        EF.Functions.ToTsVector(
-                            TsConfig,
-                            (r.Parties ?? "") + " " + (r.Citation ?? "") + " " + (r.Court ?? "") + " " + (r.Judges ?? "")
-                        ).SetWeight(NpgsqlTsVector.Lexeme.Weight.A),
-
-                    BodyVector =
-                        EF.Functions.ToTsVector(TsConfig, r.ContentText)
-                            .SetWeight(NpgsqlTsVector.Lexeme.Weight.B),
+                    BodyText = r.ContentText ?? "",
+                    MetaText =
+                        (r.Parties ?? "") + " " +
+                        (r.Citation ?? "") + " " +
+                        (r.Court ?? "") + " " +
+                        (r.Judges ?? "")
                 })
-                .Where(x => x.MetaVector.Matches(tsQuery) || x.BodyVector.Matches(tsQuery))
+                .Where(x =>
+                    EF.Functions.ToTsVector(TsConfig, x.MetaText).Matches(tsQuery) ||
+                    EF.Functions.ToTsVector(TsConfig, x.BodyText).Matches(tsQuery))
                 .Select(x => new
                 {
                     x.Id,
                     x.Title,
                     x.Citation,
-                    x.Text,
-                    Rank = x.MetaVector.Rank(tsQuery) + x.BodyVector.Rank(tsQuery)
+                    Text = x.BodyText,
+                    Rank =
+                        EF.Functions.ToTsVector(TsConfig, x.MetaText).Rank(tsQuery) +
+                        EF.Functions.ToTsVector(TsConfig, x.BodyText).Rank(tsQuery)
                 })
                 .OrderByDescending(x => x.Rank)
                 .ThenByDescending(x => x.Id)
-                .Take(Math.Max(3, maxItems / 2))
+                .Take(Math.Max(3, Math.Max(1, maxItems / 2)))
                 .ToListAsync(ct);
 
             // -----------------------------
@@ -79,25 +80,24 @@ namespace LawAfrica.API.Services.Ai.Commentary
                 {
                     p.LegalDocumentId,
                     p.PageNumber,
-                    p.Text,
-                    Vec = EF.Functions.ToTsVector(TsConfig, p.Text)
+                    Text = p.Text ?? ""
                 })
-                .Where(x => x.Vec.Matches(tsQuery))
+                .Where(x => EF.Functions.ToTsVector(TsConfig, x.Text).Matches(tsQuery))
                 .Select(x => new
                 {
                     x.LegalDocumentId,
                     x.PageNumber,
                     x.Text,
-                    Rank = x.Vec.Rank(tsQuery)
+                    Rank = EF.Functions.ToTsVector(TsConfig, x.Text).Rank(tsQuery)
                 })
                 .OrderByDescending(x => x.Rank)
                 .ThenByDescending(x => x.LegalDocumentId)
                 .ThenBy(x => x.PageNumber)
-                .Take(Math.Max(6, maxItems * 2)) // we will cap per doc below
+                .Take(Math.Max(6, maxItems * 2))
                 .ToListAsync(ct);
 
             // -----------------------------
-            // 3) Build Sources + Grounding Pack
+            // 3) Build sources + grounding pack
             // -----------------------------
             var sources = new List<LegalCommentarySourceDto>();
 
@@ -135,13 +135,13 @@ namespace LawAfrica.API.Services.Ai.Commentary
                 });
             }
 
-            // Order combined sources by score and cut to maxItems
+            // Limit sources to maxItems
             var limited = sources
                 .OrderByDescending(s => s.Score)
-                .Take(maxItems)
+                .Take(Math.Max(1, maxItems))
                 .ToList();
 
-            // Build grounding pack from limited sources
+            // Build grounding pack
             var grounding = new List<string>();
             foreach (var s in limited)
             {
