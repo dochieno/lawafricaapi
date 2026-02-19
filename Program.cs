@@ -275,7 +275,7 @@ builder.Services
 // --------------------------------------------------
 // ✅ CORS (Cloudflare Pages + local dev) — DEFAULT POLICY (most reliable)
 // --------------------------------------------------
-builder.Services.AddCors(options =>
+/*builder.Services.AddCors(options =>
 {
     // 🔧 CORS FIX: use a NAMED policy so we can force it on OPTIONS + controllers
     options.AddPolicy("ViteDev", policy =>
@@ -287,7 +287,34 @@ builder.Services.AddCors(options =>
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
+});*/
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("ViteDev", policy =>
+    {
+        policy
+            .SetIsOriginAllowed(origin =>
+            {
+                if (string.IsNullOrWhiteSpace(origin)) return false;
+
+                // Local dev (Vite)
+                if (origin.StartsWith("http://localhost:", StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                // Cloudflare Pages (includes preview deployments)
+                if (origin.EndsWith(".pages.dev", StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                return false;
+            })
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            // If you never use cookies, you can remove this. Keeping it is fine.
+            .AllowCredentials();
+    });
 });
+
 
 // --------------------------------------------------
 // Swagger
@@ -330,7 +357,7 @@ var app = builder.Build();
 // --------------------------------------------------
 // ✅ Global exception handler (logs real 500 causes on Render)
 // --------------------------------------------------
-app.UseExceptionHandler(errorApp =>
+/*app.UseExceptionHandler(errorApp =>
 {
     errorApp.Run(async context =>
     {
@@ -346,7 +373,42 @@ app.UseExceptionHandler(errorApp =>
         context.Response.ContentType = "application/json";
         await context.Response.WriteAsync("{\"error\":\"Internal server error\"}");
     });
+});*/
+
+// --------------------------------------------------
+// ✅ Global exception handler + ALWAYS emit CORS headers
+// --------------------------------------------------
+var corsOrigins = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+{
+    "http://localhost:5173",
+    "https://lawafricadigitalhub.pages.dev",
+};
+
+app.UseExceptionHandler(errorApp =>
+{
+    errorApp.Run(async context =>
+    {
+        // ✅ Ensure CORS headers exist even on errors
+        var origin = context.Request.Headers["Origin"].ToString();
+        if (!string.IsNullOrWhiteSpace(origin) && corsOrigins.Contains(origin))
+        {
+            context.Response.Headers["Access-Control-Allow-Origin"] = origin;
+            context.Response.Headers["Vary"] = "Origin";
+            context.Response.Headers["Access-Control-Allow-Credentials"] = "true";
+        }
+
+        var feature = context.Features.Get<IExceptionHandlerFeature>();
+        var ex = feature?.Error;
+
+        if (ex != null)
+            app.Logger.LogError(ex, "Unhandled exception: {Message}", ex.Message);
+
+        context.Response.StatusCode = 500;
+        context.Response.ContentType = "application/json";
+        await context.Response.WriteAsync("{\"error\":\"Internal server error\"}");
+    });
 });
+
 
 // --------------------------------------------------
 // ✅ STORAGE (PERSISTENT DISK READY) + deterministic GET /storage/**
