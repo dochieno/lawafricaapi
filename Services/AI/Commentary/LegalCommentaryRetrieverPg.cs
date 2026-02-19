@@ -31,74 +31,119 @@ namespace LawAfrica.API.Services.Ai.Commentary
             if (string.IsNullOrWhiteSpace(q))
                 return new LegalCommentaryRetrievalResult();
 
-            // ✅ Must stay server-side (do NOT trigger client eval in the query)
-            var tsQuery = EF.Functions.PlainToTsQuery(TsConfig, q);
+            var lawLimit = Math.Max(3, Math.Max(1, maxItems / 2));
+            var pageLimit = Math.Max(6, maxItems * 2);
 
-            // -----------------------------
-            // 1) LAW REPORTS (ranked)
-            // -----------------------------
-            // ✅ Avoid SetWeight(...) because it can cause translation fallback depending on provider/version.
-            // Instead: create two texts (meta + body) and rank them separately.
-            var lawReportCandidates = await _db.LawReports
-                .AsNoTracking()
-                .Select(r => new
-                {
-                    r.Id,
-                    Title = r.Parties ?? $"Law Report #{r.Id}",
-                    Citation = r.Citation ?? "",
-                    BodyText = r.ContentText ?? "",
-                    MetaText =
-                        (r.Parties ?? "") + " " +
-                        (r.Citation ?? "") + " " +
-                        (r.Court ?? "") + " " +
-                        (r.Judges ?? "")
-                })
-                .Where(x =>
-                    EF.Functions.ToTsVector(TsConfig, x.MetaText).Matches(tsQuery) ||
-                    EF.Functions.ToTsVector(TsConfig, x.BodyText).Matches(tsQuery))
-                .Select(x => new
-                {
-                    x.Id,
-                    x.Title,
-                    x.Citation,
-                    Text = x.BodyText,
-                    Rank =
-                        EF.Functions.ToTsVector(TsConfig, x.MetaText).Rank(tsQuery) +
-                        EF.Functions.ToTsVector(TsConfig, x.BodyText).Rank(tsQuery)
-                })
-                .OrderByDescending(x => x.Rank)
-                .ThenByDescending(x => x.Id)
-                .Take(Math.Max(3, Math.Max(1, maxItems / 2)))
-                .ToListAsync(ct);
+            var lawReportCandidates = new List<(int Id, string Title, string Citation, string Text, double Rank)>();
+            var pageCandidates = new List<(int LegalDocumentId, int PageNumber, string Text, double Rank)>();
 
-            // -----------------------------
-            // 2) PDF PAGE TEXTS (ranked)
-            // -----------------------------
-            var pageCandidates = await _db.LegalDocumentPageTexts
-                .AsNoTracking()
-                .Select(p => new
-                {
-                    p.LegalDocumentId,
-                    p.PageNumber,
-                    Text = p.Text ?? ""
-                })
-                .Where(x => EF.Functions.ToTsVector(TsConfig, x.Text).Matches(tsQuery))
-                .Select(x => new
-                {
-                    x.LegalDocumentId,
-                    x.PageNumber,
-                    x.Text,
-                    Rank = EF.Functions.ToTsVector(TsConfig, x.Text).Rank(tsQuery)
-                })
-                .OrderByDescending(x => x.Rank)
-                .ThenByDescending(x => x.LegalDocumentId)
-                .ThenBy(x => x.PageNumber)
-                .Take(Math.Max(6, maxItems * 2))
-                .ToListAsync(ct);
+            var conn = _db.Database.GetDbConnection();
+            await using var _ = conn; // keeps analyzer quiet
+            if (conn.State != System.Data.ConnectionState.Open)
+                await conn.OpenAsync(ct);
 
-            // -----------------------------
-            // 3) Build sources + grounding pack
-            // -----------------------------
+            // ------------------------------------------------------------
+            // 1) LAW REPORTS
+            // ------------------------------------------------------------
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+            SELECT
+                r.""Id"" AS id,
+                COALESCE(r.""Parties"", 'Law Report #' || r.""Id"") AS title,
+                COALESCE(r.""Citation"", '') AS citation,
+                COALESCE(r.""ContentText"", '') AS text,
+                ts_rank(
+                    to_tsvector('english',
+                        COALESCE(r.""Parties"", '') || ' ' ||
+                        COALESCE(r.""Citation"", '') || ' ' ||
+                        COALESCE(r.""Court"", '') || ' ' ||
+                        COALESCE(r.""Judges"", '') || ' ' ||
+                        COALESCE(r.""ContentText"", '')
+                    ),
+                    plainto_tsquery('english', @q)
+                ) AS rank
+            FROM ""LawReports"" r
+            WHERE to_tsvector('english',
+                    COALESCE(r.""Parties"", '') || ' ' ||
+                    COALESCE(r.""Citation"", '') || ' ' ||
+                    COALESCE(r.""Court"", '') || ' ' ||
+                    COALESCE(r.""Judges"", '') || ' ' ||
+                    COALESCE(r.""ContentText"", '')
+                ) @@ plainto_tsquery('english', @q)
+            ORDER BY rank DESC, r.""Id"" DESC
+            LIMIT @limit;
+        ";
+
+                var pQ = cmd.CreateParameter();
+                pQ.ParameterName = "q";
+                pQ.Value = q;
+                cmd.Parameters.Add(pQ);
+
+                var pLimit = cmd.CreateParameter();
+                pLimit.ParameterName = "limit";
+                pLimit.Value = lawLimit;
+                cmd.Parameters.Add(pLimit);
+
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    var id = reader.GetInt32(reader.GetOrdinal("id"));
+                    var title = reader.GetString(reader.GetOrdinal("title"));
+                    var citation = reader.GetString(reader.GetOrdinal("citation"));
+                    var text = reader.GetString(reader.GetOrdinal("text"));
+                    var rank = Convert.ToDouble(reader["rank"]);
+
+                    lawReportCandidates.Add((id, title, citation, text, rank));
+                }
+            }
+
+            // ------------------------------------------------------------
+            // 2) PDF PAGE TEXTS
+            // ------------------------------------------------------------
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+            SELECT
+                p.""LegalDocumentId"" AS doc_id,
+                p.""PageNumber"" AS page_no,
+                COALESCE(p.""Text"", '') AS text,
+                ts_rank(
+                    to_tsvector('english', COALESCE(p.""Text"", '')),
+                    plainto_tsquery('english', @q)
+                ) AS rank
+            FROM ""LegalDocumentPageTexts"" p
+            WHERE to_tsvector('english', COALESCE(p.""Text"", ''))
+                @@ plainto_tsquery('english', @q)
+            ORDER BY rank DESC, p.""LegalDocumentId"" DESC, p.""PageNumber"" ASC
+            LIMIT @limit;
+        ";
+
+                var pQ = cmd.CreateParameter();
+                pQ.ParameterName = "q";
+                pQ.Value = q;
+                cmd.Parameters.Add(pQ);
+
+                var pLimit = cmd.CreateParameter();
+                pLimit.ParameterName = "limit";
+                pLimit.Value = pageLimit;
+                cmd.Parameters.Add(pLimit);
+
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    var docId = reader.GetInt32(reader.GetOrdinal("doc_id"));
+                    var pageNo = reader.GetInt32(reader.GetOrdinal("page_no"));
+                    var text = reader.GetString(reader.GetOrdinal("text"));
+                    var rank = Convert.ToDouble(reader["rank"]);
+
+                    pageCandidates.Add((docId, pageNo, text, rank));
+                }
+            }
+
+            // ------------------------------------------------------------
+            // 3) Build sources + grounding
+            // ------------------------------------------------------------
             var sources = new List<LegalCommentarySourceDto>();
 
             foreach (var r in lawReportCandidates)
@@ -110,13 +155,12 @@ namespace LawAfrica.API.Services.Ai.Commentary
                     Title = r.Title,
                     Citation = r.Citation,
                     Snippet = MakeSnippet(r.Text, q),
-                    Score = (double)r.Rank
+                    Score = r.Rank
                 });
             }
 
-            // Deduplicate PDF pages: max 2 pages per LegalDocument
+            // max 2 pages per doc
             var perDocCount = new Dictionary<int, int>();
-
             foreach (var p in pageCandidates)
             {
                 perDocCount.TryGetValue(p.LegalDocumentId, out var c);
@@ -131,17 +175,15 @@ namespace LawAfrica.API.Services.Ai.Commentary
                     Title = $"LegalDocument #{p.LegalDocumentId}",
                     Citation = $"Page {p.PageNumber}",
                     Snippet = MakeSnippet(p.Text, q),
-                    Score = (double)p.Rank
+                    Score = p.Rank
                 });
             }
 
-            // Limit sources to maxItems
             var limited = sources
                 .OrderByDescending(s => s.Score)
                 .Take(Math.Max(1, maxItems))
                 .ToList();
 
-            // Build grounding pack
             var grounding = new List<string>();
             foreach (var s in limited)
             {
@@ -165,6 +207,7 @@ namespace LawAfrica.API.Services.Ai.Commentary
                 GroundingText = string.Join("\n", grounding).Trim()
             };
         }
+
 
         private static string MakeSnippet(string text, string question)
         {
