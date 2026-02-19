@@ -226,10 +226,11 @@ builder.Services.AddScoped<IAiTextClient, AiTextClientAdapter>();
 builder.Services.AddScoped<ILawReportChatService, LawReportChatService>();
 
 //AICommentatry
-builder.Services.AddScoped<ILegalCommentaryAiService, LegalCommentaryAiService>();
+
 builder.Services.AddScoped<ILegalCommentaryRetriever, LegalCommentaryRetrieverPg>();
 builder.Services.AddScoped<ILegalScopeGuard, LegalScopeGuard>();
 builder.Services.AddHostedService<AiCommentaryRetentionHostedService>();
+builder.Services.AddScoped<ILegalCommentaryAiService, LegalCommentaryAiService>();
 
 
 // if you implemented user-country resolver:

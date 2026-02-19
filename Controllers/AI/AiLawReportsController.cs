@@ -1,7 +1,9 @@
 ﻿using LawAfrica.API.Data;
 using LawAfrica.API.DTOs.AI;
+using LawAfrica.API.DTOs.AI.Commentary;
 using LawAfrica.API.Models.Ai;
 using LawAfrica.API.Services.Ai;
+using LawAfrica.API.Services.Ai.Commentary;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -19,14 +21,23 @@ namespace LawAfrica.API.Controllers.Ai
         private readonly ILawReportSummarizer _summarizer;
         private readonly ILawReportRelatedCasesService _relatedCases;
         private readonly ILawReportChatService _chat;
+        private readonly ILegalCommentaryAiService _commentary;
 
-        public AiLawReportsController(ApplicationDbContext db, ILawReportSummarizer summarizer, ILawReportRelatedCasesService relatedCases, ILawReportChatService chat  )
+        public AiLawReportsController(
+            ApplicationDbContext db,
+            ILawReportSummarizer summarizer,
+            ILawReportRelatedCasesService relatedCases,
+            ILawReportChatService chat,
+            ILegalCommentaryAiService commentary
+        )
         {
             _db = db;
             _summarizer = summarizer;
             _relatedCases = relatedCases;
             _chat = chat;
+            _commentary = commentary;
         }
+
 
         public class GenerateSummaryRequest
         {
@@ -233,69 +244,127 @@ namespace LawAfrica.API.Controllers.Ai
         //Chat Controller:
         [HttpPost("{id:int}/chat")]
         public async Task<IActionResult> Chat(
-    int id,
-    [FromBody] LawReportChatRequestDto req,
-    CancellationToken ct = default
-)
+            int id,
+            [FromBody] LawReportChatRequestDto req,
+            CancellationToken ct = default
+        )
+                {
+                    req ??= new LawReportChatRequestDto();
+                    var userId = GetUserId();
+
+                    var report = await _db.LawReports
+                        .AsNoTracking()
+                        .Include(x => x.LegalDocument)
+                        .FirstOrDefaultAsync(x => x.Id == id, ct);
+
+                    if (report == null)
+                        return NotFound(new { message = "Law report not found." });
+
+                    var content = report.ContentText ?? "";
+                    if (string.IsNullOrWhiteSpace(content))
+                        return BadRequest(new { message = "This law report has no content to chat with yet." });
+
+                    var userMessage = (req.Message ?? "").Trim();
+                    if (string.IsNullOrWhiteSpace(userMessage))
+                        return BadRequest(new { message = "Message is required." });
+
+                    var caseTitle = (
+                        report.LegalDocument?.Title ??
+                        report.Parties ??
+                        report.CaseNumber ??   // if your LawReport has CaseNumber (your UI shows it)
+                        "Law report"
+                    ).Trim();
+
+                    var caseCitation = (report.Citation ?? "").Trim();
+
+                    try
+                    {
+                        var resp = await _chat.AskAsync(
+                            id,
+                            caseTitle,
+                            caseCitation,
+                            content,
+                            userMessage,
+                            req.History,
+                            ct
+                        );
+
+                        // ✅ match frontend parsing: res.data.reply
+                        return Ok(resp);
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        // good for quota/limits later
+                        return StatusCode(429, new { message = ex.Message });
+                    }
+                    catch (Exception ex)
+                    {
+                        return StatusCode(500, new
+                        {
+                            message = "Chat failed.",
+                            detail = ex.Message,
+                            type = ex.GetType().Name
+                        });
+                    }
+                }
+
+        // ------------------------------------------------------
+        // ✅ TEMP TEST: POST /api/ai/law-reports/commentary/ask
+        // Mirrors AiCommentaryController.Ask but under a known-working route.
+        // ------------------------------------------------------
+        [HttpPost("commentary/ask")]
+        public async Task<IActionResult> CommentaryAsk(
+            [FromBody] LegalCommentaryAskRequestDto req,
+            CancellationToken ct = default)
         {
-            req ??= new LawReportChatRequestDto();
-            var userId = GetUserId();
+            req ??= new LegalCommentaryAskRequestDto();
 
-            var report = await _db.LawReports
-                .AsNoTracking()
-                .Include(x => x.LegalDocument)
-                .FirstOrDefaultAsync(x => x.Id == id, ct);
+            // AiLawReportsController uses string userId
+            var userIdStr = GetUserId();
 
-            if (report == null)
-                return NotFound(new { message = "Law report not found." });
+            // LegalCommentaryAiService expects int userId
+            if (!int.TryParse(userIdStr, out var userId))
+                return Unauthorized(new { message = "Invalid user id in token." });
 
-            var content = report.ContentText ?? "";
-            if (string.IsNullOrWhiteSpace(content))
-                return BadRequest(new { message = "This law report has no content to chat with yet." });
-
-            var userMessage = (req.Message ?? "").Trim();
-            if (string.IsNullOrWhiteSpace(userMessage))
-                return BadRequest(new { message = "Message is required." });
-
-            var caseTitle = (
-                report.LegalDocument?.Title ??
-                report.Parties ??
-                report.CaseNumber ??   // if your LawReport has CaseNumber (your UI shows it)
-                "Law report"
-            ).Trim();
-
-            var caseCitation = (report.Citation ?? "").Trim();
+            var tier = await GetUserAiTierAsync(ct); // "basic" | "extended"
 
             try
             {
-                var resp = await _chat.AskAsync(
-                    id,
-                    caseTitle,
-                    caseCitation,
-                    content,
-                    userMessage,
-                    req.History,
-                    ct
-                );
-
-                // ✅ match frontend parsing: res.data.reply
+                var resp = await _commentary.AskAsync(userId, req, tier, ct);
                 return Ok(resp);
             }
             catch (InvalidOperationException ex)
             {
-                // good for quota/limits later
-                return StatusCode(429, new { message = ex.Message });
+                return BadRequest(new { message = ex.Message });
             }
             catch (Exception ex)
             {
                 return StatusCode(500, new
                 {
-                    message = "Chat failed.",
+                    message = "AI commentary failed.",
                     detail = ex.Message,
                     type = ex.GetType().Name
                 });
             }
         }
+
+        // Same tier logic you used in AiCommentaryController
+        private async Task<string> GetUserAiTierAsync(CancellationToken ct)
+        {
+            var claimTier = (User.FindFirst("aiTier")?.Value ?? User.FindFirst("tier")?.Value ?? "")
+                .Trim()
+                .ToLowerInvariant();
+
+            if (claimTier == "extended" || claimTier == "basic")
+                return claimTier;
+
+            if (User.IsInRole("Admin"))
+                return "extended";
+
+            await Task.CompletedTask;
+            return "basic";
+        }
+
         private string GetUserId()
         {
             // Works with Identity/JWT; fallback to "sub" if needed
