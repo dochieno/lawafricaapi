@@ -1,6 +1,7 @@
 ﻿using LawAfrica.API.Data;
 using LawAfrica.API.DTOs.AI.Commentary;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace LawAfrica.API.Services.Ai.Commentary
 {
@@ -37,10 +38,10 @@ namespace LawAfrica.API.Services.Ai.Commentary
             var lawReportCandidates = new List<(int Id, string Title, string Citation, string Text, double Rank)>();
             var pageCandidates = new List<(int LegalDocumentId, int PageNumber, string Text, double Rank)>();
 
-            var conn = _db.Database.GetDbConnection();
-            await using var _ = conn; // keeps analyzer quiet
-            if (conn.State != System.Data.ConnectionState.Open)
-                await conn.OpenAsync(ct);
+            var cs = _db.Database.GetConnectionString();
+            await using var conn = new NpgsqlConnection(cs);
+            await conn.OpenAsync(ct);
+
 
             // ------------------------------------------------------------
             // 1) LAW REPORTS
@@ -119,15 +120,8 @@ namespace LawAfrica.API.Services.Ai.Commentary
             LIMIT @limit;
         ";
 
-                var pQ = cmd.CreateParameter();
-                pQ.ParameterName = "q";
-                pQ.Value = q;
-                cmd.Parameters.Add(pQ);
-
-                var pLimit = cmd.CreateParameter();
-                pLimit.ParameterName = "limit";
-                pLimit.Value = pageLimit;
-                cmd.Parameters.Add(pLimit);
+                cmd.Parameters.Add(new NpgsqlParameter("q", q));
+                cmd.Parameters.Add(new NpgsqlParameter("limit", lawLimit));
 
                 await using var reader = await cmd.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
