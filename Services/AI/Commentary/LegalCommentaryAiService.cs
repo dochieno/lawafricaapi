@@ -13,6 +13,7 @@ using LawAfrica.API.Data;
 using LawAfrica.API.DTOs.AI.Commentary;
 using LawAfrica.API.Models.Ai.Commentary;
 using Microsoft.EntityFrameworkCore;
+using System.Text.RegularExpressions;
 
 namespace LawAfrica.API.Services.Ai.Commentary
 {
@@ -190,6 +191,10 @@ namespace LawAfrica.API.Services.Ai.Commentary
                 : "### Sources (links)\n- No internal LawAfrica sources matched strongly for this question.";
 
             var finalMarkdown = (answer + "\n\n" + sourcesFooter).Trim();
+
+            // ✅ NEW: Replace inline Source tokens to show titles (not ids)
+            finalMarkdown = RewriteInlineSourceTokens(finalMarkdown, docTitleMap, lrDisplayMap);
+
 
             // 11) Persist assistant message + snapshot sources
             var assistantMsg = new AiCommentaryMessage
@@ -404,9 +409,20 @@ LINKING RULES (IMPORTANT):
     [Find: Employment Act](/dashboard/search?kind=acts&q=Employment%20Act)
 
 EXTERNAL CONTEXT:
-- {(allowExternal ? "You MAY add general legal context not contained in LawAfrica sources." : "You MUST NOT add external context.")}
-- If you add external context, label the section clearly as:
-  ""General legal context (not from LawAfrica sources)"".
+- {(allowExternal
+    ? "You MAY add general legal context not contained in LawAfrica sources."
+    : "You MUST NOT add external context.")}
+
+- If you add external context, you MUST include a section at the end:
+  ""### External sources (links)""
+
+- ""External sources (links)"" MUST contain 2–5 REAL clickable links (full https URLs) from reputable legal sources,
+  relevant to the jurisdiction when possible (law portals, legal information institutes, courts, government legislation sites).
+  Do NOT invent cases/citations; links must be to real sites (e.g., official legal portals / LIIs).
+
+- Keep external content clearly separated under:
+  ""General legal context (not from LawAfrica sources)""
+
 
 FORMATTING (beautiful markdown):
 - Start with the standard sections below.
@@ -639,7 +655,72 @@ LINK MAP (use these exact links):
                 );
         }
 
-        private static string NiceLawReportTitle(int id, (string Parties, string Citation) d)
+// ...
+
+private string RewriteInlineSourceTokens(
+    string markdown,
+    Dictionary<int, string> docTitleMap,
+    Dictionary<int, (string Parties, string Citation)> lrDisplayMap)
+    {
+        var s = markdown ?? "";
+        if (string.IsNullOrWhiteSpace(s)) return s;
+
+        // LAW_REPORT:123
+        s = Regex.Replace(
+            s,
+            @"\bLAW_REPORT:(\d+)\b",
+            m =>
+            {
+                if (!int.TryParse(m.Groups[1].Value, out var id)) return m.Value;
+
+                if (lrDisplayMap != null && lrDisplayMap.TryGetValue(id, out var disp))
+                    return EscapeMd(NiceLawReportTitle(id, disp));
+
+                return $"Law Report #{id}";
+            },
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant
+        );
+
+        // PDF_PAGE:DOC=74:PAGE=463
+        s = Regex.Replace(
+            s,
+            @"\bPDF_PAGE:DOC=(\d+):PAGE=(\d+)\b",
+            m =>
+            {
+                if (!int.TryParse(m.Groups[1].Value, out var did)) return m.Value;
+                if (!int.TryParse(m.Groups[2].Value, out var page)) return m.Value;
+
+                var title = (docTitleMap != null && docTitleMap.TryGetValue(did, out var t) && !string.IsNullOrWhiteSpace(t))
+                    ? EscapeMd(t)
+                    : $"Document #{did}";
+
+                return $"{title}, p. {page}";
+            },
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant
+        );
+
+        // DOC:74 (if your model ever uses it)
+        s = Regex.Replace(
+            s,
+            @"\bDOC:(\d+)\b",
+            m =>
+            {
+                if (!int.TryParse(m.Groups[1].Value, out var did)) return m.Value;
+
+                var title = (docTitleMap != null && docTitleMap.TryGetValue(did, out var t) && !string.IsNullOrWhiteSpace(t))
+                    ? EscapeMd(t)
+                    : $"Document #{did}";
+
+                return title;
+            },
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant
+        );
+
+        return s;
+    }
+
+
+    private static string NiceLawReportTitle(int id, (string Parties, string Citation) d)
         {
             var parties = (d.Parties ?? "").Trim();
             var cite = (d.Citation ?? "").Trim();
