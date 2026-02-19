@@ -56,7 +56,7 @@ namespace LawAfrica.API.Controllers.Ai
             }
             catch (InvalidOperationException ex)
             {
-                return BadRequest(new { message = ex.Message });
+                return BadRequest(new { message = "RETRIEVER_V2_CHECK :: " + ex.Message });
             }
             catch (Exception ex)
             {
