@@ -8,6 +8,7 @@ using LawAfrica.API.Models.Lawyers;
 using LawAfrica.API.Services.Lawyers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace LawAfrica.API.Controllers
 {
@@ -144,6 +145,173 @@ namespace LawAfrica.API.Controllers
                 return StatusCode(500, new
                 {
                     message = "Failed to search lawyers.",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
+
+        // -------------------------
+        // LOOKUP: Practice Areas (for dropdown)
+        // GET /api/lawyers/practice-areas?q=family
+        // -------------------------
+        [HttpGet("practice-areas")]
+        public async Task<IActionResult> PracticeAreasLookup(
+            [FromQuery] string? q = null,
+            [FromQuery] int take = 200,
+            CancellationToken ct = default)
+        {
+            q = (q ?? "").Trim();
+            take = Math.Clamp(take, 1, 500);
+
+            try
+            {
+                var userId = User.GetUserId();
+
+                var query = _db.PracticeAreas
+                    .AsNoTracking()
+                    .Where(x => x.IsActive);
+
+                if (!string.IsNullOrWhiteSpace(q))
+                {
+                    query = query.Where(x =>
+                        x.Name.Contains(q) ||
+                        (x.Slug != null && x.Slug.Contains(q)));
+                }
+
+                var items = await query
+                    .OrderBy(x => x.Name)
+                    .Take(take)
+                    .Select(x => new
+                    {
+                        id = x.Id,
+                        name = x.Name
+                    })
+                    .ToListAsync(ct);
+
+                return Ok(items);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "Failed to load practice areas.",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
+
+        // -------------------------
+        // LOOKUP: Towns (for dropdown)
+        // GET /api/lawyers/towns?countryId=1&q=nai&take=200
+        // NOTE: convenience alias to avoid frontend calling /api/towns
+        // -------------------------
+        [HttpGet("towns")]
+        public async Task<IActionResult> TownsLookup(
+            [FromQuery] int countryId,
+            [FromQuery] string? q = null,
+            [FromQuery] int take = 200,
+            CancellationToken ct = default)
+        {
+            if (countryId <= 0)
+                return BadRequest(new { message = "countryId is required." });
+
+            q = (q ?? "").Trim();
+            take = Math.Clamp(take, 1, 500);
+
+            try
+            {
+                var userId = User.GetUserId();
+
+                var query = _db.Towns
+                    .AsNoTracking()
+                    .Where(x => x.CountryId == countryId);
+
+                if (!string.IsNullOrWhiteSpace(q))
+                {
+                    query = query.Where(x =>
+                        x.Name.Contains(q) ||
+                        x.PostCode.Contains(q));
+                }
+
+                var items = await query
+                    .OrderBy(x => x.Name)
+                    .ThenBy(x => x.PostCode)
+                    .Take(take)
+                    .Select(x => new
+                    {
+                        id = x.Id,
+                        name = x.Name,
+                        postCode = x.PostCode
+                    })
+                    .ToListAsync(ct);
+
+                return Ok(items);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "Failed to load towns.",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
+
+        // -------------------------
+        // LOOKUP: Courts (for dropdown)
+        // GET /api/lawyers/courts?countryId=1&q=high&take=200
+        // NOTE: public lookup for logged-in users (CourtsController is admin-only)
+        // -------------------------
+        [HttpGet("courts")]
+        public async Task<IActionResult> CourtsLookup(
+            [FromQuery] int countryId,
+            [FromQuery] string? q = null,
+            [FromQuery] int take = 200,
+            CancellationToken ct = default)
+        {
+            if (countryId <= 0)
+                return BadRequest(new { message = "countryId is required." });
+
+            q = (q ?? "").Trim();
+            take = Math.Clamp(take, 1, 500);
+
+            try
+            {
+                var userId = User.GetUserId();
+
+                var query = _db.Courts
+                    .AsNoTracking()
+                    .Where(c => c.CountryId == countryId && c.IsActive);
+
+                if (!string.IsNullOrWhiteSpace(q))
+                {
+                    query = query.Where(c =>
+                        (c.Name != null && c.Name.Contains(q)) ||
+                        (c.Code != null && c.Code.Contains(q)) ||
+                        (c.Abbreviation != null && c.Abbreviation.Contains(q)));
+                }
+
+                var items = await query
+                    .OrderBy(c => c.Name)
+                    .Take(take)
+                    .Select(c => new
+                    {
+                        id = c.Id,
+                        name = c.Name,
+                        code = c.Code
+                    })
+                    .ToListAsync(ct);
+
+                return Ok(items);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "Failed to load courts.",
                     detail = ex.Message,
                     type = ex.GetType().Name
                 });
