@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
+using System.Text.Json;
 
 
 namespace LawAfrica.API.Controllers.Ai
@@ -345,6 +346,62 @@ namespace LawAfrica.API.Controllers.Ai
                     detail = ex.Message,
                     type = ex.GetType().Name
                 });
+            }
+        }
+
+        [HttpPost("commentary/ask-stream")]
+        public async Task CommentaryAskStream(
+            [FromBody] LegalCommentaryAskRequestDto req,
+            CancellationToken ct = default)
+        {
+            req ??= new LegalCommentaryAskRequestDto();
+
+            var userIdStr = GetUserId();
+            if (!int.TryParse(userIdStr, out var userId))
+            {
+                Response.Headers["Content-Type"] = "text/event-stream";
+                Response.Headers["Cache-Control"] = "no-cache";
+                await Response.WriteAsync("event: error\n", ct);
+                await Response.WriteAsync("data: {\"message\":\"Unauthorized\"}\n\n", ct);
+                await Response.Body.FlushAsync(ct);
+                return;
+            }
+
+            var tier = await GetUserAiTierAsync(ct);
+
+            Response.Headers["Content-Type"] = "text/event-stream";
+            Response.Headers["Cache-Control"] = "no-cache";
+            Response.Headers["X-Accel-Buffering"] = "no"; // helps some proxies
+
+            async Task SendEventAsync(string type, object payload)
+            {
+                var json = JsonSerializer.Serialize(payload);
+                await Response.WriteAsync($"event: {type}\n", ct);
+                await Response.WriteAsync($"data: {json}\n\n", ct);
+                await Response.Body.FlushAsync(ct);
+            }
+
+            try
+            {
+                await foreach (var chunk in _commentary.AskStreamAsync(userId, req, tier, ct))
+                {
+                    if (!string.IsNullOrEmpty(chunk.DeltaText))
+                        await SendEventAsync("delta", new { text = chunk.DeltaText });
+
+                    if (chunk.Done)
+                    {
+                        await SendEventAsync("done", new { threadId = chunk.ThreadId });
+                        break;
+                    }
+                }
+            }
+            catch (InvalidOperationException ex)
+            {
+                await SendEventAsync("error", new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                await SendEventAsync("error", new { message = "AI commentary failed.", detail = ex.Message });
             }
         }
 

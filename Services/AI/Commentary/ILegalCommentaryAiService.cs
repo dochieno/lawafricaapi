@@ -4,9 +4,17 @@ namespace LawAfrica.API.Services.Ai.Commentary
 {
     public interface ILegalCommentaryAiService
     {
-        Task<LegalCommentaryAskResponseDto> AskAsync(int userId,
+        Task<LegalCommentaryAskResponseDto> AskAsync(
+            int userId,
             LegalCommentaryAskRequestDto req,
-            string userTier, // "basic" | "extended" (backend enforced)
+            string userTier,
+            CancellationToken ct);
+
+        // ✅ streaming
+        IAsyncEnumerable<LegalCommentaryAiService.AskStreamChunk> AskStreamAsync(
+            int userId,
+            LegalCommentaryAskRequestDto req,
+            string userTier,
             CancellationToken ct);
     }
 }

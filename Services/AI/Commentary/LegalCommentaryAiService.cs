@@ -655,9 +655,33 @@ LINK MAP (use these exact links):
                 );
         }
 
-// ...
+        public record AskStreamChunk(string? DeltaText, long? ThreadId, bool Done);
 
-private string RewriteInlineSourceTokens(
+        public async IAsyncEnumerable<AskStreamChunk> AskStreamAsync(
+            int userId,
+            LegalCommentaryAskRequestDto req,
+            string tier,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            var resp = await AskAsync(userId, req, tier, ct);
+            var full = (resp?.ReplyMarkdown ?? "").Trim();
+            var threadId = resp?.ThreadId;
+
+            const int size = 40;
+
+            for (int i = 0; i < full.Length; i += size)
+            {
+                var part = full.Substring(i, Math.Min(size, full.Length - i));
+                yield return new AskStreamChunk(part, threadId, Done: false);
+                await Task.Delay(10, ct);
+            }
+
+            yield return new AskStreamChunk(null, threadId, Done: true);
+        }
+
+        // ...
+
+        private string RewriteInlineSourceTokens(
     string markdown,
     Dictionary<int, string> docTitleMap,
     Dictionary<int, (string Parties, string Citation)> lrDisplayMap)
