@@ -88,7 +88,7 @@ builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<UserApprovalService>();
 builder.Services.AddScoped<RegistrationService>();
 builder.Services.AddScoped<EmailService>();
-builder.Services.AddHostedService<EmailOutboxWorker>();
+//builder.Services.AddHostedService<EmailOutboxWorker>();
 builder.Services.AddScoped<InstitutionService>();
 builder.Services.AddHostedService<LawAfrica.API.Services.InstitutionSubscriptionStatusHostedService>();
 builder.Services.AddScoped<LawAfrica.API.Services.InstitutionAccessService>();
@@ -224,6 +224,8 @@ builder.Services.AddScoped<ILawReportContentBuilder, LawReportContentBuilder>();
 builder.Services.AddHttpClient<ILawReportFormatter, OpenAiLawReportFormatter>();
 builder.Services.AddScoped<IAiTextClient, AiTextClientAdapter>();
 builder.Services.AddScoped<ILawReportChatService, LawReportChatService>();
+builder.Services.Configure<LawAfrica.API.Services.Emails.EmailOutboxOptions>(
+    builder.Configuration.GetSection("EmailOutbox"));
 
 //AICommentatry
 

@@ -19,6 +19,19 @@ namespace LawAfrica.API.Services.Emails
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            using var scope = _sp.CreateScope();
+            var opts = scope.ServiceProvider.GetRequiredService<IConfiguration>()
+                .GetSection("EmailOutbox")
+                .Get<EmailOutboxOptions>() ?? new EmailOutboxOptions();
+
+            if (!opts.Enabled)
+            {
+                _logger.LogWarning("[EMAIL OUTBOX] Disabled by configuration. Worker will not run.");
+                return;
+            }
+
+            var poll = TimeSpan.FromSeconds(Math.Max(3, opts.PollSeconds));
+
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
@@ -30,7 +43,7 @@ namespace LawAfrica.API.Services.Emails
                     _logger.LogError(ex, "[EMAIL OUTBOX] Worker loop error");
                 }
 
-                await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
+                await Task.Delay(poll, stoppingToken);
             }
         }
 
