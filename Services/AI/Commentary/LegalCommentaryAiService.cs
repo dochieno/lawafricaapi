@@ -186,11 +186,26 @@ namespace LawAfrica.API.Services.Ai.Commentary
             }
 
             // 10) Include sources footer (friendly when none exist) — now uses Titles/Parties+Citation and correct routes
-            var sourcesFooter = (safeSources.Count > 0)
-                ? BuildSourcesFooter(safeSources, docTitleMap, lrDisplayMap)
-                : "### Sources (links)\n- No internal LawAfrica sources matched strongly for this question.";
+            var internalFooter = BuildLawAfricaSourcesFooter(safeSources, docTitleMap, lrDisplayMap);
 
-            var finalMarkdown = (answer + "\n\n" + sourcesFooter).Trim();
+            // ✅ Append internal footer once
+            var combined = (answer + "\n\n" + internalFooter).Trim();
+
+            // ✅ Append external footer once IF allowExternalContext is true
+            if (req.AllowExternalContext)
+            {
+                var externalFooter = BuildExternalSourcesFooterFromAnswer(combined);
+                combined = (combined + "\n\n" + externalFooter).Trim();
+            }
+            else
+            {
+                combined = (combined + "\n\n### External sources\n- (External sources disabled)").Trim();
+            }
+
+            var finalMarkdown = combined;
+
+            // keep your token rewriting AFTER final built
+            finalMarkdown = RewriteInlineSourceTokens(finalMarkdown, docTitleMap, lrDisplayMap);
 
             // ✅ NEW: Replace inline Source tokens to show titles (not ids)
             finalMarkdown = RewriteInlineSourceTokens(finalMarkdown, docTitleMap, lrDisplayMap);
@@ -414,14 +429,17 @@ namespace LawAfrica.API.Services.Ai.Commentary
 
                 JURISDICTION RULES (STRICT — ENFORCE THIS ORDER):
                 - You MUST start with **{primary}** law and practice FIRST.
-                - You MUST NOT lead with UK/EU/Finland/US examples.
                 - If {primary} is ""Unknown"": 
                   - Ask for the jurisdiction as a ""Key issue to clarify"" 
                   - Keep the answer high-level and general (no country-specific claims).
+                - If you must compare, compare ONLY to:
+                      1) **{region}** countries first, then
+                      2) other **African** common-law jurisdictions (clearly labelled)
                 - If you mention ANY non-{primary} jurisdiction:
                   - Put it ONLY under: ""### Comparative note (other jurisdictions)""
                   - Label the jurisdiction clearly (e.g., ""UK"", ""Finland"", ""EU"") 
                   - Keep it short and clearly secondary.
+                - If unsure about {primary} statutory position and LawAfrica sources do not confirm, say so and ask clarifying questions.
 
                 SPECIAL RULE FOR EMPLOYMENT / TERMINATION QUESTIONS:
                 - If the question is employment-related and {primary} is Kenya:
@@ -452,9 +470,11 @@ namespace LawAfrica.API.Services.Ai.Commentary
                 ### {primary} legal position
                 ### Practical next steps in {primary}
                 ### Risks / deadlines / cautions in {primary}
-                ### Comparative note (other jurisdictions) (optional; only if helpful)
-                ### Sources (links)
+                ### Comparative note (other jurisdictions {region}) then other African Countries (optional; only if helpful)
+                ### LawAfrica sources
+                ### External sources
                 {(allowExternal ? "### External sources (links) (only if you actually used external sources)" : "")}
+                - Do not output ""### Sources"" or ""### Sources (links)"". Only use: ""### LawAfrica sources"" and ""### External sources"".
 
                 STYLE:
                 - Use bullets (-). Avoid long paragraphs.
@@ -536,21 +556,39 @@ namespace LawAfrica.API.Services.Ai.Commentary
             return string.Join("\n", lines);
         }
 
-        private string BuildSourcesFooter(
+        private string BuildLawAfricaSourcesFooter(
             List<LegalCommentarySourceDto> sources,
             Dictionary<int, string> docTitleMap,
             Dictionary<int, (string Parties, string Citation)> lrDisplayMap)
         {
-            if (sources == null || sources.Count == 0)
-                return "### Sources (links)\n- No internal LawAfrica sources matched strongly for this question.";
+            var internalSources = (sources ?? new List<LegalCommentarySourceDto>())
+                .Where(s =>
+                    (s.Type == "law_report" && s.LawReportId.HasValue) ||
+                    ((s.Type == "pdf_page" || s.Type == "document" || s.Type == "legal_document") && s.LegalDocumentId.HasValue))
+                .OrderByDescending(s => s.Score)
+                .ToList();
 
-            var lines = new List<string> { "### Sources (links)" };
+            var lines = new List<string> { "### LawAfrica sources" };
 
-            foreach (var s in sources.OrderByDescending(x => x.Score))
+            if (internalSources.Count == 0)
+            {
+                lines.Add("- No internal LawAfrica sources matched strongly for this question.");
+                // still include Act search as a useful internal navigation affordance
+                lines.Add($"- **Acts search** — [Find an Act]({MakeUrl("/dashboard/search?kind=acts&q=Employment%20Act")})");
+                return string.Join("\n", lines);
+            }
+
+            // ✅ Dedupe: avoid showing same law report/doc-page multiple times
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var s in internalSources)
             {
                 if (s.Type == "law_report" && s.LawReportId.HasValue)
                 {
                     var id = s.LawReportId.Value;
+                    var key = $"lr:{id}";
+                    if (!seen.Add(key)) continue;
+
                     var url = MakeUrl($"/dashboard/law-reports/{id}");
 
                     var display = lrDisplayMap.TryGetValue(id, out var d)
@@ -558,11 +596,17 @@ namespace LawAfrica.API.Services.Ai.Commentary
                         : (string.IsNullOrWhiteSpace(s.Title) ? $"Law Report #{id}" : s.Title.Trim());
 
                     lines.Add($"- **{EscapeMd(display)}** — [Open]({url})");
+                    continue;
                 }
-                else if (s.Type == "pdf_page" && s.LegalDocumentId.HasValue && s.PageNumber.HasValue)
+
+                // pdf_page
+                if (s.Type == "pdf_page" && s.LegalDocumentId.HasValue && s.PageNumber.HasValue)
                 {
                     var did = s.LegalDocumentId.Value;
                     var page = s.PageNumber.Value;
+
+                    var key = $"doc:{did}:p:{page}";
+                    if (!seen.Add(key)) continue;
 
                     var url = MakeUrl($"/dashboard/documents/{did}?page={page}");
 
@@ -571,10 +615,17 @@ namespace LawAfrica.API.Services.Ai.Commentary
                         : (string.IsNullOrWhiteSpace(s.Title) ? $"Document #{did}" : s.Title.Trim());
 
                     lines.Add($"- **{EscapeMd(title)}** — Page {page} — [Open]({url})");
+                    continue;
                 }
-                else if (s.LegalDocumentId.HasValue)
+
+                // document (no page)
+                if (s.LegalDocumentId.HasValue)
                 {
                     var did = s.LegalDocumentId.Value;
+
+                    var key = $"doc:{did}";
+                    if (!seen.Add(key)) continue;
+
                     var url = MakeUrl($"/dashboard/documents/{did}");
 
                     var title = docTitleMap.TryGetValue(did, out var t) && !string.IsNullOrWhiteSpace(t)
@@ -585,10 +636,39 @@ namespace LawAfrica.API.Services.Ai.Commentary
                 }
             }
 
+            // ✅ keep only one acts search entry
             lines.Add($"- **Acts search** — [Find an Act]({MakeUrl("/dashboard/search?kind=acts&q=Employment%20Act")})");
             return string.Join("\n", lines);
         }
+        private string BuildExternalSourcesFooterFromAnswer(string finalMarkdown)
+        {
+            // If you prefer: you can parse only the "### External sources" section.
+            // For now: extract unique https links from the whole output.
+            var s = finalMarkdown ?? "";
+            var lines = new List<string> { "### External sources" };
 
+            var matches = Regex.Matches(s, @"https?://[^\s\)\]]+", RegexOptions.IgnoreCase);
+            var uniq = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (Match m in matches)
+            {
+                var url = m.Value.Trim().TrimEnd('.', ',', ';');
+                if (!url.StartsWith("http", StringComparison.OrdinalIgnoreCase)) continue;
+                uniq.Add(url);
+                if (uniq.Count >= 8) break;
+            }
+
+            if (uniq.Count == 0)
+            {
+                lines.Add("- No external links were provided.");
+                return string.Join("\n", lines);
+            }
+
+            foreach (var url in uniq)
+                lines.Add($"- {url}");
+
+            return string.Join("\n", lines);
+        }
         private string DeriveLinkUrl(LegalCommentarySourceDto s)
         {
             if (s.Type == "law_report" && s.LawReportId.HasValue)
