@@ -14,6 +14,7 @@ using LawAfrica.API.Services.Emails;
 using LawAfrica.API.Services.Institutions;
 using LawAfrica.API.Services.LawReports;
 using LawAfrica.API.Services.LawReportsContent;
+using LawAfrica.API.Services.Lawyers;
 using LawAfrica.API.Services.Payments;
 using LawAfrica.API.Services.Subscriptions;
 using LawAfrica.API.Settings;
@@ -147,6 +148,10 @@ QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
 
 // DI
 builder.Services.AddScoped<InvoicePdfService>();
+
+//FindAlawyer:
+builder.Services.AddScoped<ILawyerDirectoryService, LawyerDirectoryService>();
+builder.Services.AddScoped<ILawyerInquiryService, LawyerInquiryService>();
 
 // --------------------------------------------------
 // Authorization

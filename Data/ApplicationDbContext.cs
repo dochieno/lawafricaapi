@@ -11,6 +11,7 @@ using LawAfrica.API.Models.Institutions;
 using LawAfrica.API.Models.LawReports.Enums;
 using LawAfrica.API.Models.LawReports.Models;
 using LawAfrica.API.Models.LawReportsContent.Models;
+using LawAfrica.API.Models.Lawyers;
 using LawAfrica.API.Models.Locations;
 using LawAfrica.API.Models.Payments;
 using LawAfrica.API.Models.Registration;
@@ -136,8 +137,15 @@ public class ApplicationDbContext : DbContext
     public DbSet<AiCommentaryMessage> AiCommentaryMessages => Set<AiCommentaryMessage>();
     public DbSet<AiCommentaryMessageSource> AiCommentaryMessageSources => Set<AiCommentaryMessageSource>();
 
+    //FindAlawyer module:
+    public DbSet<LawyerProfile> LawyerProfiles => Set<LawyerProfile>();
+    public DbSet<PracticeArea> PracticeAreas => Set<PracticeArea>();
+    public DbSet<LawyerPracticeArea> LawyerPracticeAreas => Set<LawyerPracticeArea>();
+    public DbSet<LawyerTown> LawyerTowns => Set<LawyerTown>();
+    public DbSet<LawyerInquiry> LawyerInquiries => Set<LawyerInquiry>();
 
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
+
+protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
 
@@ -228,6 +236,89 @@ public class ApplicationDbContext : DbContext
                 .HasForeignKey(x => x.CountryId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
+
+        //Findalayer:
+        // LawyerProfile 1:1 with User
+        modelBuilder.Entity<LawyerProfile>()
+            .HasIndex(x => x.UserId)
+            .IsUnique();
+
+        modelBuilder.Entity<LawyerProfile>()
+            .HasOne(x => x.User)
+            .WithMany()
+            .HasForeignKey(x => x.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Highest court allowed (Court)
+        modelBuilder.Entity<LawyerProfile>()
+            .HasOne(x => x.HighestCourtAllowed)
+            .WithMany()
+            .HasForeignKey(x => x.HighestCourtAllowedId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        // Primary town
+        modelBuilder.Entity<LawyerProfile>()
+            .HasOne(x => x.PrimaryTown)
+            .WithMany()
+            .HasForeignKey(x => x.PrimaryTownId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        // LawyerPracticeArea join
+        modelBuilder.Entity<LawyerPracticeArea>()
+            .HasKey(x => new { x.LawyerProfileId, x.PracticeAreaId });
+
+        modelBuilder.Entity<LawyerPracticeArea>()
+            .HasOne(x => x.LawyerProfile)
+            .WithMany(x => x.PracticeAreas)
+            .HasForeignKey(x => x.LawyerProfileId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<LawyerPracticeArea>()
+            .HasOne(x => x.PracticeArea)
+            .WithMany()
+            .HasForeignKey(x => x.PracticeAreaId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        // LawyerTown join
+        modelBuilder.Entity<LawyerTown>()
+            .HasKey(x => new { x.LawyerProfileId, x.TownId });
+
+        modelBuilder.Entity<LawyerTown>()
+            .HasOne(x => x.LawyerProfile)
+            .WithMany(x => x.TownsServed)
+            .HasForeignKey(x => x.LawyerProfileId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<LawyerTown>()
+            .HasOne(x => x.Town)
+            .WithMany()
+            .HasForeignKey(x => x.TownId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        // LawyerInquiry mappings
+        modelBuilder.Entity<LawyerInquiry>()
+            .HasOne(x => x.RequesterUser)
+            .WithMany()
+            .HasForeignKey(x => x.RequesterUserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<LawyerInquiry>()
+            .HasOne(x => x.LawyerProfile)
+            .WithMany(x => x.Inquiries)
+            .HasForeignKey(x => x.LawyerProfileId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<LawyerInquiry>()
+            .HasOne(x => x.PracticeArea)
+            .WithMany()
+            .HasForeignKey(x => x.PracticeAreaId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<LawyerInquiry>()
+            .HasOne(x => x.Town)
+            .WithMany()
+            .HasForeignKey(x => x.TownId)
+            .OnDelete(DeleteBehavior.SetNull);
 
         // ✅ LawReport -> Town optional relationship (NO breaking)
         modelBuilder.Entity<LawReport>(b =>
