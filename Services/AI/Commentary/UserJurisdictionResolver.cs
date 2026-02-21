@@ -14,73 +14,94 @@ namespace LawAfrica.API.Services.Ai.Commentary
 
         public async Task<UserJurisdictionContext> ResolveAsync(int userId, CancellationToken ct)
         {
-            // Load user's country. If missing, fallback to institution country.
+            // Pull user + institution country ids + identity fields in one query
             var u = await _db.Users
                 .AsNoTracking()
                 .Where(x => x.Id == userId)
                 .Select(x => new
                 {
                     x.CountryId,
-                    InstitutionCountryId = x.Institution != null ? x.Institution.CountryId : (int?)null
+                    InstCountryId = x.Institution != null ? x.Institution.CountryId : (int?)null,
+                    x.FirstName,
+                    x.LastName,
+                    x.Username,
+                    x.City
                 })
                 .FirstOrDefaultAsync(ct);
 
-            var countryId = u?.CountryId ?? u?.InstitutionCountryId;
-
-            // If still unknown, default to Kenya (or first seed) but mark as unknown.
-            // You can change this default anytime.
-            if (countryId == null)
+            if (u == null)
             {
                 return new UserJurisdictionContext
                 {
                     CountryId = null,
-                    CountryName = "Unknown",
-                    CountryIso = "",
-                    RegionLabel = "Unknown",
-                    RegionCountryIds = EastAfricaIds(),
-                    AfricaCountryIds = await GetAllCountryIds(ct)
+                    CountryName = null,
+                    CountryIso = null,
+                    RegionLabel = "Africa",
+                    City = null,
+                    DisplayName = null
                 };
             }
 
-            var c = await _db.Countries.AsNoTracking()
-                .Where(x => x.Id == countryId.Value)
+            var effectiveCountryId = u.CountryId ?? u.InstCountryId;
+
+            string? displayName = $"{(u.FirstName ?? "").Trim()} {(u.LastName ?? "").Trim()}".Trim();
+            if (string.IsNullOrWhiteSpace(displayName))
+                displayName = (u.Username ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(displayName))
+                displayName = null;
+
+            if (effectiveCountryId == null)
+            {
+                // No country set -> return "unknown" but do NOT pretend Kenya
+                return new UserJurisdictionContext
+                {
+                    CountryId = null,
+                    CountryName = null,
+                    CountryIso = null,
+                    RegionLabel = "Africa",
+                    City = string.IsNullOrWhiteSpace(u.City) ? null : u.City.Trim(),
+                    DisplayName = displayName
+                };
+            }
+
+            var c = await _db.Countries
+                .AsNoTracking()
+                .Where(x => x.Id == effectiveCountryId.Value)
                 .Select(x => new { x.Id, x.Name, x.IsoCode })
                 .FirstOrDefaultAsync(ct);
 
-            var africaIds = await GetAllCountryIds(ct);
-            var regionIds = ResolveRegion(countryId.Value);
+            var iso = (c?.IsoCode ?? "").Trim().ToUpperInvariant();
+            var region = InferRegionFromIso(iso) ?? "Africa";
 
             return new UserJurisdictionContext
             {
                 CountryId = c?.Id,
-                CountryName = c?.Name ?? "Unknown",
-                CountryIso = c?.IsoCode ?? "",
-                RegionLabel = "East Africa", // current implementation
-                RegionCountryIds = regionIds,
-                AfricaCountryIds = africaIds
+                CountryName = string.IsNullOrWhiteSpace(c?.Name) ? null : c!.Name.Trim(),
+                CountryIso = string.IsNullOrWhiteSpace(iso) ? null : iso,
+                RegionLabel = region,
+                City = string.IsNullOrWhiteSpace(u.City) ? null : u.City.Trim(),
+                DisplayName = displayName
             };
         }
 
-        private async Task<List<int>> GetAllCountryIds(CancellationToken ct)
+        private static string? InferRegionFromIso(string? iso)
         {
-            return await _db.Countries.AsNoTracking()
-                .Select(x => x.Id)
-                .ToListAsync(ct);
-        }
+            var x = (iso ?? "").Trim().ToUpperInvariant();
+            if (string.IsNullOrWhiteSpace(x)) return null;
 
-        // For now, your platform seed includes KE/UG/TZ/RW/ZA.
-        // East Africa includes KE, UG, TZ, RW (+ Burundi, South Sudan if you add them later).
-        private static List<int> ResolveRegion(int userCountryId)
-        {
-            // If later you add a Region table, we replace this with DB-driven mapping.
-            return EastAfricaIds();
-        }
+            if (x is "KE" or "UG" or "TZ" or "RW" or "BI" or "SS" or "ET" or "SO")
+                return "East Africa";
 
-        private static List<int> EastAfricaIds()
-        {
-            // With your current seed:
-            // KE=1, UG=2, TZ=3, RW=4 (from your seed)
-            return new List<int> { 1, 2, 3, 4 };
+            if (x is "NG" or "GH" or "SN" or "CI")
+                return "West Africa";
+
+            if (x is "ZA" or "BW" or "ZW" or "ZM" or "NA")
+                return "Southern Africa";
+
+            if (x is "EG" or "MA" or "TN" or "DZ")
+                return "North Africa";
+
+            return "Africa";
         }
     }
 }

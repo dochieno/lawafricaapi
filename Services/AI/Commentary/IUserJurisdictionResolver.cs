@@ -8,6 +8,12 @@
         public string RegionLabel { get; set; } = ""; // e.g. "East Africa"
         public List<int> RegionCountryIds { get; set; } = new();
         public List<int> AfricaCountryIds { get; set; } = new();
+        // ✅ user identity for nicer responses
+        public string? FirstName { get; set; }
+        public string? LastName { get; set; }
+        public string? DisplayName { get; set; }    // convenience
+
+        public string? City { get; set; }
     }
 
     public interface IUserJurisdictionResolver
