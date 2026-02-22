@@ -39,7 +39,16 @@ namespace LawAfrica.API.Controllers
             {
                 var userId = User.GetUserId();
 
-                var x = await _directory.GetLawyerAsync(id, ct);
+                var x = await _db.LawyerProfiles
+                    .AsNoTracking()
+                    .Include(p => p.User)
+                    .Include(p => p.HighestCourtAllowed)
+                    .Include(p => p.PrimaryTown)!.ThenInclude(t => t.Country)
+                    .Include(p => p.PracticeAreas).ThenInclude(pa => pa.PracticeArea)
+                    .Include(p => p.TownsServed).ThenInclude(ts => ts.Town)
+                    .Include(p => p.ServiceOfferings).ThenInclude(s => s.LawyerService)
+                    .FirstOrDefaultAsync(p => p.Id == id && p.IsActive, ct);
+
                 if (x == null) return NotFound(new { message = "Lawyer not found." });
 
                 var dto = new LawyerDetailDto
@@ -66,7 +75,22 @@ namespace LawAfrica.API.Controllers
                     Latitude = x.Latitude,
                     Longitude = x.Longitude,
 
-                    ProfileImageUrl = x.User?.ProfileImageUrl
+                    ProfileImageUrl = x.User?.ProfileImageUrl,
+
+                    // ✅ NEW (add these properties in LawyerDetailDto)
+                    ServiceOfferings = x.ServiceOfferings
+                        .OrderBy(s => s.LawyerService.Name)
+                        .Select(s => new LawyerServiceOfferingDto
+                        {
+                            LawyerServiceId = s.LawyerServiceId,
+                            ServiceName = s.LawyerService.Name,
+                            Currency = s.Currency,
+                            MinFee = s.MinFee,
+                            MaxFee = s.MaxFee,
+                            BillingUnit = s.BillingUnit,
+                            Notes = s.Notes
+                        })
+                        .ToList()
                 };
 
                 return Ok(dto);

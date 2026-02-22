@@ -39,5 +39,6 @@ namespace LawAfrica.API.DTOs.Lawyers
         public List<int> TownIdsServed { get; set; } = new();
         public List<int> PracticeAreaIds { get; set; } = new();
         public List<LawyerServiceOfferingUpsertDto> Services { get; set; } = new();
+        public List<LawyerServiceOfferingUpsertDto> ServiceOfferings { get; set; } = new();
     }
 }

@@ -2,6 +2,17 @@
 
 namespace LawAfrica.API.DTOs.Lawyers
 {
+    public class LawyerServiceOfferingDto
+    {
+        public int LawyerServiceId { get; set; }
+        public string ServiceName { get; set; } = "";
+        public string? Currency { get; set; }
+        public decimal? MinFee { get; set; }
+        public decimal? MaxFee { get; set; }
+        public string? BillingUnit { get; set; }
+        public string? Notes { get; set; }
+    }
+
     public class LawyerDetailDto
     {
         public int Id { get; set; }
@@ -28,5 +39,8 @@ namespace LawAfrica.API.DTOs.Lawyers
         public double? Longitude { get; set; }
 
         public string? ProfileImageUrl { get; set; }
+
+        // ✅ NEW: Services + rate card
+        public List<LawyerServiceOfferingDto> ServiceOfferings { get; set; } = new();
     }
 }

@@ -18,5 +18,7 @@ namespace LawAfrica.API.DTOs.Lawyers
 
         [MaxLength(800)]
         public string? Notes { get; set; }
+        [MaxLength(40)]
+        public string? BillingUnit { get; set; } // e.g. Consultation, Hour, Fixed, Negotiable
     }
 }

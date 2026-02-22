@@ -24,5 +24,7 @@ namespace LawAfrica.API.Models.Lawyers
 
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public DateTime? UpdatedAt { get; set; }
+        [MaxLength(40)]
+        public string? BillingUnit { get; set; } // e.g. Consultation, Hour, Fixed, Negotiable
     }
 }
