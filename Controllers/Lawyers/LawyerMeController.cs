@@ -40,6 +40,7 @@ namespace LawAfrica.API.Controllers
                     .Include(x => x.HighestCourtAllowed)
                     .Include(x => x.PracticeAreas).ThenInclude(pa => pa.PracticeArea)
                     .Include(x => x.TownsServed).ThenInclude(ts => ts.Town)
+                    .Include(x => x.ServiceOfferings).ThenInclude(s => s.LawyerService)
                     .FirstOrDefaultAsync(x => x.UserId == userId, ct);
 
                 if (p == null) return Ok(null);
@@ -70,7 +71,22 @@ namespace LawAfrica.API.Controllers
                     isActive = p.IsActive,
 
                     townIdsServed = p.TownsServed.Select(t => t.TownId).Distinct().ToList(),
-                    practiceAreaIds = p.PracticeAreas.Select(a => a.PracticeAreaId).Distinct().ToList()
+                    practiceAreaIds = p.PracticeAreas.Select(a => a.PracticeAreaId).Distinct().ToList(),
+
+                    // ✅ NEW: services + rate cards
+                    serviceOfferings = p.ServiceOfferings
+                        .OrderBy(s => s.LawyerServiceId)
+                        .Select(s => new
+                        {
+                            lawyerServiceId = s.LawyerServiceId,
+                            name = s.LawyerService != null ? s.LawyerService.Name : "",
+                            currency = s.Currency,
+                            minFee = s.MinFee,
+                            maxFee = s.MaxFee,
+                            unit = s.Unit.ToString(),
+                            notes = s.Notes
+                        })
+                        .ToList()
                 });
             }
             catch (Exception ex)
@@ -126,7 +142,6 @@ namespace LawAfrica.API.Controllers
                     .Distinct()
                     .ToList();
 
-                // Ensure primary town is included as served area (nice UX)
                 if (!servedTownIds.Contains(dto.PrimaryTownId))
                     servedTownIds.Add(dto.PrimaryTownId);
 
@@ -156,10 +171,29 @@ namespace LawAfrica.API.Controllers
                         return BadRequest(new { message = "One or more PracticeAreaIds are invalid." });
                 }
 
-                // ✅ Upsert profile
+                // ✅ NEW: validate services list (master list, active)
+                var services = (dto.Services ?? new List<LawyerServiceOfferingUpsertDto>())
+                    .Where(x => x.LawyerServiceId > 0)
+                    .GroupBy(x => x.LawyerServiceId)
+                    .Select(g => g.First())
+                    .ToList();
+
+                if (services.Count > 0)
+                {
+                    var serviceIds = services.Select(x => x.LawyerServiceId).ToList();
+                    var count = await _db.LawyerServices
+                        .AsNoTracking()
+                        .CountAsync(s => serviceIds.Contains(s.Id) && s.IsActive, ct);
+
+                    if (count != serviceIds.Count)
+                        return BadRequest(new { message = "One or more selected services are invalid." });
+                }
+
+                // ✅ Upsert profile (include offerings)
                 var p = await _db.LawyerProfiles
                     .Include(x => x.TownsServed)
                     .Include(x => x.PracticeAreas)
+                    .Include(x => x.ServiceOfferings)
                     .FirstOrDefaultAsync(x => x.UserId == userId, ct);
 
                 var now = DateTime.UtcNow;
@@ -179,7 +213,6 @@ namespace LawAfrica.API.Controllers
                 {
                     p.UpdatedAt = now;
 
-                    // If previously rejected/suspended, re-apply goes back to Pending
                     if (p.VerificationStatus == LawyerVerificationStatus.Rejected ||
                         p.VerificationStatus == LawyerVerificationStatus.Suspended)
                     {
@@ -202,18 +235,38 @@ namespace LawAfrica.API.Controllers
                 p.Latitude = dto.Latitude;
                 p.Longitude = dto.Longitude;
 
-                // Replace joins (clear then add)
+                // Replace joins: towns served
                 p.TownsServed.Clear();
                 foreach (var tid in servedTownIds)
                     p.TownsServed.Add(new LawyerTown { TownId = tid, IsOfficeLocation = (tid == dto.PrimaryTownId) });
 
+                // Replace joins: practice areas
                 p.PracticeAreas.Clear();
                 foreach (var pid in practiceAreaIds)
                     p.PracticeAreas.Add(new LawyerPracticeArea { PracticeAreaId = pid });
 
+                // ✅ Replace joins: services + rate cards
+                p.ServiceOfferings.Clear();
+                foreach (var s in services)
+                {
+                    var currency = (s.Currency ?? "KES").Trim().ToUpperInvariant();
+                    if (currency.Length > 10) currency = currency.Substring(0, 10);
+                    if (string.IsNullOrWhiteSpace(currency)) currency = "KES";
+
+                    p.ServiceOfferings.Add(new LawyerServiceOffering
+                    {
+                        LawyerServiceId = s.LawyerServiceId,
+                        Currency = currency,
+                        MinFee = s.MinFee,
+                        MaxFee = s.MaxFee,
+                        Unit = s.Unit,
+                        Notes = string.IsNullOrWhiteSpace(s.Notes) ? null : s.Notes.Trim(),
+                        CreatedAt = now
+                    });
+                }
+
                 await _db.SaveChangesAsync(ct);
 
-                // Return fresh minimal payload
                 return Ok(new
                 {
                     message = "Lawyer profile submitted successfully.",

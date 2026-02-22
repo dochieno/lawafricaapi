@@ -143,9 +143,11 @@ public class ApplicationDbContext : DbContext
     public DbSet<LawyerPracticeArea> LawyerPracticeAreas => Set<LawyerPracticeArea>();
     public DbSet<LawyerTown> LawyerTowns => Set<LawyerTown>();
     public DbSet<LawyerInquiry> LawyerInquiries => Set<LawyerInquiry>();
+    public DbSet<LawyerService> LawyerServices => Set<LawyerService>();
+    public DbSet<LawyerServiceOffering> LawyerServiceOfferings => Set<LawyerServiceOffering>();
 
 
-protected override void OnModelCreating(ModelBuilder modelBuilder)
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
 
@@ -367,7 +369,40 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
             b.Property(x => x.NextValue).IsRequired();
         });
 
+        // LawyerService master
+        modelBuilder.Entity<LawyerService>(b =>
+        {
+            b.ToTable("LawyerServices");
+            b.HasKey(x => x.Id);
 
+            b.Property(x => x.Name).HasMaxLength(140).IsRequired();
+            b.Property(x => x.Slug).HasMaxLength(140);
+            b.HasIndex(x => x.Name);
+            b.HasIndex(x => new { x.IsActive, x.SortOrder });
+        });
+
+        // LawyerServiceOffering join + rate card
+        modelBuilder.Entity<LawyerServiceOffering>(b =>
+        {
+            b.ToTable("LawyerServiceOfferings");
+            b.HasKey(x => new { x.LawyerProfileId, x.LawyerServiceId });
+
+            b.Property(x => x.Currency).HasMaxLength(10).IsRequired();
+            b.Property(x => x.MinFee).HasColumnType("numeric(18,2)");
+            b.Property(x => x.MaxFee).HasColumnType("numeric(18,2)");
+            b.Property(x => x.Unit).HasConversion<short>();
+            b.Property(x => x.Notes).HasMaxLength(800);
+
+            b.HasOne(x => x.LawyerProfile)
+                .WithMany(p => p.ServiceOfferings)
+                .HasForeignKey(x => x.LawyerProfileId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            b.HasOne(x => x.LawyerService)
+                .WithMany()
+                .HasForeignKey(x => x.LawyerServiceId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
         // ...
 
         modelBuilder.Entity<LawReportContentBlock>(e =>

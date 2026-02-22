@@ -55,5 +55,6 @@ namespace LawAfrica.API.Models.Lawyers
         public ICollection<LawyerPracticeArea> PracticeAreas { get; set; } = new List<LawyerPracticeArea>();
         public ICollection<LawyerTown> TownsServed { get; set; } = new List<LawyerTown>();
         public ICollection<LawyerInquiry> Inquiries { get; set; } = new List<LawyerInquiry>();
+        public ICollection<LawyerServiceOffering> ServiceOfferings { get; set; } = new List<LawyerServiceOffering>();
     }
 }

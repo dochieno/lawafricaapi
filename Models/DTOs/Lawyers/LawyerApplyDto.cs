@@ -38,5 +38,6 @@ namespace LawAfrica.API.DTOs.Lawyers
         // Replace lists on save
         public List<int> TownIdsServed { get; set; } = new();
         public List<int> PracticeAreaIds { get; set; } = new();
+        public List<LawyerServiceOfferingUpsertDto> Services { get; set; } = new();
     }
 }

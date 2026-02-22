@@ -37,7 +37,6 @@ namespace LawAfrica.API.Controllers
         {
             try
             {
-                // Logged-in required (also helps ensure consistent behavior)
                 var userId = User.GetUserId();
 
                 var x = await _directory.GetLawyerAsync(id, ct);
@@ -205,7 +204,6 @@ namespace LawAfrica.API.Controllers
         // -------------------------
         // LOOKUP: Towns (for dropdown)
         // GET /api/lawyers/towns?countryId=1&q=nai&take=200
-        // NOTE: convenience alias to avoid frontend calling /api/towns
         // -------------------------
         [HttpGet("towns")]
         public async Task<IActionResult> TownsLookup(
@@ -263,7 +261,6 @@ namespace LawAfrica.API.Controllers
         // -------------------------
         // LOOKUP: Courts (for dropdown)
         // GET /api/lawyers/courts?countryId=1&q=high&take=200
-        // NOTE: public lookup for logged-in users (CourtsController is admin-only)
         // -------------------------
         [HttpGet("courts")]
         public async Task<IActionResult> CourtsLookup(
@@ -312,6 +309,58 @@ namespace LawAfrica.API.Controllers
                 return StatusCode(500, new
                 {
                     message = "Failed to load courts.",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
+
+        // -------------------------
+        // LOOKUP: Services (for dropdown)
+        // GET /api/lawyers/services?q=consul
+        // -------------------------
+        [HttpGet("services")]
+        public async Task<IActionResult> ServicesLookup(
+            [FromQuery] string? q = null,
+            [FromQuery] int take = 200,
+            CancellationToken ct = default)
+        {
+            q = (q ?? "").Trim();
+            take = Math.Clamp(take, 1, 500);
+
+            try
+            {
+                var userId = User.GetUserId();
+
+                var query = _db.LawyerServices
+                    .AsNoTracking()
+                    .Where(x => x.IsActive);
+
+                if (!string.IsNullOrWhiteSpace(q))
+                {
+                    query = query.Where(x =>
+                        x.Name.Contains(q) ||
+                        (x.Slug != null && x.Slug.Contains(q)));
+                }
+
+                var items = await query
+                    .OrderBy(x => x.SortOrder)
+                    .ThenBy(x => x.Name)
+                    .Take(take)
+                    .Select(x => new
+                    {
+                        id = x.Id,
+                        name = x.Name
+                    })
+                    .ToListAsync(ct);
+
+                return Ok(items);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "Failed to load services.",
                     detail = ex.Message,
                     type = ex.GetType().Name
                 });
