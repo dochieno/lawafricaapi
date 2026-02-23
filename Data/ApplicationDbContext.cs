@@ -74,6 +74,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<LegalDocument> LegalDocuments => Set<LegalDocument>();
     public DbSet<LegalDocumentNode> LegalDocumentNodes => Set<LegalDocumentNode>();
     public DbSet<LegalDocumentNote> LegalDocumentNotes { get; set; }
+    public DbSet<LegalDocumentCategoryMeta> LegalDocumentCategoryMetas => Set<LegalDocumentCategoryMeta>();
+    public DbSet<LegalDocumentSubCategory> LegalDocumentSubCategories => Set<LegalDocumentSubCategory>();
     public DbSet<LegalDocumentProgress> LegalDocumentProgress { get; set; } = null!;
     public DbSet<UserLibrary> UserLibraries { get; set; }
     public DbSet<DocumentTextIndex> DocumentTextIndexes { get; set; } = null!;
@@ -166,6 +168,33 @@ public class ApplicationDbContext : DbContext
         modelBuilder.Entity<Role>().HasData(
             new Role { Id = 1, Name = "Admin" },
             new Role { Id = 2, Name = "User" }
+        );
+
+        // =========================================================
+        // LegalDocumentCategoryMeta (lookup for enum categories)
+        // - Id MUST match (int)LegalDocumentCategory
+        // =========================================================
+        modelBuilder.Entity<LegalDocumentCategoryMeta>(b =>
+        {
+            b.ToTable("LegalDocumentCategoryMetas");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Code).HasMaxLength(80).IsRequired();
+            b.Property(x => x.Name).HasMaxLength(120).IsRequired();
+            b.Property(x => x.Description).HasMaxLength(800);
+
+            b.HasIndex(x => x.Code).IsUnique();
+            b.HasIndex(x => new { x.IsActive, x.SortOrder });
+        });
+
+        // Seed existing enum categories ONLY (do NOT add Gazette yet if enum doesn’t have it)
+        modelBuilder.Entity<LegalDocumentCategoryMeta>().HasData(
+            new LegalDocumentCategoryMeta { Id = 1, Code = "commentaries", Name = "Commentaries", SortOrder = 10, IsActive = true },
+            new LegalDocumentCategoryMeta { Id = 2, Code = "international_titles", Name = "International Titles", SortOrder = 20, IsActive = true },
+            new LegalDocumentCategoryMeta { Id = 3, Code = "journals", Name = "Journals", SortOrder = 30, IsActive = true },
+            new LegalDocumentCategoryMeta { Id = 4, Code = "law_reports", Name = "Law Reports", SortOrder = 40, IsActive = true },
+            new LegalDocumentCategoryMeta { Id = 5, Code = "statutes", Name = "Statutes", SortOrder = 50, IsActive = true },
+            new LegalDocumentCategoryMeta { Id = 6, Code = "llr_services", Name = "LLR Services", SortOrder = 60, IsActive = true }
         );
 
         // =========================================================
@@ -768,10 +797,22 @@ public class ApplicationDbContext : DbContext
             .OnDelete(DeleteBehavior.Cascade);
 
         modelBuilder.Entity<LegalDocument>()
-            .HasOne(x => x.VatRate)
-            .WithMany()
-            .HasForeignKey(x => x.VatRateId)
-            .OnDelete(DeleteBehavior.Restrict);
+                    .HasOne(x => x.VatRate)
+                    .WithMany()
+                    .HasForeignKey(x => x.VatRateId)
+                    .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<LegalDocument>()
+                    .HasOne(x => x.SubCategory)
+                    .WithMany()
+                    .HasForeignKey(x => x.SubCategoryId)
+                    .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<LegalDocument>()
+            .HasIndex(x => new { x.CountryId, x.Category, x.SubCategoryId });
+
+        modelBuilder.Entity<LegalDocument>()
+            .HasIndex(x => new { x.Category, x.SubCategoryId });
 
         modelBuilder.Entity<UserLibrary>()
             .HasIndex(x => new { x.UserId, x.LegalDocumentId })

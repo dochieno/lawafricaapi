@@ -62,6 +62,9 @@ public class LegalDocument
 
     public LawAfrica.API.Models.Tax.VatRate? VatRate { get; set; }
 
+    public int? SubCategoryId { get; set; }
+    public LegalDocumentSubCategory? SubCategory { get; set; }
+
     // ✅ 1:1 child (optional)
     public ICollection<ContentProductLegalDocument> ProductDocuments { get; set; } = new List<ContentProductLegalDocument>();
     public ICollection<LegalDocumentTocEntry> TocEntries { get; set; } = new List<LegalDocumentTocEntry>();

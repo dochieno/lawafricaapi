@@ -18,6 +18,8 @@ namespace LawAfrica.API.Models.DTOs
         [Required]
         public LegalDocumentCategory Category { get; set; }
 
+        public int? SubCategoryId { get; set; }  // ✅ NEW
+
         [Required]
         public int CountryId { get; set; }
 

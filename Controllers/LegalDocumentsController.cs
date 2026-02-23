@@ -16,6 +16,7 @@ namespace LawAfrica.API.Controllers
 {
     [ApiController]
     [Route("api/legal-documents")]
+    [Authorize] // ✅ Mandatory auth for all endpoints in this controller (admin endpoints already enforce stronger rules)
     public class LegalDocumentsController : ControllerBase
     {
         private readonly ApplicationDbContext _db;
@@ -31,11 +32,16 @@ namespace LawAfrica.API.Controllers
         [HttpGet]
         public async Task<IActionResult> GetAll()
         {
-            var docs = await _db.LegalDocuments
-                .AsNoTracking()
-                .Include(d => d.Country)
-                .Where(d => d.Status == LegalDocumentStatus.Published)
-                .Select(d => new LegalDocumentListDto
+            // ✅ Join CategoryMeta + include SubCategory without changing existing behavior
+            var docs = await (
+                from d in _db.LegalDocuments
+                    .AsNoTracking()
+                    .Include(x => x.Country)
+                    .Include(x => x.SubCategory)
+                join cm in _db.LegalDocumentCategoryMetas.AsNoTracking()
+                    on (int)d.Category equals cm.Id
+                where d.Status == LegalDocumentStatus.Published
+                select new LegalDocumentListDto
                 {
                     Id = d.Id,
                     Title = d.Title,
@@ -43,25 +49,42 @@ namespace LawAfrica.API.Controllers
                     Author = d.Author,
                     Publisher = d.Publisher,
                     Edition = d.Edition,
+
+                    // Backward compatible
                     Category = d.Category.ToString(),
+
+                    // ✅ NEW: stable + display-friendly category fields
+                    CategoryId = (int)d.Category,
+                    CategoryCode = cm.Code,
+                    CategoryName = cm.Name,
+
+                    // ✅ NEW: subcategory fields (nullable)
+                    SubCategoryId = d.SubCategoryId,
+                    SubCategoryCode = d.SubCategory != null ? d.SubCategory.Code : null,
+                    SubCategoryName = d.SubCategory != null ? d.SubCategory.Name : null,
+
                     CountryId = d.CountryId,
                     CountryName = d.Country.Name,
+
                     FileType = d.FileType,
                     PageCount = d.PageCount,
                     ChapterCount = d.ChapterCount,
+
                     IsPremium = d.IsPremium,
                     Version = d.Version,
                     Status = d.Status.ToString(),
                     PublishedAt = d.PublishedAt,
                     CoverImagePath = d.CoverImagePath,
+
                     AllowPublicPurchase = d.AllowPublicPurchase,
                     PublicPrice = d.PublicPrice,
                     PublicCurrency = d.PublicCurrency,
                     VatRateId = d.VatRateId,
                     IsTaxInclusive = d.IsTaxInclusive,
 
-                })
-                .ToListAsync();
+                    Kind = d.Kind
+                }
+            ).ToListAsync();
 
             return Ok(docs);
         }
@@ -69,11 +92,15 @@ namespace LawAfrica.API.Controllers
         [HttpGet("{id}")]
         public async Task<IActionResult> GetById(int id)
         {
-            var doc = await _db.LegalDocuments
-                .AsNoTracking()
-                .Include(d => d.Country)
-                .Where(d => d.Id == id)
-                .Select(d => new LegalDocumentDetailDto
+            var doc = await (
+                from d in _db.LegalDocuments
+                    .AsNoTracking()
+                    .Include(x => x.Country)
+                    .Include(x => x.SubCategory)
+                join cm in _db.LegalDocumentCategoryMetas.AsNoTracking()
+                    on (int)d.Category equals cm.Id
+                where d.Id == id
+                select new LegalDocumentDetailDto
                 {
                     Id = d.Id,
                     Title = d.Title,
@@ -82,27 +109,41 @@ namespace LawAfrica.API.Controllers
                     Author = d.Author,
                     Publisher = d.Publisher,
                     Edition = d.Edition,
+
+                    // Backward compatible
                     Category = d.Category.ToString(),
+
+                    // ✅ NEW
+                    CategoryId = (int)d.Category,
+                    CategoryCode = cm.Code,
+                    CategoryName = cm.Name,
+
+                    SubCategoryId = d.SubCategoryId,
+                    SubCategoryCode = d.SubCategory != null ? d.SubCategory.Code : null,
+                    SubCategoryName = d.SubCategory != null ? d.SubCategory.Name : null,
+
                     CountryId = d.CountryId,
                     CountryName = d.Country.Name,
+
                     FileType = d.FileType,
                     PageCount = d.PageCount,
                     ChapterCount = d.ChapterCount,
                     FileSizeBytes = d.FileSizeBytes,
+
                     IsPremium = d.IsPremium,
                     Version = d.Version,
                     Status = d.Status.ToString(),
                     PublishedAt = d.PublishedAt,
                     CreatedAt = d.CreatedAt,
                     CoverImagePath = d.CoverImagePath,
+
                     AllowPublicPurchase = d.AllowPublicPurchase,
                     PublicPrice = d.PublicPrice,
                     VatRateId = d.VatRateId,
-                    
                     IsTaxInclusive = d.IsTaxInclusive,
                     PublicCurrency = d.PublicCurrency
-                })
-                .FirstOrDefaultAsync();
+                }
+            ).FirstOrDefaultAsync();
 
             if (doc == null)
                 return NotFound();
@@ -121,6 +162,22 @@ namespace LawAfrica.API.Controllers
             if (!countryExists)
                 return BadRequest("Invalid countryId.");
 
+            // ✅ Validate SubCategoryId (nullable)
+            if (request.SubCategoryId.HasValue)
+            {
+                var sc = await _db.LegalDocumentSubCategories
+                    .AsNoTracking()
+                    .Where(x => x.Id == request.SubCategoryId.Value && x.IsActive)
+                    .Select(x => new { x.Id, x.Category })
+                    .FirstOrDefaultAsync();
+
+                if (sc == null)
+                    return BadRequest("Invalid SubCategoryId.");
+
+                if (sc.Category != request.Category)
+                    return BadRequest("SubCategoryId does not match selected Category.");
+            }
+
             // Optional product mapping validity check
             if (request.ContentProductId.HasValue)
             {
@@ -138,7 +195,6 @@ namespace LawAfrica.API.Controllers
                     return BadRequest("Invalid VatRateId.");
             }
 
-
             var title = (request.Title ?? "").Trim();
             var description = (request.Description ?? "").Trim();
             var author = (request.Author ?? "").Trim();
@@ -155,9 +211,9 @@ namespace LawAfrica.API.Controllers
 
             var document = new LegalDocument
             {
-
                 VatRateId = vatRateId,
                 IsTaxInclusive = vatRateId.HasValue ? request.IsTaxInclusive : false,
+
                 Title = title,
                 Description = string.IsNullOrWhiteSpace(description) ? null : description,
                 Author = string.IsNullOrWhiteSpace(author) ? null : author,
@@ -165,6 +221,7 @@ namespace LawAfrica.API.Controllers
                 Edition = string.IsNullOrWhiteSpace(edition) ? null : edition,
 
                 Category = request.Category,
+                SubCategoryId = request.SubCategoryId, // ✅ NEW
                 CountryId = request.CountryId,
 
                 FilePath = filePath,
@@ -182,7 +239,7 @@ namespace LawAfrica.API.Controllers
                 AllowPublicPurchase = request.AllowPublicPurchase,
                 PublicCurrency = string.IsNullOrWhiteSpace(publicCurrency) ? "KES" : publicCurrency,
 
-                // ✅ NEW: store kind
+                // ✅ store kind
                 Kind = request.Kind,
 
                 CreatedAt = DateTime.UtcNow
@@ -219,7 +276,6 @@ namespace LawAfrica.API.Controllers
             });
         }
 
-
         [Authorize(Roles = "Admin")]
         [HttpPut("{id}")]
         public async Task<IActionResult> Update(int id, [FromBody] LegalDocumentUpdateRequest request)
@@ -232,6 +288,22 @@ namespace LawAfrica.API.Controllers
             var countryExists = await _db.Countries.AnyAsync(c => c.Id == request.CountryId);
             if (!countryExists)
                 return BadRequest("Invalid countryId.");
+
+            // ✅ Validate SubCategoryId (nullable)
+            if (request.SubCategoryId.HasValue)
+            {
+                var sc = await _db.LegalDocumentSubCategories
+                    .AsNoTracking()
+                    .Where(x => x.Id == request.SubCategoryId.Value && x.IsActive)
+                    .Select(x => new { x.Id, x.Category })
+                    .FirstOrDefaultAsync();
+
+                if (sc == null)
+                    return BadRequest("Invalid SubCategoryId.");
+
+                if (sc.Category != request.Category)
+                    return BadRequest("SubCategoryId does not match selected Category.");
+            }
 
             int? vatRateId = request.VatRateId;
 
@@ -252,6 +324,7 @@ namespace LawAfrica.API.Controllers
             doc.IsTaxInclusive = vatRateId.HasValue ? request.IsTaxInclusive : false;
 
             doc.Category = request.Category;
+            doc.SubCategoryId = request.SubCategoryId; // ✅ NEW
             doc.CountryId = request.CountryId;
 
             doc.IsPremium = request.IsPremium;
@@ -332,91 +405,89 @@ namespace LawAfrica.API.Controllers
             }
         }
 
-                // ✅ Download Endpoint (SINGLE SOURCE OF TRUTH = DocumentEntitlementService)
-                [Authorize]
-                [HttpGet("{id}/download")]
-                public async Task<IActionResult> Download(
-                    int id,
-                    [FromServices] DocumentEntitlementService entitlementService,
-                    [FromServices] FileStorageService storage)
+        // ✅ Download Endpoint (SINGLE SOURCE OF TRUTH = DocumentEntitlementService)
+        [Authorize]
+        [HttpGet("{id}/download")]
+        public async Task<IActionResult> Download(
+            int id,
+            [FromServices] DocumentEntitlementService entitlementService,
+            [FromServices] FileStorageService storage)
+        {
+            var doc = await _db.LegalDocuments.FindAsync(id);
+            if (doc == null || string.IsNullOrWhiteSpace(doc.FilePath))
+                return NotFound("Document not found or file missing.");
+
+            var userId = User.GetUserId();
+
+            // ✅ SINGLE SOURCE OF TRUTH
+            var decision = await entitlementService.GetEntitlementDecisionAsync(userId, doc);
+
+            // ✅ Hard blocks: institution inactive or seat exceeded
+            if (!decision.IsAllowed &&
+                (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
+                 decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded))
+            {
+                Response.Headers["X-Entitlement-Deny-Reason"] = decision.DenyReason.ToString();
+                if (!string.IsNullOrWhiteSpace(decision.Message))
+                    Response.Headers["X-Entitlement-Message"] = decision.Message;
+
+                // ✅ Ensure frontend can read these headers under CORS
+                Response.Headers["Access-Control-Expose-Headers"] =
+                    "Accept-Ranges, Content-Range, Content-Length, Content-Type, Content-Disposition, X-Document-Access, X-Entitlement-Deny-Reason, X-Entitlement-Message";
+
+                return StatusCode(StatusCodes.Status403Forbidden, new
                 {
-                    var doc = await _db.LegalDocuments.FindAsync(id);
-                    if (doc == null || string.IsNullOrWhiteSpace(doc.FilePath))
-                        return NotFound("Document not found or file missing.");
+                    message = decision.Message ?? "Access blocked. Please contact your administrator.",
+                    denyReason = decision.DenyReason.ToString(),
+                    canPurchaseIndividually = decision.CanPurchaseIndividually,
+                    purchaseDisabledReason = decision.PurchaseDisabledReason
+                });
+            }
 
-                    var userId = User.GetUserId();
+            // ✅ Not entitled: allow PreviewOnly to read the file (UI will limit pages).
+            if (decision.DenyReason == DocumentEntitlementDenyReason.NotEntitled)
+            {
+                // Allowed for preview UX.
+            }
 
-                    // ✅ SINGLE SOURCE OF TRUTH
-                    var decision = await entitlementService.GetEntitlementDecisionAsync(userId, doc);
+            var physicalPath = storage.ResolvePhysicalPathFromDbPath(doc.FilePath);
+            if (!System.IO.File.Exists(physicalPath))
+                return NotFound("File missing on server.");
 
-                    // ✅ Hard blocks: institution inactive or seat exceeded
-                    if (!decision.IsAllowed &&
-                        (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
-                         decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSeatLimitExceeded))
-                    {
-                        Response.Headers["X-Entitlement-Deny-Reason"] = decision.DenyReason.ToString();
-                        if (!string.IsNullOrWhiteSpace(decision.Message))
-                            Response.Headers["X-Entitlement-Message"] = decision.Message;
+            var contentType = doc.FileType switch
+            {
+                "pdf" => "application/pdf",
+                "epub" => "application/epub+zip",
+                _ => "application/octet-stream"
+            };
 
-                        // ✅ Ensure frontend can read these headers under CORS
-                        Response.Headers["Access-Control-Expose-Headers"] =
-                            "Accept-Ranges, Content-Range, Content-Length, Content-Type, Content-Disposition, X-Document-Access, X-Entitlement-Deny-Reason, X-Entitlement-Message";
+            // ✅ Inline open in browser
+            Response.Headers["Content-Disposition"] = $"inline; filename=\"{Path.GetFileName(physicalPath)}\"";
 
-                        return StatusCode(StatusCodes.Status403Forbidden, new
-                        {
-                            message = decision.Message ?? "Access blocked. Please contact your administrator.",
-                            denyReason = decision.DenyReason.ToString(),
-                            canPurchaseIndividually = decision.CanPurchaseIndividually,
-                            purchaseDisabledReason = decision.PurchaseDisabledReason
-                        });
-                    }
+            // ✅ Range + streaming friendliness
+            Response.Headers["Accept-Ranges"] = "bytes";
+            Response.Headers["Cache-Control"] = "private, max-age=0, must-revalidate";
+            Response.Headers["Pragma"] = "no-cache";
+            Response.Headers["X-Content-Type-Options"] = "nosniff";
+            Response.Headers["Cache-Control"] = "private, max-age=0, must-revalidate, no-transform";
 
-                    // ✅ Not entitled: allow PreviewOnly to read the file (UI will limit pages).
-                    // If you ever want NotEntitled to be blocked entirely, change this to a 403 return.
-                    if (decision.DenyReason == DocumentEntitlementDenyReason.NotEntitled)
-                    {
-                        // Allowed for preview UX.
-                    }
+            // ✅ Your access header (useful for debugging / UI)
+            Response.Headers["X-Document-Access"] =
+                decision.AccessLevel == DocumentAccessLevel.FullAccess ? "Full" : "Preview";
 
-                    var physicalPath = storage.ResolvePhysicalPathFromDbPath(doc.FilePath);
-                    if (!System.IO.File.Exists(physicalPath))
-                        return NotFound("File missing on server.");
+            // ✅ Allow browser JS to read key headers under CORS (especially Content-Range for pdf.js)
+            Response.Headers["Access-Control-Expose-Headers"] =
+                "Accept-Ranges, Content-Range, Content-Length, Content-Type, Content-Disposition, X-Document-Access, X-Entitlement-Deny-Reason, X-Entitlement-Message";
 
-                    var contentType = doc.FileType switch
-                    {
-                        "pdf" => "application/pdf",
-                        "epub" => "application/epub+zip",
-                        _ => "application/octet-stream"
-                    };
-
-                    // ✅ Inline open in browser
-                    Response.Headers["Content-Disposition"] = $"inline; filename=\"{Path.GetFileName(physicalPath)}\"";
-
-                    // ✅ Range + streaming friendliness
-                    Response.Headers["Accept-Ranges"] = "bytes"; // explicit (even though enableRangeProcessing handles it)
-                    Response.Headers["Cache-Control"] = "private, max-age=0, must-revalidate";
-                    Response.Headers["Pragma"] = "no-cache";
-                    Response.Headers["X-Content-Type-Options"] = "nosniff";
-                    Response.Headers["Cache-Control"] = "private, max-age=0, must-revalidate, no-transform";
-
-                    // ✅ Your access header (useful for debugging / UI)
-                    Response.Headers["X-Document-Access"] =
-                        decision.AccessLevel == DocumentAccessLevel.FullAccess ? "Full" : "Preview";
-
-                    // ✅ Allow browser JS to read key headers under CORS (especially Content-Range for pdf.js)
-                    Response.Headers["Access-Control-Expose-Headers"] =
-                        "Accept-Ranges, Content-Range, Content-Length, Content-Type, Content-Disposition, X-Document-Access, X-Entitlement-Deny-Reason, X-Entitlement-Message";
-
-                    return PhysicalFile(physicalPath, contentType, enableRangeProcessing: true);
-                }
-
+            return PhysicalFile(physicalPath, contentType, enableRangeProcessing: true);
+        }
 
         // ✅ Upload Cover (SAFE): accepts form keys "file" or "File"
         [Authorize(Roles = "Admin")]
         [HttpPost("{id}/cover")]
         [Consumes("multipart/form-data")]
-        [RequestSizeLimit(50_000_000)]       
-        [RequestFormLimits(MultipartBodyLengthLimit = 50_000_000)]        
+        [RequestSizeLimit(50_000_000)]
+        [RequestFormLimits(MultipartBodyLengthLimit = 50_000_000)]
         public async Task<IActionResult> UploadCover(
             int id,
             [FromForm] IFormFile? file,
@@ -459,7 +530,6 @@ namespace LawAfrica.API.Controllers
             }
         }
 
-
         [HttpGet("{id}/access")]
         [Authorize]
         public async Task<IActionResult> GetAccess(int id, [FromServices] DocumentEntitlementService entitlementService)
@@ -499,7 +569,6 @@ namespace LawAfrica.API.Controllers
                     CanPurchaseIndividually = true,
                     PurchaseDisabledReason = null,
 
-                    // new fields
                     RequiredProductId = null,
                     RequiredProductName = null,
                     RequiredAction = "None",
@@ -517,7 +586,6 @@ namespace LawAfrica.API.Controllers
 
             var decision = await entitlementService.GetEntitlementDecisionAsync(userId, doc);
 
-            // Institution hard blocks (seat / inactive) => BLOCKED
             var isHardBlocked =
                 !decision.IsAllowed &&
                 (decision.DenyReason == DocumentEntitlementDenyReason.InstitutionSubscriptionInactive ||
@@ -539,7 +607,6 @@ namespace LawAfrica.API.Controllers
                     CanPurchaseIndividually = decision.CanPurchaseIndividually,
                     PurchaseDisabledReason = decision.PurchaseDisabledReason,
 
-                    // new gate fields
                     RequiredProductId = decision.RequiredProductId,
                     RequiredProductName = decision.RequiredProductName,
                     RequiredAction = decision.RequiredAction switch
@@ -560,7 +627,6 @@ namespace LawAfrica.API.Controllers
                 });
             }
 
-            // Full access
             if (decision.AccessLevel == DocumentAccessLevel.FullAccess)
             {
                 return Ok(new DocumentAccessDto
@@ -577,7 +643,6 @@ namespace LawAfrica.API.Controllers
                     CanPurchaseIndividually = decision.CanPurchaseIndividually,
                     PurchaseDisabledReason = decision.PurchaseDisabledReason,
 
-
                     RequiredProductId = decision.RequiredProductId,
                     RequiredProductName = decision.RequiredProductName,
                     RequiredAction = decision.RequiredAction.ToString(),
@@ -593,9 +658,6 @@ namespace LawAfrica.API.Controllers
                 });
             }
 
-            // Preview-only (includes reports subscription gate + buy/subscribe gates)
-            // For reports: UI should use PreviewMaxChars/Paragraphs + HardStop.
-            // For PDFs: keep PreviewMaxPages for existing UI (backward compatibility).
             return Ok(new DocumentAccessDto
             {
                 DocumentId = id,
@@ -630,16 +692,12 @@ namespace LawAfrica.API.Controllers
             });
         }
 
-
-        // ✅ Reader Outline (Table of Contents) - logged-in users
-        // GET /api/legal-documents/{id}/outline
         [Authorize]
         [HttpGet("{id:int}/outline")]
         public async Task<IActionResult> GetOutline(
             int id,
             [FromServices] LegalDocumentTocService outlineService)
         {
-            // optional: ensure doc exists (prevents leaking whether entries exist)
             var exists = await _db.LegalDocuments
                 .AsNoTracking()
                 .AnyAsync(d => d.Id == id && d.Status == LegalDocumentStatus.Published);
@@ -647,13 +705,10 @@ namespace LawAfrica.API.Controllers
             if (!exists)
                 return NotFound("Document not found.");
 
-            // ✅ includeAdminFields = false for reader
             var items = await outlineService.GetTreeAsync(id, includeAdminFields: false);
 
-            // ✅ Return shape that your current reader code expects: res.data.items
             return Ok(new { items });
         }
-
 
         [HttpGet("{id:int}/availability")]
         public async Task<IActionResult> GetAvailability(int id, [FromServices] FileStorageService storage)
@@ -914,6 +969,5 @@ namespace LawAfrica.API.Controllers
                     : (hasFullAccess ? "Access granted." : $"Preview mode: first {DEFAULT_PREVIEW_MAX_PAGES} pages available.")
             });
         }
-
     }
 }

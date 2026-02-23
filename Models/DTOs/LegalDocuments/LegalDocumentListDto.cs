@@ -14,6 +14,15 @@ namespace LawAfrica.API.Models.DTOs.LegalDocuments
 
         public string Category { get; set; } = string.Empty;
 
+        // ✅ NEW (stable)
+        public int CategoryId { get; set; }
+        public string CategoryCode { get; set; } = string.Empty;
+        public string CategoryName { get; set; } = string.Empty;
+
+        public int? SubCategoryId { get; set; }
+        public string? SubCategoryCode { get; set; }
+        public string? SubCategoryName { get; set; }
+
         public int CountryId { get; set; }
         public string CountryName { get; set; } = string.Empty;
 

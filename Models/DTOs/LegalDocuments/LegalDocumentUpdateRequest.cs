@@ -15,6 +15,8 @@ namespace LawAfrica.API.Models.DTOs
         public int PageCount { get; set; }
         public LegalDocumentCategory Category { get; set; }
 
+        public int? SubCategoryId { get; set; }
+
         public int CountryId { get; set; }
 
         public bool IsPremium { get; set; }
