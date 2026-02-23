@@ -194,7 +194,8 @@ public class ApplicationDbContext : DbContext
             new LegalDocumentCategoryMeta { Id = 3, Code = "journals", Name = "Journals", SortOrder = 30, IsActive = true },
             new LegalDocumentCategoryMeta { Id = 4, Code = "law_reports", Name = "Law Reports", SortOrder = 40, IsActive = true },
             new LegalDocumentCategoryMeta { Id = 5, Code = "statutes", Name = "Statutes", SortOrder = 50, IsActive = true },
-            new LegalDocumentCategoryMeta { Id = 6, Code = "llr_services", Name = "LLR Services", SortOrder = 60, IsActive = true }
+            new LegalDocumentCategoryMeta { Id = 6, Code = "llr_services", Name = "LLR Services", SortOrder = 60, IsActive = true },
+            new LegalDocumentCategoryMeta { Id = 7, Code = "gazette", Name = "Gazette", SortOrder = 70, IsActive = true }
         );
 
         // =========================================================

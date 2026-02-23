@@ -7,6 +7,9 @@
         Journals = 3,
         LawReports = 4,
         Statutes = 5,
-        LLRServices = 6
+        LLRServices = 6,
+        Gazette = 7 // ✅ NEW
+
     }
+
 }
