@@ -31,6 +31,32 @@ namespace LawAfrica.API.Models.Lawyers
         public InquiryStatus Status { get; set; } = InquiryStatus.New;
 
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+        // ✅ keep UpdatedAt but also track lifecycle properly
         public DateTime? UpdatedAt { get; set; }
+
+        // ==========================================================
+        // ✅ NEW: workflow support
+        // ==========================================================
+        public DateTime? LastStatusChangedAtUtc { get; set; }
+
+        public DateTime? ContactedAtUtc { get; set; }
+        public DateTime? InProgressAtUtc { get; set; }
+        public DateTime? ClosedAtUtc { get; set; }
+
+        public InquiryOutcome? Outcome { get; set; }
+
+        public int? ClosedByUserId { get; set; }
+
+        [MaxLength(1000)]
+        public string? CloseNote { get; set; }
+
+        // ✅ rating (requester only after close)
+        public int? RatingStars { get; set; } // 1..5
+
+        [MaxLength(1000)]
+        public string? RatingComment { get; set; }
+
+        public DateTime? RatedAtUtc { get; set; }
     }
 }

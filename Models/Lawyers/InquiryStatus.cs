@@ -5,6 +5,9 @@
         New = 0,
         Contacted = 1,
         Closed = 2,
-        Spam = 3
+        Spam = 3,
+
+        // ✅ NEW (append only)
+        InProgress = 4
     }
 }

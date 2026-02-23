@@ -4,6 +4,7 @@
 using LawAfrica.API.Data;
 using LawAfrica.API.DTOs.Lawyers;
 using LawAfrica.API.Helpers;
+using LawAfrica.API.Models.Lawyers;
 using LawAfrica.API.Services.Lawyers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -156,6 +157,227 @@ namespace LawAfrica.API.Controllers
                 return StatusCode(500, new
                 {
                     message = "Failed to load inquiries for this lawyer.",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
+
+        // ==========================================================
+        // ✅ NEW ENDPOINTS FOR "MY INQUIRIES" WORKFLOW
+        // ==========================================================
+
+        // -------------------------
+        // Inquiry DETAIL (requester OR assigned lawyer)
+        // GET /api/lawyers/inquiries/{id}
+        // -------------------------
+        [HttpGet("{id:int}")]
+        public async Task<IActionResult> GetById([FromRoute] int id, CancellationToken ct)
+        {
+            try
+            {
+                var userId = User.GetUserId();
+
+                var x = await _inquiries.GetInquiryDetailAsync(id, userId, ct);
+
+                if (x == null)
+                    return NotFound(new { message = "Inquiry not found." });
+
+                return Ok(x);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return Forbid();
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "Failed to load inquiry detail.",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
+
+        // -------------------------
+        // Update status (lawyer-side; requester can close only)
+        // PATCH /api/lawyers/inquiries/{id}/status
+        // body: { status: "Contacted" | "InProgress" | "Closed" | "Spam", outcome?: "Resolved"... , note? }
+        // -------------------------
+        [HttpPatch("{id:int}/status")]
+        public async Task<IActionResult> PatchStatus(
+            [FromRoute] int id,
+            [FromBody] UpdateInquiryStatusRequestDto dto,
+            CancellationToken ct)
+        {
+            if (!ModelState.IsValid)
+                return ValidationProblem(ModelState);
+
+            try
+            {
+                var userId = User.GetUserId();
+
+                if (!Enum.TryParse<InquiryStatus>(dto.Status, ignoreCase: true, out var status))
+                    return BadRequest(new { message = "Invalid status." });
+
+                InquiryOutcome? outcome = null;
+                if (!string.IsNullOrWhiteSpace(dto.Outcome))
+                {
+                    if (!Enum.TryParse<InquiryOutcome>(dto.Outcome, ignoreCase: true, out var parsedOutcome))
+                        return BadRequest(new { message = "Invalid outcome." });
+
+                    outcome = parsedOutcome;
+                }
+
+                var updated = await _inquiries.UpdateStatusAsync(
+                    inquiryId: id,
+                    actorUserId: userId,
+                    status: status,
+                    outcome: outcome,
+                    note: dto.Note,
+                    ct: ct);
+
+                return Ok(new
+                {
+                    id = updated.Id,
+                    status = updated.Status.ToString(),
+                    outcome = updated.Outcome?.ToString(),
+                    updatedAt = updated.UpdatedAt
+                });
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound(new { message = "Inquiry not found." });
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return Forbid();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "Failed to update inquiry status.",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
+
+        // -------------------------
+        // Close inquiry (shortcut)
+        // POST /api/lawyers/inquiries/{id}/close
+        // body: { outcome: "Resolved" | "NotResolved" | "NoResponse" | "Declined" | "Duplicate", note? }
+        // -------------------------
+        [HttpPost("{id:int}/close")]
+        public async Task<IActionResult> Close(
+            [FromRoute] int id,
+            [FromBody] CloseInquiryRequestDto dto,
+            CancellationToken ct)
+        {
+            if (!ModelState.IsValid)
+                return ValidationProblem(ModelState);
+
+            try
+            {
+                var userId = User.GetUserId();
+
+                if (!Enum.TryParse<InquiryOutcome>(dto.Outcome, ignoreCase: true, out var outcome))
+                    return BadRequest(new { message = "Invalid outcome." });
+
+                var updated = await _inquiries.CloseAsync(
+                    inquiryId: id,
+                    actorUserId: userId,
+                    outcome: outcome,
+                    note: dto.Note,
+                    ct: ct);
+
+                return Ok(new
+                {
+                    id = updated.Id,
+                    status = updated.Status.ToString(),
+                    outcome = updated.Outcome?.ToString(),
+                    closedAt = updated.ClosedAtUtc
+                });
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound(new { message = "Inquiry not found." });
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return Forbid();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "Failed to close inquiry.",
+                    detail = ex.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
+
+        // -------------------------
+        // Rating (requester only; after Closed)
+        // POST /api/lawyers/inquiries/{id}/rating
+        // body: { stars: 1..5, comment? }
+        // -------------------------
+        [HttpPost("{id:int}/rating")]
+        public async Task<IActionResult> Rate(
+            [FromRoute] int id,
+            [FromBody] CreateInquiryRatingRequestDto dto,
+            CancellationToken ct)
+        {
+            if (!ModelState.IsValid)
+                return ValidationProblem(ModelState);
+
+            try
+            {
+                var userId = User.GetUserId();
+
+                var rated = await _inquiries.RateAsync(
+                    inquiryId: id,
+                    requesterUserId: userId,
+                    stars: dto.Stars,
+                    comment: dto.Comment,
+                    ct: ct);
+
+                return Ok(new
+                {
+                    id = rated.Id,
+                    ratingStars = rated.RatingStars,
+                    ratingComment = rated.RatingComment,
+                    ratedAt = rated.RatedAtUtc
+                });
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound(new { message = "Inquiry not found." });
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return Forbid();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "Failed to rate inquiry.",
                     detail = ex.Message,
                     type = ex.GetType().Name
                 });
