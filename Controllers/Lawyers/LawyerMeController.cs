@@ -73,18 +73,18 @@ namespace LawAfrica.API.Controllers
                     townIdsServed = p.TownsServed.Select(t => t.TownId).Distinct().ToList(),
                     practiceAreaIds = p.PracticeAreas.Select(a => a.PracticeAreaId).Distinct().ToList(),
 
-                    // ✅ NEW: services + rate cards
+                    // ✅ service offerings + rate card
                     serviceOfferings = p.ServiceOfferings
-                        .OrderBy(s => s.LawyerServiceId)
-                        .Select(s => new
+                        .OrderBy(x => x.LawyerService != null ? x.LawyerService.Name : "")
+                        .Select(x => new
                         {
-                            lawyerServiceId = s.LawyerServiceId,
-                            name = s.LawyerService != null ? s.LawyerService.Name : "",
-                            currency = s.Currency,
-                            minFee = s.MinFee,
-                            maxFee = s.MaxFee,
-                            unit = s.Unit.ToString(),
-                            notes = s.Notes
+                            lawyerServiceId = x.LawyerServiceId,
+                            serviceName = x.LawyerService != null ? x.LawyerService.Name : null,
+                            currency = x.Currency,
+                            minFee = x.MinFee,
+                            maxFee = x.MaxFee,
+                            billingUnit = x.BillingUnit,
+                            notes = x.Notes
                         })
                         .ToList()
                 });
@@ -142,6 +142,7 @@ namespace LawAfrica.API.Controllers
                     .Distinct()
                     .ToList();
 
+                // Ensure primary town is included
                 if (!servedTownIds.Contains(dto.PrimaryTownId))
                     servedTownIds.Add(dto.PrimaryTownId);
 
@@ -171,25 +172,48 @@ namespace LawAfrica.API.Controllers
                         return BadRequest(new { message = "One or more PracticeAreaIds are invalid." });
                 }
 
-                // ✅ NEW: validate services list (master list, active)
-                var services = (dto.Services ?? new List<LawyerServiceOfferingUpsertDto>())
-                    .Where(x => x.LawyerServiceId > 0)
+                // ✅ Accept BOTH dto.ServiceOfferings (canonical) and dto.Services (legacy/back-compat)
+                var offeringsSrc =
+                    (dto.ServiceOfferings != null && dto.ServiceOfferings.Count > 0)
+                        ? dto.ServiceOfferings
+                        : (dto.Services ?? new List<LawyerServiceOfferingUpsertDto>());
+
+                var offerings = (offeringsSrc ?? new List<LawyerServiceOfferingUpsertDto>())
+                    .Where(x => x != null && x.LawyerServiceId > 0)
                     .GroupBy(x => x.LawyerServiceId)
                     .Select(g => g.First())
                     .ToList();
 
-                if (services.Count > 0)
+                // ✅ Validate services exist + basic numeric checks
+                if (offerings.Count > 0)
                 {
-                    var serviceIds = services.Select(x => x.LawyerServiceId).ToList();
-                    var count = await _db.LawyerServices
-                        .AsNoTracking()
-                        .CountAsync(s => serviceIds.Contains(s.Id) && s.IsActive, ct);
+                    var ids = offerings.Select(x => x.LawyerServiceId).Distinct().ToList();
 
-                    if (count != serviceIds.Count)
-                        return BadRequest(new { message = "One or more selected services are invalid." });
+                    var svcCount = await _db.LawyerServices
+                        .AsNoTracking()
+                        .CountAsync(s => ids.Contains(s.Id) && s.IsActive, ct);
+
+                    if (svcCount != ids.Count)
+                        return BadRequest(new { message = "One or more selected Services are invalid/inactive." });
+
+                    foreach (var o in offerings)
+                    {
+                        var cur = (o.Currency ?? "").Trim();
+                        if (cur.Length > 0 && cur.Length > 10)
+                            return BadRequest(new { message = "Currency must be <= 10 chars." });
+
+                        if (o.MinFee.HasValue && o.MinFee.Value < 0)
+                            return BadRequest(new { message = "MinFee cannot be negative." });
+
+                        if (o.MaxFee.HasValue && o.MaxFee.Value < 0)
+                            return BadRequest(new { message = "MaxFee cannot be negative." });
+
+                        if (o.MinFee.HasValue && o.MaxFee.HasValue && o.MinFee.Value > o.MaxFee.Value)
+                            return BadRequest(new { message = "MinFee cannot be greater than MaxFee." });
+                    }
                 }
 
-                // ✅ Upsert profile (include offerings)
+                // ✅ Upsert profile
                 var p = await _db.LawyerProfiles
                     .Include(x => x.TownsServed)
                     .Include(x => x.PracticeAreas)
@@ -213,6 +237,7 @@ namespace LawAfrica.API.Controllers
                 {
                     p.UpdatedAt = now;
 
+                    // If previously rejected/suspended, re-apply goes back to Pending
                     if (p.VerificationStatus == LawyerVerificationStatus.Rejected ||
                         p.VerificationStatus == LawyerVerificationStatus.Suspended)
                     {
@@ -235,33 +260,48 @@ namespace LawAfrica.API.Controllers
                 p.Latitude = dto.Latitude;
                 p.Longitude = dto.Longitude;
 
-                // Replace joins: towns served
+                // Replace joins (clear then add)
                 p.TownsServed.Clear();
                 foreach (var tid in servedTownIds)
-                    p.TownsServed.Add(new LawyerTown { TownId = tid, IsOfficeLocation = (tid == dto.PrimaryTownId) });
+                {
+                    p.TownsServed.Add(new LawyerTown
+                    {
+                        TownId = tid,
+                        IsOfficeLocation = (tid == dto.PrimaryTownId)
+                    });
+                }
 
-                // Replace joins: practice areas
                 p.PracticeAreas.Clear();
                 foreach (var pid in practiceAreaIds)
-                    p.PracticeAreas.Add(new LawyerPracticeArea { PracticeAreaId = pid });
-
-                // ✅ Replace joins: services + rate cards
-                p.ServiceOfferings.Clear();
-                foreach (var s in services)
                 {
-                    var currency = (s.Currency ?? "KES").Trim().ToUpperInvariant();
-                    if (currency.Length > 10) currency = currency.Substring(0, 10);
-                    if (string.IsNullOrWhiteSpace(currency)) currency = "KES";
+                    p.PracticeAreas.Add(new LawyerPracticeArea
+                    {
+                        PracticeAreaId = pid
+                    });
+                }
+
+                // ✅ Replace service offerings (FIXED: sets FK + safe Currency)
+                p.ServiceOfferings.Clear();
+                foreach (var o in offerings)
+                {
+                    var currency = string.IsNullOrWhiteSpace(o.Currency) ? "KES" : o.Currency.Trim();
 
                     p.ServiceOfferings.Add(new LawyerServiceOffering
                     {
-                        LawyerServiceId = s.LawyerServiceId,
+                        // ✅ IMPORTANT: ensures LawyerProfileId is set for composite key
+                        LawyerProfile = p,
+
+                        LawyerServiceId = o.LawyerServiceId,
                         Currency = currency,
-                        MinFee = s.MinFee,
-                        MaxFee = s.MaxFee,
-                        Unit = s.Unit,
-                        Notes = string.IsNullOrWhiteSpace(s.Notes) ? null : s.Notes.Trim(),
-                        CreatedAt = now
+
+                        MinFee = o.MinFee,
+                        MaxFee = o.MaxFee,
+
+                        Unit = o.Unit,
+                        BillingUnit = string.IsNullOrWhiteSpace(o.BillingUnit) ? null : o.BillingUnit.Trim(),
+                        Notes = string.IsNullOrWhiteSpace(o.Notes) ? null : o.Notes.Trim(),
+
+                        UpdatedAt = now
                     });
                 }
 

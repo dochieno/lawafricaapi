@@ -78,7 +78,7 @@ namespace LawAfrica.API.Controllers
                     ProfileImageUrl = x.User?.ProfileImageUrl,
 
                     // ✅ NEW (add these properties in LawyerDetailDto)
-                    ServiceOfferings = x.ServiceOfferings
+                        ServiceOfferings = x.ServiceOfferings
                         .OrderBy(s => s.LawyerService.Name)
                         .Select(s => new LawyerServiceOfferingDto
                         {
