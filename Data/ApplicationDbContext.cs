@@ -145,6 +145,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<LawyerInquiry> LawyerInquiries => Set<LawyerInquiry>();
     public DbSet<LawyerService> LawyerServices => Set<LawyerService>();
     public DbSet<LawyerServiceOffering> LawyerServiceOfferings => Set<LawyerServiceOffering>();
+    public DbSet<LawyerProfileDocument> LawyerProfileDocuments => Set<LawyerProfileDocument>();
 
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -336,6 +337,23 @@ public class ApplicationDbContext : DbContext
                 .OnDelete(DeleteBehavior.SetNull);
                 b.HasIndex(x => x.CourtId);
 
+        });
+
+        modelBuilder.Entity<LawyerProfileDocument>(b =>
+        {
+            b.ToTable("LawyerProfileDocuments");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Type).HasConversion<short>();
+            b.Property(x => x.FileName).HasMaxLength(180).IsRequired();
+            b.Property(x => x.ContentType).HasMaxLength(120).IsRequired();
+            b.Property(x => x.UrlPath).HasMaxLength(320).IsRequired();
+
+            b.HasIndex(x => new { x.LawyerProfileId, x.Type });
+            b.HasOne(x => x.LawyerProfile)
+                .WithMany() // (or add navigation LawyerProfile.Documents)
+                .HasForeignKey(x => x.LawyerProfileId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<Court>(b =>
