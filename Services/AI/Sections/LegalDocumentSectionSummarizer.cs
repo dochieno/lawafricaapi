@@ -11,6 +11,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using LawAfrica.API.Data;
+using LawAfrica.API.Models;
 using LawAfrica.API.Models.Ai.Sections;
 using LawAfrica.API.Models.DTOs.Ai.Sections;
 using Microsoft.EntityFrameworkCore;
@@ -31,10 +32,13 @@ namespace LawAfrica.API.Services.Ai.Sections
         // Basic quota (assumption for now)
         private const int DAILY_REQUEST_LIMIT = 30;
 
+        // Gazette special handling
+        private const int GAZETTE_EXTENDED_MAX_SPAN_PAGES = 100; // inclusive span
+
         // Hard safety clamps (tune later)
         private const int DEFAULT_MAX_PDF_PAGES_FALLBACK = 5000;
         private const int BASIC_MAX_SPAN_PAGES = 6;      // inclusive span
-        private const int EXTENDED_MAX_SPAN_PAGES = 12;  // inclusive span
+        private const int EXTENDED_MAX_SPAN_PAGES = 12;  // inclusive span (non-gazette)
 
         public LegalDocumentSectionSummarizer(
             ApplicationDbContext db,
@@ -99,14 +103,39 @@ namespace LawAfrica.API.Services.Ai.Sections
                 }
             }
 
+            // Read minimal doc meta for category decisions
+            var docMeta = await _db.LegalDocuments
+                .AsNoTracking()
+                .Where(d => d.Id == request.LegalDocumentId)
+                .Select(d => new { d.Id, d.Category })
+                .FirstOrDefaultAsync(ct);
+
+            if (docMeta == null)
+                throw new InvalidOperationException("Legal document not found.");
+
+            var isGazette = docMeta.Category == LegalDocumentCategory.Gazette;
+
+            // Gazette: allow extended up to 100 pages
+            int? maxSpanOverride = null;
+            if (isGazette && string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase))
+            {
+                maxSpanOverride = GAZETTE_EXTENDED_MAX_SPAN_PAGES;
+            }
+
             // Normalize and clamp final page range (backend is authority)
             var (startPage, endPage, clampWarnings) = NormalizeAndClampRange(
                 requestedStart,
                 requestedEnd,
                 type,
-                GetMaxPdfPagesFallback());
+                GetMaxPdfPagesFallback(),
+                maxSpanOverride);
 
             warnings.AddRange(clampWarnings);
+
+            if (maxSpanOverride.HasValue && maxSpanOverride.Value > 0)
+            {
+                warnings.Add($"Gazette extended mode: max page span set to {maxSpanOverride.Value} pages.");
+            }
 
             // For response: echo what client asked (nullable)
             var responseRequestedStart = rawRequestedStart;
@@ -135,12 +164,16 @@ namespace LawAfrica.API.Services.Ai.Sections
             // 2) Build effective text (truncate) — this is what we hash & send to OpenAI
             var effectiveText = (extraction.Text ?? string.Empty).Trim();
 
-            var maxInputChars = GetInt(
-                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
-                    ? "AI_SECTION_MAX_INPUT_CHARS_EXTENDED"
-                    : "AI_SECTION_MAX_INPUT_CHARS_BASIC",
-                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase) ? 24000 : 12000
-            );
+            // Gazette extended needs a larger input cap to actually cover big spans.
+            var maxInputChars =
+                (isGazette && string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase))
+                    ? GetInt("AI_SECTION_MAX_INPUT_CHARS_GAZETTE_EXTENDED", 160000)
+                    : GetInt(
+                        string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
+                            ? "AI_SECTION_MAX_INPUT_CHARS_EXTENDED"
+                            : "AI_SECTION_MAX_INPUT_CHARS_BASIC",
+                        string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase) ? 24000 : 12000
+                    );
 
             if (effectiveText.Length > maxInputChars)
             {
@@ -211,6 +244,15 @@ namespace LawAfrica.API.Services.Ai.Sections
                 };
             }
 
+            // Gazette appointments hint (best-effort)
+            var looksLikeAppointments = false;
+            if (isGazette && string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase))
+            {
+                looksLikeAppointments = LooksLikeAppointments(effectiveText);
+                if (looksLikeAppointments)
+                    warnings.Add("Gazette appointments detected (best-effort): summary will include an APPOINTMENTS section if explicitly stated.");
+            }
+
             // 3) Cache lookup by (OwnerKey + type + promptVersion + contentHash) (NOT per-user)
             if (!request.ForceRegenerate)
             {
@@ -264,18 +306,22 @@ namespace LawAfrica.API.Services.Ai.Sections
             await EnforceAndIncrementQuotaAsync(userId, ct);
 
             // 5) OpenAI call
-            var maxOutputTokens = GetInt(
-                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
-                    ? "AI_SECTION_MAX_OUTPUT_TOKENS_EXTENDED"
-                    : "AI_SECTION_MAX_OUTPUT_TOKENS_BASIC",
-                string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase) ? 700 : 350
-            );
+            var maxOutputTokens =
+                (isGazette && string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase))
+                    ? GetInt("AI_SECTION_MAX_OUTPUT_TOKENS_GAZETTE_EXTENDED", 1400)
+                    : GetInt(
+                        string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
+                            ? "AI_SECTION_MAX_OUTPUT_TOKENS_EXTENDED"
+                            : "AI_SECTION_MAX_OUTPUT_TOKENS_BASIC",
+                        string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase) ? 700 : 350
+                    );
 
-            var system = BuildSystemPrompt(type);
+            var system = BuildSystemPrompt(type, isGazette, looksLikeAppointments);
 
             // Light metadata header (helps keep the model grounded)
             var header =
                 $"Document #{request.LegalDocumentId}\n" +
+                $"Category: {docMeta.Category}\n" +
                 $"ToC: {(tocId.HasValue ? tocId.Value.ToString() : "—")}\n" +
                 $"Pages: {startPage}-{endPage}\n" +
                 (!string.IsNullOrWhiteSpace(request.SectionTitle) ? $"Title: {request.SectionTitle}\n" : "");
@@ -314,7 +360,6 @@ namespace LawAfrica.API.Services.Ai.Sections
             string? modelUsed = null;
             try
             {
-                // Some SDKs expose completion.Model, others don't.
                 var modelProp = completion?.GetType().GetProperty("Model");
                 modelUsed = modelProp?.GetValue(completion)?.ToString();
             }
@@ -409,7 +454,8 @@ namespace LawAfrica.API.Services.Ai.Sections
             int? requestedStart,
             int? requestedEnd,
             string type,
-            int maxPdfPages)
+            int maxPdfPages,
+            int? maxSpanOverride = null)
         {
             var warnings = new List<string>();
 
@@ -455,9 +501,13 @@ namespace LawAfrica.API.Services.Ai.Sections
                 warnings.Add("After clamping, EndPage fell below StartPage; EndPage set to StartPage.");
             }
 
-            var maxSpan = string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
+            var defaultMaxSpan = string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase)
                 ? EXTENDED_MAX_SPAN_PAGES
                 : BASIC_MAX_SPAN_PAGES;
+
+            var maxSpan = (maxSpanOverride.HasValue && maxSpanOverride.Value > 0)
+                ? maxSpanOverride.Value
+                : defaultMaxSpan;
 
             var span = end - start + 1;
             if (span > maxSpan)
@@ -526,11 +576,41 @@ namespace LawAfrica.API.Services.Ai.Sections
 
         /// <summary>
         /// Builds the system prompt for "basic" vs "extended" output format.
+        /// Gazette extended has a larger, more structured output, and can include APPOINTMENTS when detected.
         /// </summary>
-        private static string BuildSystemPrompt(string type)
+        private static string BuildSystemPrompt(string type, bool isGazette, bool looksLikeAppointments)
         {
             if (string.Equals(type, "extended", StringComparison.OrdinalIgnoreCase))
             {
+                if (isGazette)
+                {
+                    var appointmentsBlock = looksLikeAppointments
+                        ? @"
+
+APPOINTMENTS:
+- If the section contains appointments, list each appointment on its own line in this format:
+  PERSON — ROLE/OFFICE — ORGANIZATION/DEPARTMENT (if stated) — EFFECTIVE DATE (if stated) — NOTICE/REFERENCE (if stated)
+- Only include an appointment if the PERSON and ROLE/OFFICE are explicitly stated.
+- If appointments are referenced but details are missing, write: ""Not stated in the section.""
+"
+                        : "";
+
+                    return
+$@"You are a legal summarization assistant specialized in Gazette notices.
+You MUST summarize ONLY the text provided by the user. Do not add outside facts or citations.
+If something is not clearly stated, write: ""Not stated in the section.""
+
+Return the summary in this structure:
+
+OVERVIEW: 4–8 sentences
+KEY NOTICES: 8–16 bullet points (group similar items)
+KEY DATES / EFFECTIVE DATES: bullet points (only if stated)
+REFERENCES: bullet points of Acts, Legal Notices, Gazette Notice numbers, or citations (only if stated){appointmentsBlock}
+PRACTICAL TAKEAWAYS: 4–8 bullet points
+
+Be concise, structured, and faithful to the text.";
+                }
+
                 return
 @"You are a legal summarization assistant.
 You MUST summarize ONLY the text provided by the user. Do not add outside facts or citations.
@@ -662,8 +742,7 @@ Output:
             }
             else
             {
-                // Keep original CreatedByUserId as "first creator" audit, or update it—your choice.
-                // Here we keep it stable and only update content fields.
+                // Keep original CreatedByUserId as "first creator" audit.
                 existing.Summary = summary;
                 existing.SectionTitle = sectionTitle ?? existing.SectionTitle;
 
@@ -677,6 +756,38 @@ Output:
             }
 
             await _db.SaveChangesAsync(ct);
+        }
+
+        /// <summary>
+        /// Best-effort signal for Gazette appointment-style content to request APPOINTMENTS output.
+        /// This is heuristic and intentionally conservative.
+        /// </summary>
+        private static bool LooksLikeAppointments(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+
+            var s = text.ToLowerInvariant();
+
+            // Keywords common in appointment / nomination / designation notices
+            var hits =
+                CountContains(s, "appoint") +
+                CountContains(s, "appointment") +
+                CountContains(s, "hereby") +
+                CountContains(s, "designat") +
+                CountContains(s, "nominate") +
+                CountContains(s, "re-appoint") +
+                CountContains(s, "reappoint");
+
+            // Also a common phrase structure: "is appointed" / "has been appointed"
+            if (s.Contains("is appointed") || s.Contains("has been appointed") || s.Contains("are appointed"))
+                hits += 2;
+
+            return hits >= 2;
+        }
+
+        private static int CountContains(string s, string needle)
+        {
+            return s.Contains(needle) ? 1 : 0;
         }
     }
 }
