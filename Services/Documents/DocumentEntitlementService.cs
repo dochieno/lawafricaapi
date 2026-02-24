@@ -206,7 +206,10 @@ namespace LawAfrica.API.Services.Documents
                     productIds.Contains(s.ContentProductId) &&
                     s.Status == SubscriptionStatus.Active &&
                     s.StartDate <= nowUtc &&
-                    s.EndDate >= graceCutoff, ct);
+                    s.EndDate >= nowUtc, ct);
+
+            //commented here:
+           // s.endDate>=graceCutoff,ct);
 
             if (hasUserSubscription)
             {

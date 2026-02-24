@@ -595,6 +595,28 @@ namespace LawAfrica.API.Controllers
         }
 
         // ======================================================
+        // ADMIN: reconcile expiry windows (Run now)
+        // POST /api/subscriptions/admin/reconcile-expiry
+        // ======================================================
+        [Authorize(Roles = "Admin")]
+        [HttpPost("admin/reconcile-expiry")]
+        public async Task<IActionResult> AdminReconcileExpiry(
+            [FromServices] ISubscriptionReconciler reconciler,
+            CancellationToken ct)
+        {
+            EnsureGlobalAdmin();
+
+            var res = await reconciler.ReconcileAsync(ct);
+
+            return Ok(new
+            {
+                message = "Reconcile completed.",
+                nowUtc = res.NowUtc,
+                expiredCount = res.ExpiredCount
+            });
+        }
+
+        // ======================================================
         // ADMIN: unsuspend a user subscription (Global Admin)
         // POST /api/subscriptions/admin/{id}/unsuspend
         // Body: { "notes": "optional" }

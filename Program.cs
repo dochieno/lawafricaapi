@@ -112,6 +112,8 @@ builder.Services.AddScoped<PaymentHealingService>();
 builder.Services.Configure<LawAfrica.API.Models.Payments.PaymentHealingSchedulerOptions>(builder.Configuration.GetSection("PaymentHealingScheduler"));
 builder.Services.AddHostedService<LawAfrica.API.Services.Payments.PaymentHealingHostedService>();
 builder.Services.AddScoped<LawAfrica.API.Services.Payments.AdminPaymentsKpiService>();
+builder.Services.AddSingleton<ISubscriptionReconciler, SubscriptionExpiryReconciler>();
+builder.Services.AddHostedService(sp => (SubscriptionExpiryReconciler)sp.GetRequiredService<ISubscriptionReconciler>());
 
 // Numbering
 builder.Services.AddScoped<InstitutionAccessCodeGenerator>();
